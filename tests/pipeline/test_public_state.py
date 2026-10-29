@@ -577,6 +577,12 @@ def test_sanitize_odds_and_ends():
     assert san["players"][0]["deck"] == [CID["Zap"], 3, 0, 2, 4, 5, 6, 8]
     assert san["players"][1]["deck"] == [2, CID["Zap"], 3, 0, 4, 5, 6, 8]
     assert san["sanitized"]["padded"] == {0: 8, 1: 7}
+    # reset refuses a king at 0, so a misread king goes to 1; a princess at 0 stays destroyed
+    down = state_dict(10, towers=False,
+                      players=[player_dict(0, deck=HOG, tower_hp=(0, 0, 3052)),
+                               player_dict(1, deck=HOG, tower_hp=(-7, 3052, 9999))])
+    san = PS.sanitize_for_rebuild(down, SPAWN_TABLE, fields=FIELD)
+    assert [p["tower_hp"] for p in san["players"]] == [[1, 0, 3052], [1, 3052, 3052]]
 
 
 @pytest.mark.parametrize("point, own_high, want", [

@@ -155,8 +155,10 @@ UNKNOWN_MAX_HP = 1000
 #: placement, elixir, ...: rs_elixir.CATALOGUE_PREFIX).
 CATALOGUE_ELIXIR = rs_elixir.CATALOGUE_PREFIX.index("elixir")
 #: sanitize_for_rebuild: how far a ground unit's centre is kept from river water, and from the
-#: arena's outer edge, in millitiles (half a tile; vision-02 open question: whether the core
-#: refuses a ground spawn touching water is settled by the engine-marked test on the PC).
+#: arena's outer edge, in millitiles. Half a tile is one arena half-cell: royalegym's reset rule
+#: (protocol.spawn_violation, stated after the Rust core's) refuses a non-flying spawn whose
+#: centre touches a water half-cell, the bank line included, so a centre one half-cell away is
+#: on land; the engine-marked test confirms it on the PC.
 WATER_MARGIN_MT = 500.0
 EDGE_MARGIN_MT = 500.0
 UNKNOWN_TEAM_POLICIES = ("half", "drop")
@@ -720,7 +722,8 @@ def sanitize_for_rebuild(state: Mapping[str, Any], spawn_table: Mapping[str, Any
     becomes 8 distinct cards: repeats and negatives dropped, cut to 8, padded from `filler`
     (ids or names; default rs_spawn_table.FILLER_NAMES, Hog 2.6, then the spawnable cards by
     id) - the opponent's padding never plays in a look-ahead. Elixir is clamped to
-    [0, 10000], tower hp to [0, max], the tick to >= 0. The input is not changed; the copy
+    [0, 10000], tower hp to [0, max] (a king to at least 1: reset refuses a king at 0, so a
+    misread king would cost the decision), the tick to >= 0. The input is not changed; the copy
     carries "sanitized": {"dropped": {reason: n}, "into_arena", "off_water", "hp_capped",
     "padded": {team: cards added}}. Live, give rebuilt (ahead with lead_rebuild) this copy;
     obs_row may read either (positions move by at most the margins).
@@ -793,8 +796,11 @@ def sanitize_for_rebuild(state: Mapping[str, Any], spawn_table: Mapping[str, Any
             p["elixir_milli"] = min(ELIXIR_MAX_MILLI, max(0, int(p["elixir_milli"] or 0)))
         if "tower_hp" in p:
             mx = list(p.get("tower_max_hp") or [])
-            p["tower_hp"] = [max(0, min(int(h or 0), int(mx[k]))) if k < len(mx) and mx[k]
-                             else max(0, int(h or 0)) for k, h in enumerate(p["tower_hp"])]
+            hp = [max(0, min(int(h or 0), int(mx[k]))) if k < len(mx) and mx[k]
+                  else max(0, int(h or 0)) for k, h in enumerate(p["tower_hp"])]
+            if hp and hp[0] < 1:
+                hp[0] = 1           # reset refuses a king at 0 (a princess at 0 starts destroyed)
+            p["tower_hp"] = hp
     out["tick"] = max(0, int(out.get("tick") or 0))
     report["dropped"] = dict(sorted(dropped.items()))
     out["sanitized"] = report
