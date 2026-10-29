@@ -17,6 +17,7 @@ Hardware: Windows 11 PC with MuMu Player, an RTX 4070 Super (12 GB), 16 GB RAM a
 | Screen | 1080x1920 at 480 DPI (what the code assumes) |
 | Clash Royale `versionCode` | `160635001` |
 | Friendly-battle card levels | all cards at **level 11** (confirmed by the owner), so training, RL and evaluation use level 11 for both sides |
+| Bot deck | Hog 2.6, **all base cards: no evolutions or heroes** on the bot account. Tower troop: **Tower Princess** (both sides in the first recorded friendly). |
 | Bot account | the owner's **second account** ("Yodle2"), which owns the full Hog 2.6 deck. The owner accepts the ToS/ban risk on it. A brand-new account was ruled out because it would not own The Log and the other deck cards. |
 
 The game build is newer than:
