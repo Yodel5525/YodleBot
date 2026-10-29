@@ -16,6 +16,8 @@ Hardware: Windows 11 PC with MuMu Player, an RTX 4070 Super (12 GB), 16 GB RAM a
 | adb serial | `127.0.0.1:16384` |
 | Screen | 1080x1920 at 480 DPI (what the code assumes) |
 | Clash Royale `versionCode` | `160635001` |
+| Friendly-battle card levels | all cards at **level 11** (confirmed by the owner), so training, RL and evaluation use level 11 for both sides |
+| Bot account | a separate account created for testing, not the owner's main or second account |
 
 The game build is newer than:
 - the original author's build, `160402012`;
