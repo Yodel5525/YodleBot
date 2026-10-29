@@ -134,6 +134,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V05: screen-to-simulator state converter.
 - V06: shared decision function.
 - V10: `scripts/vision_play.py`, the friendly-only live runner.
+- V12: takeover toggle. Press F8, click the control-window button, or create a `MANUAL` file to take control mid-match; do the same again to hand back. While you play, the bot keeps watching and shows what it would do.
 - V11: latency probe and noise fitting.
 - L02: general match runner.
 - L03: league evaluation and promotion gate.
