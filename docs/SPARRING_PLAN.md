@@ -33,6 +33,9 @@ Done on the PC so far:
   - card level and tower level are both 11;
   - there are **237 unit types**, not the 335 assumed in the plan. Tests must not hard-code unit-type counts.
 - PyTorch's `cu128` index only has torch up to 2.11.0. `.venvs\buildabot` now runs `torch==2.14.1+cu130` and `torchvision==0.29.1+cu130`, installed from `https://download.pytorch.org/whl/cu130`. Verified: CUDA 13.0 is available, the device is the RTX 4070 SUPER, and bf16 is supported. **GPU pins: torch 2.14.1, torchvision 0.29.1, index cu130.**
+- Both venvs are fully installed and verified:
+  - royalegym: torch 2.14.1+cpu, royalesim 0.1.42, numpy 2.5.4, pyarrow 26.0.0, pytest 9.2.0.
+  - buildabot: torch 2.14.1+cu130, torchvision 0.29.1+cu130, royalesim 0.1.42, pyarrow 26.0.0, scipy 1.18.1, opencv-python 5.0.0.93, ultralytics 8.4.192, pytest 9.2.0. CUDA still works after ultralytics was installed.
 
 This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run on the PC. Status of each code batch is at the bottom.
 
