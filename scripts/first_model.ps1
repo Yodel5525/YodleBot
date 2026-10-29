@@ -19,6 +19,10 @@
 .PARAMETER Others
     Non-Hog matches added to the rows (default 20000, as the author used).
 
+.PARAMETER MaxRows
+    Train on a uniform sample of at most this many rows (default 0 = all). Use it if
+    training runs out of memory, e.g. -From general -MaxRows 4000000.
+
 .PARAMETER From
     Start at a later step, skipping the earlier ones: rows, general, hog or eval.
     Example: -From hog re-runs the fine-tune and the evaluations only.
@@ -26,6 +30,7 @@
 param(
     [int]$Workers = 8,
     [int]$Others = 20000,
+    [long]$MaxRows = 0,
     [ValidateSet('rows', 'general', 'hog', 'eval')][string]$From = 'rows'
 )
 
@@ -72,7 +77,8 @@ function Invoke-Step([string]$Name, [string]$Python, [string[]]$ArgList) {
 $order = @('rows', 'general', 'hog', 'eval')
 $start = [array]::IndexOf($order, $From)
 $model = @('--wait-keep', '0.25', '--epochs', '3', '--d', '256', '--layers', '6', '--heads', '8')
-Write-Both ("first_model.ps1: from '{0}', workers {1}, others {2}. Log: {3}" -f $From, $Workers, $Others, $log) 'Cyan'
+if ($MaxRows -gt 0) { $model += @('--max-rows', "$MaxRows") }
+Write-Both ("first_model.ps1: from '{0}', workers {1}, others {2}, max rows {3}. Log: {4}" -f $From, $Workers, $Others, $(if ($MaxRows -gt 0) { $MaxRows } else { 'all' }), $log) 'Cyan'
 
 if ($start -le 0) {
     Invoke-Step 'rows' $RG (@('tools\rs_rows.py', '--live-compat', '--others', "$Others",
