@@ -4,6 +4,25 @@ Goal: the strongest practical Clash Royale bot for **friendly battles** against 
 
 Hardware: Windows 11 PC with MuMu Player, an RTX 4070 Super (12 GB), 16 GB RAM and 500 GB disk.
 
+## This PC (measured 2026-10-29)
+
+| Item | Value |
+|---|---|
+| CPU | Intel i7-14700F: 20 cores, 28 threads |
+| RAM / GPU / disk | 16 GB / RTX 4070 Super 12 GB / 500 GB |
+| MuMu | instance 0, "Android Device", Android 15 |
+| MuMu instance resources | 1 core, 1 GB. Raise to 2-4 cores and 3 GB before live play. |
+| adb | `C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe` |
+| adb serial | `127.0.0.1:16384` |
+| Screen | 1080x1920 at 480 DPI (what the code assumes) |
+| Clash Royale `versionCode` | `160635001` |
+
+The game build is newer than:
+- the original author's build, `160402012`;
+- RoyaleSim 0.1.42's newest card table, `client160402017_20261019`.
+
+So any balance changes in this update are not yet in the simulator. Phase 2 measures whether that matters for Hog 2.6. If the update changed our deck's cards, we will build an updated card table.
+
 This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run on the PC. Status of each code batch is at the bottom.
 
 ## Decisions
