@@ -6,7 +6,9 @@ These tests need no torch, royalesim or device:
 - installed versions come from a fake installed_version().
 
 Machine settings go through the real hastycr.machine, using environment variables
-and a temporary machine.json.
+and a temporary machine.json. The engine settings go through the real tools/rs_engine.py
+and data/engine.json, the card map through the real tools/rs_cards.py and data/cards/.
+The class list and the spawn table are temporary files.
 """
 from __future__ import annotations
 
@@ -27,7 +29,10 @@ SELFCHECK = ROOT / "scripts" / "selfcheck.py"
 SERIAL = "127.0.0.1:16384"
 PACKAGE = "com.supercell.clashroyale"
 ALL_CHECKS = {"python", "friendly", "machine", "role", "torch", "packages", "royalesim",
-              "hastycr", "adb", "screen", "density", "game", "emulator"}
+              "cards", "data", "hastycr", "adb", "screen", "density", "game", "emulator"}
+CATALOGUE = ("Cannon", "Fireball", "HogRider", "IceGolemite", "IceSpirits", "Musketeer",
+             "Skeletons", "Log")
+VENDORED_SHA256 = "aeca8fdf8eebafadbe3b1f4dba6eebb6132715e935bfe1db63f5968670c039ee"
 
 DUMPSYS = (
     "Activity Resolver Table:\n"
@@ -108,41 +113,98 @@ def make_torch(version="2.14.1+cu130", cuda="13.0", available=True, bf16=True,
     return torch
 
 
-def make_royalesim(version="0.1.42", broken=False):
+def reported_table(arm):
+    """What Battle.card_table() reports for a cards.CARD_TABLE arm, as rs_engine.KNOWN_TABLES
+    lists it ("client160402017_20261019" -> "cards-160402017-20261019.1"); None, the
+    engine's own table, is cards-15535.1."""
+    if arm is None:
+        return "cards-15535.1"
+    return "cards-" + arm[len("client"):].replace("_", "-") + ".1"
+
+
+def make_royalesim(version="0.1.42", broken=False, table=None, reports_table=True, level=None):
+    """A royalesim stub whose Battle answers from how it was built, as 0.1.42 does: the
+    cards.CARD_TABLE override picks card_table() (none: cards-15535.1), the level arguments
+    card_level() and tower_level() (none: 11). `table` and `level` force what it reports;
+    reports_table=False is an engine before 0.1.42, without card_table(). Every Battle
+    built is in rs.built."""
     rs = types.ModuleType("royalesim")
     rs.__version__ = version
+    rs.built = []
 
     class Battle:
         def __init__(self, card_names=None, slot_of_k=None, **kwargs):
             if broken:
                 raise RuntimeError("engine exploded")
             self.slot_of_k = slot_of_k
+            self.kwargs = {"card_names": card_names, "slot_of_k": slot_of_k, **kwargs}
+            self.delay = None
+            arm = (kwargs.get("calibration_overrides") or {}).get("cards.CARD_TABLE")
+            self._table = table or reported_table(None if arm is None else json.loads(arm))
+            self._level = level or kwargs.get("level") or 11
+            self._tower_level = kwargs.get("tower_level") or 11
+            rs.built.append(self)
+
+        def set_command_delay_ticks(self, blue, red):
+            self.delay = (blue, red)
 
         def card_table(self):
-            return "cards-15535.1"
+            return self._table
 
         def card_table_fnv1a64(self):
             return 0x1234
 
         def card_level(self):
-            return 11
+            return self._level
 
         def tower_level(self):
-            return 11
+            return self._tower_level
 
         def unit_types_json(self):
             return json.dumps([{"id": i} for i in range(237)])
 
-    rs.Battle = Battle
+        def catalogue_json(self):
+            return json.dumps([[name, i] for i, name in enumerate(CATALOGUE)])
+
+    class OldBattle(Battle):
+        card_table = None
+        card_table_fnv1a64 = None
+
+    rs.Battle = Battle if reports_table else OldBattle
     rs.provenance = lambda: ("commit", "tree")
     return rs
+
+
+def configured_arm(sc):
+    """data/engine.json's card table as a cards.CARD_TABLE arm (None: the engine's own)."""
+    rs_engine = sc._tool("rs_engine")
+    raw = json.loads((ROOT / "data" / "engine.json").read_text(encoding="utf-8-sig"))
+    return rs_engine.table_name(raw.get("card_table", rs_engine.BUILTIN["card_table"]))
+
+
+def engine_id(sc, rs):
+    """The fingerprint id of the Battle selfcheck builds under data/engine.json with `rs`."""
+    rs_engine = sc._tool("rs_engine")
+    cfg = rs_engine.EngineConfig.load()
+    return rs_engine.fingerprint(rs_engine.make_battle(cfg, rs), rs, cfg)["id"]
+
+
+def spawn_table_doc(sc, made_under):
+    """A small spawn_primary.json in rs_spawn_table's layout, made under engine `made_under`."""
+    return {"format": sc._tool("rs_spawn_table").FORMAT, "primary": {"2": 5}, "all": {"2": [5]},
+            "hp": {}, "unresolved": {}, "fingerprint": {"id": made_under}}
 
 
 @pytest.fixture
 def world(sc, monkeypatch, tmp_path):
     """A ready PC for the train role: CUDA torch, royalesim 0.1.42, every pin installed,
-    a reachable 1080x1920 device on the recorded build. Tests then break one thing."""
-    for var in machine.ENV.values():
+    data/engine.json with no engine variable set, the card map with its extras, the class
+    list and a current spawn table, a reachable 1080x1920 device on the recorded build.
+    Tests then break one thing."""
+    monkeypatch.setattr(sys, "path", list(sys.path))        # _tool() puts tools/ on it
+    rs_engine, rs_cards = sc._tool("rs_engine"), sc._tool("rs_cards")
+    for var in [*machine.ENV.values(), *rs_engine.ENV.values(), rs_engine.CONFIG_ENV,
+                rs_cards.EXTRAS_ENV]:
         monkeypatch.delenv(var, raising=False)
     adb_exe = tmp_path / "adb.exe"
     adb_exe.write_text("", encoding="utf-8")
@@ -159,7 +221,17 @@ def world(sc, monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "installed_version", lambda name: versions.get(sc.normalize(name)))
 
     monkeypatch.setitem(sys.modules, "torch", make_torch())
-    monkeypatch.setitem(sys.modules, "royalesim", make_royalesim())
+    rs = make_royalesim()
+    monkeypatch.setitem(sys.modules, "royalesim", rs)
+    made_under = engine_id(sc, rs)
+    classes = tmp_path / "classes.json"
+    classes.write_text(json.dumps({"schema": 1, "classes": [{"id": 0, "name": "HogRider"},
+                                                            {"id": 1, "name": "Skeleton"}]}),
+                       encoding="utf-8")
+    spawn_table = tmp_path / "spawn_primary.json"
+    spawn_table.write_text(json.dumps(spawn_table_doc(sc, made_under)), encoding="utf-8")
+    monkeypatch.setattr(sc, "CLASSES_JSON", classes)
+    monkeypatch.setattr(sc, "SPAWN_TABLE", spawn_table)
     monkeypatch.setattr(sc, "cuda_smoke", lambda torch: None)
     monkeypatch.setattr(sc, "check_python",
                         lambda version_info=None: sc.Check("python", sc.PASS, "3.12 (test)"))
@@ -168,7 +240,8 @@ def world(sc, monkeypatch, tmp_path):
     adb = FakeAdb()
     monkeypatch.setattr(subprocess, "run", adb)
     return types.SimpleNamespace(adb=adb, versions=versions, adb_exe=adb_exe, config=config,
-                                 verified=verified)
+                                 verified=verified, engine_id=made_under, classes=classes,
+                                 spawn_table=spawn_table)
 
 
 def run(sc, capsys, *argv):
@@ -192,10 +265,18 @@ def test_ready_pc_passes_every_check_and_exits_0(sc, world, capsys):
     assert code == 0, statuses(checks)
     assert set(checks) == ALL_CHECKS
     assert {n for n, s in statuses(checks).items() if s not in ("PASS", "INFO")} == set()
-    assert checks["royalesim"]["data"]["card_table"] == "cards-15535.1"
-    assert checks["royalesim"]["data"]["card_level"] == 11
-    assert checks["royalesim"]["data"]["tower_level"] == 11
-    assert checks["royalesim"]["data"]["unit_types"] == 237
+    royal = checks["royalesim"]["data"]
+    assert royal["card_table"] == reported_table(configured_arm(sc))
+    assert royal["card_table_fnv1a64"] == "0000000000001234"
+    assert royal["card_level"] == 11
+    assert royal["tower_level"] == 11
+    assert royal["unit_types"] == 237
+    assert royal["fingerprint"]["card_table"] == royal["card_table"]
+    assert royal["fingerprint"]["catalogue"] == len(CATALOGUE)
+    assert royal["fingerprint"]["id"] == world.engine_id
+    assert royal["sources"]["card_table"] == "data/engine.json"
+    assert checks["cards"]["data"]["entries"] == 122
+    assert checks["data"]["data"]["spawn_table"]["current"] is True
     assert checks["game"]["data"]["version_code"] == 160635001
     assert checks["game"]["data"]["version_name"] == "16.635.1"
     assert checks["torch"]["data"]["bf16"] is True
@@ -332,6 +413,177 @@ def test_royalesim_problems_fail(sc, world, monkeypatch, capsys, module, needle)
     assert code == 1
     assert checks["royalesim"]["status"] == "FAIL"
     assert needle in checks["royalesim"]["detail"]
+
+
+def test_royalesim_builds_the_battle_through_rs_engine(sc, world, capsys):
+    rs_engine = sc._tool("rs_engine")
+    cfg = rs_engine.EngineConfig.load()
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 0, statuses(checks)
+    battle = sys.modules["royalesim"].built[-1]
+    assert battle.kwargs == cfg.constructor_kwargs()
+    overrides = battle.kwargs["calibration_overrides"]
+    assert overrides["cards.CARD_TABLE"] == json.dumps(configured_arm(sc))
+    assert battle.delay == cfg.delay                 # set before any reset, by make_battle
+    royal = checks["royalesim"]
+    assert royal["status"] == "PASS"
+    assert royal["data"]["engine_config"] == cfg.to_json()
+    fp = royal["data"]["fingerprint"]
+    assert fp["id"] == rs_engine.fingerprint_id(fp)
+    assert fp["provenance"] == ["commit", "tree"]
+    assert f"card table {reported_table(configured_arm(sc))} (configured {configured_arm(sc)})" \
+        in royal["detail"]
+    assert f"fingerprint {fp['id']}" in royal["detail"]
+
+
+@pytest.mark.parametrize("module, needle", [
+    (make_royalesim(table="cards-99999.1"), "but the Battle runs cards-99999.1"),
+    (make_royalesim(reports_table=False), "does not report its card table"),
+    (make_royalesim(level=9), "but the Battle reports 9"),
+])
+def test_the_battle_must_run_the_configured_table_and_levels(sc, world, monkeypatch, capsys,
+                                                             module, needle):
+    monkeypatch.setitem(sys.modules, "royalesim", module)
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 1
+    assert checks["royalesim"]["status"] == "FAIL"
+    assert needle in checks["royalesim"]["detail"]
+
+
+def test_engine_settings_from_the_environment_warn(sc, world, monkeypatch, capsys):
+    monkeypatch.setenv("HASTYCR_CARD_TABLE", "client15535")
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 0, statuses(checks)
+    royal = checks["royalesim"]
+    assert royal["status"] == "WARN"
+    assert "card_table from HASTYCR_CARD_TABLE" in royal["detail"]
+    assert royal["data"]["card_table"] == "cards-15535.1"
+    assert royal["data"]["sources"]["card_table"] == "HASTYCR_CARD_TABLE"
+    assert checks["data"]["status"] == "WARN"             # the spawn table is another engine's
+    assert "Make it again" in checks["data"]["detail"]
+
+    monkeypatch.delenv("HASTYCR_CARD_TABLE")
+    monkeypatch.setenv("HASTYCR_ENGINE_CONFIG", "legacy")
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 0, statuses(checks)
+    assert checks["royalesim"]["status"] == "WARN"
+    assert ("card_table, level, tower_level, delay, calibration_overrides from "
+            "HASTYCR_ENGINE_CONFIG=legacy") in checks["royalesim"]["detail"]
+    battle = sys.modules["royalesim"].built[-1]
+    assert battle.kwargs == {"card_names": None, "slot_of_k": [[0, 1, 2], [0, 1, 2]]}
+    assert battle.delay is None
+
+
+@pytest.mark.parametrize("var, value, needle", [
+    ("HASTYCR_CARD_LEVEL", "99", "level: 99 is outside 1-16 (from HASTYCR_CARD_LEVEL)"),
+    ("HASTYCR_ENGINE_CONFIG", "nowhere/engine.json", "does not exist"),
+])
+def test_unreadable_engine_settings_fail(sc, world, monkeypatch, capsys, var, value, needle):
+    monkeypatch.setenv(var, value)
+    built = len(sys.modules["royalesim"].built)
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 1
+    assert checks["royalesim"]["status"] == "FAIL"
+    assert "engine settings cannot be read" in checks["royalesim"]["detail"]
+    assert needle in checks["royalesim"]["detail"]
+    assert len(sys.modules["royalesim"].built) == built      # no Battle under a bad config
+    assert checks["data"]["status"] == "PASS"                # present, not compared
+    assert "not compared" in checks["data"]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# the card map, the class list and the spawn table
+# ---------------------------------------------------------------------------
+
+def test_card_map_has_the_vendored_hash_and_the_extras(sc, world, monkeypatch):
+    check = sc.check_cards()
+    assert check.status == "PASS", check.detail
+    assert check.data["vendored"] == "data/cards/replay_cards.json"
+    assert check.data["vendored_sha256"] == VENDORED_SHA256
+    assert check.data["vendored_entries"] == 119
+    assert check.data["entries"] == 122
+    assert check.data["extras"] == ["rune-giant", "spirit-empress", "void"]
+    assert check.detail.startswith("data/cards/replay_cards.json: 119 keys at the vendored SHA-256")
+    assert "card map 122 keys (extras: rune-giant, spirit-empress, void)" in check.detail
+    monkeypatch.setenv("HASTYCR_CARD_EXTRAS", "0")
+    alone = sc.check_cards()
+    assert alone.status == "PASS"
+    assert (alone.data["entries"], alone.data["extras"]) == (119, [])
+
+
+@pytest.mark.parametrize("breakage, needle", [
+    ("hash", f"has SHA-256 {VENDORED_SHA256}, not {'0' * 64}"),
+    ("missing", "is missing"),
+    ("extras_env", "HASTYCR_CARD_EXTRAS='maybe'"),
+    ("extras_conflict", "a key maps to one name"),
+])
+def test_card_map_problems_fail(sc, world, monkeypatch, capsys, tmp_path, breakage, needle):
+    rs_cards = sc._tool("rs_cards")
+    if breakage == "hash":
+        monkeypatch.setattr(rs_cards, "VENDORED_SHA256", "0" * 64)
+    elif breakage == "missing":
+        monkeypatch.setattr(rs_cards, "VENDORED_PATH", tmp_path / "nowhere" / "replay_cards.json")
+    elif breakage == "extras_env":
+        monkeypatch.setenv("HASTYCR_CARD_EXTRAS", "maybe")
+    else:
+        extra = tmp_path / "replay_cards_extra.json"
+        extra.write_text(json.dumps({"cards": {"hog-rider": {"name": "Hog"}}}), encoding="utf-8")
+        monkeypatch.setattr(rs_cards, "EXTRA_PATH", extra)
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 1
+    assert checks["cards"]["status"] == "FAIL"
+    assert needle in checks["cards"]["detail"]
+
+
+def test_missing_data_files_warn_with_the_command_that_makes_them(sc, world, monkeypatch,
+                                                                  capsys, tmp_path):
+    monkeypatch.setattr(sc, "CLASSES_JSON", tmp_path / "none" / "classes.json")
+    monkeypatch.setattr(sc, "SPAWN_TABLE", tmp_path / "none" / "spawn_primary.json")
+    code, checks = run(sc, capsys, "--offline", "--role", "train")
+    assert code == 0, statuses(checks)
+    data = checks["data"]
+    assert data["status"] == "WARN"
+    assert f"{tmp_path / 'none' / 'classes.json'} is missing" in data["detail"]
+    assert r".venvs\royalegym\Scripts\python.exe tools\vision_classes.py --engine" in data["detail"]
+    assert f"{tmp_path / 'none' / 'spawn_primary.json'} is missing" in data["detail"]
+    assert r".venvs\royalegym\Scripts\python.exe tools\rs_spawn_table.py" in data["detail"]
+    assert data["data"] == {"classes": None, "spawn_table": None}
+    assert sc.main(["--offline", "--role", "train", "--strict"]) == 1
+    capsys.readouterr()
+
+
+def test_spawn_table_must_be_this_engines(sc, world):
+    fmt = sc._tool("rs_spawn_table").FORMAT
+    ok = sc.check_data({"id": world.engine_id})
+    assert ok.status == "PASS", ok.detail
+    assert ok.data["classes"] == {"path": str(world.classes), "classes": 2}
+    assert ok.data["spawn_table"] == {"path": str(world.spawn_table), "engine": world.engine_id,
+                                      "format": fmt, "current": True}
+    assert (f"{world.spawn_table}: 1 of 1 troop / building cards resolved, hitpoints for 0 "
+            f"cards, engine {world.engine_id}, this engine") in ok.detail
+
+    other = sc.check_data({"id": "feedfacecafebeef"})
+    assert other.status == "WARN"
+    assert (f"was made under engine {world.engine_id} (format {fmt}), but this engine is "
+            f"feedfacecafebeef (format {fmt})") in other.detail
+    assert other.data["spawn_table"]["current"] is False
+
+    unchecked = sc.check_data(None)
+    assert unchecked.status == "PASS" and "not compared" in unchecked.detail
+    assert unchecked.data["spawn_table"]["current"] is None
+
+    world.spawn_table.write_text("[1, 2]", encoding="utf-8")
+    shapeless = sc.check_data({"id": world.engine_id})
+    assert shapeless.status == "WARN" and "is not a JSON object" in shapeless.detail
+    world.classes.write_text("{not json", encoding="utf-8")
+    broken = sc.check_data(None)
+    assert broken.status == "WARN" and "is unreadable (JSONDecodeError" in broken.detail
+
+
+def test_data_paths_are_the_tools_own(sc, monkeypatch):
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    assert sc.SPAWN_TABLE == sc._tool("rs_spawn_table").DEFAULT_PATH
+    assert sc.CLASSES_JSON == sc._tool("vision_classes").CLASSES_PATH
 
 
 def test_a_missing_pin_fails_and_another_version_warns(sc, world, capsys):

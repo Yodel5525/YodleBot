@@ -21,8 +21,19 @@ Each check prints PASS, WARN, FAIL, SKIP or INFO:
              CUDA libraries.
   packages   Every pin in requirements/engine.txt (engine) or requirements/gpu.txt (train)
              is installed at that version. Missing is a FAIL; another version is a WARN.
-  royalesim  Imports at the pinned version (otherwise FAIL). Reports the default Battle's
-             card_table(), card_level(), tower_level() and number of unit types.
+  royalesim  Imports at the pinned version (otherwise FAIL). Builds a Battle the way every
+             tool does, with tools/rs_engine.make_battle under the engine settings
+             (data/engine.json: card table, levels, command delay), and reports
+             rs_engine.fingerprint: card_table(), card_level(), tower_level(), the unit types,
+             the catalogue and the fingerprint id. The Battle must run the configured card
+             table and levels (otherwise FAIL). A missing data/engine.json, or a setting taken
+             from an environment variable or another file, is a WARN.
+  cards      The IL_Replay -> RoyaleSim card map (tools/rs_cards.py): data/cards/replay_cards.json
+             has its vendored SHA-256 (read_vendored), and the extras merge into it; otherwise
+             FAIL.
+  data       data/vision/classes.json and data/rs_rows/spawn_primary.json exist, and the spawn
+             table was made under this engine (its fingerprint id). A missing, unreadable or
+             stale file is a WARN that names the command that makes it.
   hastycr    The repo is installed in this venv (pip install --no-deps -e .); otherwise WARN.
   adb        The adb from hastycr.machine (or --adb) reaches the serial (or --serial).
   screen     wm size is 1080x1920 portrait with no override. Another 9:16 portrait
@@ -71,6 +82,14 @@ DENSITY = 480                                   # what this PC runs (docs/SPARRI
 GAME_PACKAGE = "com.supercell.clashroyale"
 RECORDED_GAME_BUILD = 160635001                 # versionCode measured on the PC, 2026-10-29
 ADB_TIMEOUT = 20.0                              # seconds, per adb call
+
+TOOLS = ROOT / "tools"
+#: The data files the live runner and rs_eval read (tools/vision_classes.CLASSES_PATH and
+#: tools/rs_spawn_table.DEFAULT_PATH; a test keeps them in step), and what makes each.
+CLASSES_JSON = ROOT / "data" / "vision" / "classes.json"
+SPAWN_TABLE = ROOT / "data" / "rs_rows" / "spawn_primary.json"
+MAKE_CLASSES = r".venvs\royalegym\Scripts\python.exe tools\vision_classes.py --engine"
+MAKE_SPAWN_TABLE = r".venvs\royalegym\Scripts\python.exe tools\rs_spawn_table.py"
 
 PASS, WARN, FAIL, SKIP, INFO = "PASS", "WARN", "FAIL", "SKIP", "INFO"
 DEVICE_CHECKS = ("adb", "screen", "density", "game", "emulator")
@@ -133,7 +152,27 @@ def _import(name: str):
     return importlib.import_module(name)
 
 
-def _same_dir(a: str | Path, b: str | Path) -> bool:
+def _tool(name: str):
+    """tools/<name>.py, imported the way the tools import each other (tools/ on sys.path)."""
+    tools = str(TOOLS)
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    return _import(name)
+
+
+def _rel(path: str | Path) -> str:
+    """An absolute path under the repo as a repo path ("data/engine.json"); anything else,
+    such as an environment variable's name, unchanged."""
+    p = Path(str(path))
+    if not p.is_absolute():
+        return str(path)
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
     try:
         return os.path.samefile(a, b)
     except OSError:
@@ -195,7 +234,7 @@ def role_of_interpreter(m: machine.Machine, executable: str | None = None,
     executable = sys.executable if executable is None else executable
     prefix = sys.prefix if prefix is None else prefix
     for role, python in (("train", m.py_train), ("engine", m.py_engine)):
-        if _same_file_name(executable, python) or _same_dir(prefix, Path(python).parent.parent):
+        if _same_file_name(executable, python) or _same_path(prefix, Path(python).parent.parent):
             return role
     return None
 
@@ -323,7 +362,52 @@ def check_packages(role: str, pins: dict[str, str]) -> Check:
     return Check("packages", PASS, f"all {len(matched)} pins in {source} are installed", data)
 
 
+def engine_config_notes(rs_engine, cfg) -> list[str]:
+    """Why the engine settings may not be data/engine.json's: the file is missing, or a
+    setting comes from an environment variable (or the file HASTYCR_ENGINE_CONFIG names)."""
+    config = Path(rs_engine.CONFIG_PATH)
+    notes: list[str] = []
+    if not config.is_file():
+        notes.append(f"{_rel(config)} is missing, so the built-in defaults are used. Restore it: "
+                     f"git checkout -- {_rel(config)}")
+    moved: dict[str, list[str]] = {}
+    for name in rs_engine.FIELDS:
+        source = str(cfg.sources.get(name) or "")
+        if source == "built-in" or (config.is_file() and _same_path(source, config)):
+            continue
+        shown = f"{rs_engine.CONFIG_ENV}=legacy" if source == "legacy" else _rel(source)
+        moved.setdefault(shown, []).append(name)
+    if moved:
+        where = "; ".join(f"{', '.join(names)} from {shown}" for shown, names in moved.items())
+        notes.append(f"engine settings that do not come from {_rel(config)}: {where}. Every "
+                     "tool reads them too, so rows, checkpoints and the live bot follow them; "
+                     "unset the variable unless that is intended.")
+    return notes
+
+
+def confirm_engine(cfg, fp: dict, version: str) -> list[str]:
+    """What the Battle reports against what the settings asked for. make_battle has already
+    refused another card table; an engine that reports none cannot confirm it."""
+    problems: list[str] = []
+    if cfg.card_table is not None and fp.get("card_table") is None:
+        problems.append(f"royalesim {version} does not report its card table (card_table() came "
+                        f"in 0.1.42), so the configured {cfg.card_table} cannot be confirmed")
+    for what, want, got in (("card level", cfg.level, fp.get("card_level")),
+                            ("tower level", cfg.tower_level, fp.get("tower_level"))):
+        if want is not None and got is not None and got != want:
+            problems.append(f"the engine settings ask for {what} {want}, but the Battle "
+                            f"reports {got}")
+    return problems
+
+
+def _shown_level(value) -> str:
+    return "n/a" if value is None else str(value)
+
+
 def check_royalesim(pin: str | None) -> Check:
+    """royalesim at its pin, and a Battle built as every tool builds one (rs_engine.make_battle
+    under EngineConfig.load(): data/engine.json, then the HASTYCR_* engine variables), with
+    its rs_engine.fingerprint in data["fingerprint"]."""
     try:
         rs = _import("royalesim")
     except Exception as exc:
@@ -331,34 +415,134 @@ def check_royalesim(pin: str | None) -> Check:
                                         "Run scripts/setup_windows.ps1.")
     version = str(getattr(rs, "__version__", "?"))
     data: dict = {"version": version, "pin": pin}
-    problems = []
+    problems: list[str] = []
+    notes: list[str] = []
     if pin and base_version(version) != base_version(pin):
         problems.append(f"royalesim {version} is installed but the pin is {pin}. Rows, vocab ids "
                         "and checkpoints are tied to the engine version. Re-run "
                         "scripts/setup_windows.ps1.")
+    cfg = fp = None
     try:
-        battle = rs.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-        data["card_table"] = str(battle.card_table()) if hasattr(battle, "card_table") else None
-        if hasattr(battle, "card_table_fnv1a64"):
-            data["card_table_fnv1a64"] = battle.card_table_fnv1a64()
-        data["card_level"] = int(battle.card_level())
-        data["tower_level"] = int(battle.tower_level())
-        data["unit_types"] = len(json.loads(battle.unit_types_json()))
-    except Exception as exc:
-        problems.append(f"a default Battle could not be built or read ({type(exc).__name__}: {exc})")
-    if hasattr(rs, "provenance"):
+        rs_engine = _tool("rs_engine")
+        cfg = rs_engine.EngineConfig.load()
+    except Exception as exc:                    # a bad setting (ValueError), a missing file
+        problems.append(f"the engine settings cannot be read ({type(exc).__name__}: {exc}). "
+                        "Check data/engine.json and the HASTYCR_* engine variables "
+                        "(tools/rs_engine.py).")
+    if cfg is not None:
+        data["engine_config"] = cfg.to_json()
+        data["sources"] = {name: _rel(source) for name, source in cfg.sources.items()}
+        notes += engine_config_notes(rs_engine, cfg)
         try:
-            data["provenance"] = list(rs.provenance())
-        except Exception:
-            pass
+            battle = rs_engine.make_battle(cfg, rs)
+            fp = rs_engine.fingerprint(battle, rs, cfg)
+        except Exception as exc:                # EngineError, or the engine's own refusal
+            problems.append(f"a Battle under the engine settings ({cfg.describe()}) could not be "
+                            f"built or read ({type(exc).__name__}: {exc})")
     detail = f"royalesim {version}"
-    if "unit_types" in data:
-        detail += (f": card table {data['card_table'] or 'n/a (before 0.1.42)'}, card level "
-                   f"{data['card_level']}, tower level {data['tower_level']}, "
-                   f"{data['unit_types']} unit types")
-    if problems:
-        return Check("royalesim", FAIL, "\n".join([detail] + problems), data)
-    return Check("royalesim", PASS, detail, data)
+    if fp is not None:
+        data["fingerprint"] = fp
+        data.update({key: fp.get(key) for key in ("card_table", "card_table_fnv1a64", "card_level",
+                                                  "tower_level", "unit_types", "provenance")})
+        problems += confirm_engine(cfg, fp, version)
+        detail += (f": card table {fp['card_table'] or 'n/a (before 0.1.42)'} (configured "
+                   f"{cfg.card_table or 'none, the engine default'}), card level "
+                   f"{_shown_level(fp['card_level'])}, tower level "
+                   f"{_shown_level(fp['tower_level'])}, {fp['unit_types']} unit types, "
+                   f"{fp['catalogue']} cards, fingerprint {fp['id']}")
+    status = FAIL if problems else WARN if notes else PASS
+    return Check("royalesim", status, "\n".join([detail] + problems + notes), data)
+
+
+def check_cards() -> Check:
+    """The IL_Replay -> RoyaleSim card map: the vendored file at its SHA-256
+    (rs_cards.read_vendored), merged with the extras unless HASTYCR_CARD_EXTRAS=0."""
+    try:
+        rs_cards = _tool("rs_cards")
+    except Exception as exc:
+        return Check("cards", FAIL,
+                     f"tools/rs_cards.py does not import ({type(exc).__name__}: {exc})")
+    vendored_path = Path(rs_cards.VENDORED_PATH)
+    data: dict = {"vendored": _rel(vendored_path), "vendored_sha256": rs_cards.VENDORED_SHA256}
+    try:
+        vendored = rs_cards.read_vendored(vendored_path, rs_cards.VENDORED_SHA256)
+    except (ValueError, OSError) as exc:        # CardMapError: missing, altered, malformed
+        return Check("cards", FAIL, f"the card map cannot be used: {exc}", data)
+    data["vendored_entries"] = len(vendored)
+    detail = (f"{_rel(vendored_path)}: {len(vendored)} keys at the vendored SHA-256 "
+              f"({rs_cards.VENDORED_SOURCE})")
+    try:
+        if rs_cards.extras_enabled():
+            names = rs_cards.merge(vendored, rs_cards.read_extras(rs_cards.EXTRA_PATH))
+        else:
+            names = dict(vendored)
+    except (ValueError, OSError) as exc:        # CardMapError, or HASTYCR_CARD_EXTRAS
+        return Check("cards", FAIL, f"{detail}\nthe extras cannot be used: {exc}", data)
+    data.update(entries=len(names), sha256=rs_cards.map_sha256(names),
+                extras=sorted(key for key in names if key not in vendored))
+    return Check("cards", PASS, f"{detail}; {rs_cards.summary(names, vendored)}", data)
+
+
+def _read_object(path: Path) -> tuple[dict | None, str]:
+    """(the JSON object in `path`, "") or (None, why not)."""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, ValueError) as exc:
+        return None, f"unreadable ({type(exc).__name__}: {exc})"
+    if not isinstance(doc, dict):
+        return None, "not a JSON object"
+    return doc, ""
+
+
+def check_data(fp: dict | None = None) -> Check:
+    """data/vision/classes.json and data/rs_rows/spawn_primary.json are there; with the
+    royalesim check's fingerprint `fp`, the spawn table must have been made under it."""
+    lines: list[str] = []
+    warn: list[str] = []
+    data: dict = {"classes": None, "spawn_table": None}
+    name = _rel(CLASSES_JSON)
+    classes, why = _read_object(CLASSES_JSON)
+    if classes is None:
+        warn.append(f"{name} is {why}. It is in the repo: git checkout -- {name}; or make it "
+                    f"from the engine: {MAKE_CLASSES}")
+    else:
+        data["classes"] = {"path": name, "classes": len(classes.get("classes") or ())}
+        lines.append(f"{name}: {data['classes']['classes']} classes")
+
+    name = _rel(SPAWN_TABLE)
+    table, why = _read_object(SPAWN_TABLE)
+    if table is None:
+        warn.append(f"{name} is {why}. rs_eval and the live runner read it; make it: "
+                    f"{MAKE_SPAWN_TABLE}")
+        return Check("data", WARN, "\n".join(warn + lines), data)
+    try:
+        spawn = _tool("rs_spawn_table")
+    except Exception as exc:
+        warn.append(f"{name} is there, but tools/rs_spawn_table.py does not import "
+                    f"({type(exc).__name__}: {exc}), so it is not checked against the engine")
+        return Check("data", WARN, "\n".join(warn + lines), data)
+    try:
+        made = spawn.table_id(table)
+        current = fp is not None and spawn.is_current(table, fp)
+        shown = spawn.summary(table)
+    except Exception as exc:                    # a table of the wrong shape
+        warn.append(f"{name} is unreadable ({type(exc).__name__}: {exc}). Make it again: "
+                    f"{MAKE_SPAWN_TABLE}")
+        return Check("data", WARN, "\n".join(warn + lines), data)
+    data["spawn_table"] = {"path": name, "engine": made, "format": table.get("format"),
+                           "current": current if fp is not None else None}
+    if fp is None:
+        lines.append(f"{name}: {shown} (not compared with the engine: the royalesim check "
+                     "built no Battle)")
+    elif current:
+        lines.append(f"{name}: {shown}, this engine")
+    else:
+        warn.append(f"{name} was made under engine {made or 'unknown'} (format "
+                    f"{table.get('format')!r}), but this engine is {fp.get('id')} (format "
+                    f"{spawn.FORMAT}). Make it again: {MAKE_SPAWN_TABLE}")
+    return Check("data", WARN if warn else PASS, "\n".join(warn + lines), data)
 
 
 def check_hastycr() -> Check:
@@ -576,7 +760,9 @@ def run_checks(args: argparse.Namespace) -> list[Check]:
     checks.append(check_torch(role))
     if pins:
         checks.append(check_packages(role, pins))
-    checks += [check_royalesim(pins.get("royalesim")), check_hastycr()]
+    royalesim = check_royalesim(pins.get("royalesim"))
+    checks += [royalesim, check_cards(), check_data(royalesim.data.get("fingerprint")),
+               check_hastycr()]
     if args.offline:
         checks += _skip_rest(DEVICE_CHECKS, "--offline")
     else:
@@ -600,8 +786,9 @@ def report(checks: Sequence[Check], code: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="selfcheck.py",
-        description="Check this PC and venv: Python 3.12, torch/CUDA/bf16, RoyaleSim and the "
-                    "pinned packages, the emulator (adb, 1080x1920, density, Clash Royale build, "
+        description="Check this PC and venv: Python 3.12, torch/CUDA/bf16, RoyaleSim under "
+                    "data/engine.json and the pinned packages, the card map, the class list and "
+                    "spawn table, the emulator (adb, 1080x1920, density, Clash Royale build, "
                     "emulator.verify) and FRIENDLY_ONLY. Exit 0 ready, 1 a check failed.")
     ap.add_argument("--offline", action="store_true",
                     help="skip the device checks (adb, screen size, density, game build, "
