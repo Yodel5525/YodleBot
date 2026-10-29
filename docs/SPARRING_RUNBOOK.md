@@ -284,6 +284,14 @@ This must report the card table `cards-160402017-20261019.1` (the 16.402.22 / 19
 
 The first model is trained on `--live-compat` rows. In those rows, units are identified by the card that created them, which is what screen vision can supply. It is the author's design, kept as the quickest route to a first live friendly. Later batches replace it with decision-time rows and RL.
 
+**Easiest: one script runs all four steps unattended.** It stops at the first failure and writes everything to `reports\first_model_<time>.log`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\first_model.ps1
+```
+
+`-Workers 6` uses less RAM. `-From hog` (or `general`, `eval`) restarts at a later step. Send back the log when it finishes. The steps it runs are below, if you prefer to run them one at a time.
+
 **1. Build the training rows.** This takes about 30-60 minutes. It uses every Hog 2.6 match plus 20,000 others:
 
 ```powershell
