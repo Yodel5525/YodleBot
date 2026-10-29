@@ -279,6 +279,20 @@ def test_supervisor_blocks_run_without_queueing(monkeypatch, tmp_path):
     assert "--no-queue" in seen[1] and "--advisor" not in seen[1]
 
 
+def _ps_code(text: str) -> str:
+    """PowerShell source without comments: `<# ... #>` blocks and whole-line `#` comments.
+
+    The launchers explain in comments that queueing is refused; only code should count.
+    """
+    text = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_ps_code_drops_comments_but_keeps_code():
+    src = "<# --auto-queue in a block #>\n# --auto-queue in a line\n& $py bot.py --auto-queue\n"
+    assert _ps_code(src).count("--auto-queue") == 1
+
+
 def test_run_ps1_and_bot_cmd_always_skip_queueing():
     run = (ROOT / "run.ps1").read_text(encoding="utf-8")
     forced = run.index("$NoQueue = $true")
@@ -287,7 +301,7 @@ def test_run_ps1_and_bot_cmd_always_skip_queueing():
     bot = (ROOT / "bot.cmd").read_text(encoding="utf-8")
     assert "run.ps1\" -Forever -NoQueue" in bot
     for rel in ("scripts/overnight_supervisor.ps1", "scripts/watch_katacr_overnight.ps1"):
-        assert "--auto-queue" not in (ROOT / rel).read_text(encoding="utf-8"), rel
+        assert "--auto-queue" not in _ps_code((ROOT / rel).read_text(encoding="utf-8")), rel
 
 
 def test_cr_bot_reports_queue_false():
