@@ -40,9 +40,12 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
   -> tools/public_state (the state obs_row reads) -> tools/rs_rows.obs_row with the checkpoint's
      row schema (rs_rows/legacy; --live-compat rows for live_big_hog)
   -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard)
-  -> ControlState.suggest / should_tap -> AdbTapper: ONE persistent `adb -s SERIAL shell`, a play
-     is two `input tap X Y` lines (card slot, then arena tile), both in DEVICE pixels 1080x1920
-     from ArenaGeometry, whatever size the captured frames have
+  -> ControlState.suggest / should_tap -> ScreenGuard (the NEWEST captured frame, taken after the
+     one decided on, must still show the battle screen: no tap lands on an end screen whose OK
+     button covers hand slot 1) -> AdbTapper: ONE persistent `adb -s SERIAL shell`, a play is
+     two `input tap X Y` lines (card slot, then arena tile), both in DEVICE pixels 1080x1920
+     from ArenaGeometry, whatever size the captured frames have; a shell that died is reopened
+     only after emulator.verify passes again
   -> VisionRecorder: reports/vision_play/<session>/frames.jsonl, one line per frame (VisionFrame,
      decision, latencies in ms), plus records for decisions, taps, mode switches, human plays,
      battle start / end and results; an image every --record-images frames.
@@ -292,6 +295,11 @@ class BattleState:
         if self._cand and tick < self._cand[-1][1]:
             self._cand.clear()
         self._cand.append((t, int(tick)))
+        if len(self._cand) > 256:
+            # A clock frozen on a battle screen (a pause, an intro) must not grow this without
+            # bound. Ticks here never decrease, so the first and the newest entries are all the
+            # start rule reads: drop the middle.
+            del self._cand[1:-64]
         if (len(self._cand) >= self.start_frames
                 and self._cand[-1][1] - self._cand[0][1] >= self.start_advance_ticks):
             self.state, self.number, self.ended_reason = IN_BATTLE, self.number + 1, None
@@ -420,7 +428,9 @@ class AdbTapper:
     SystemExit unless the serial is the Clash Royale instance), then the device's screen size
     must be `size` (DEVICE_SIZE) when `adb shell wm size` answers. Lines are written as bytes
     with a bare "\n" (no Windows "\r\n" reaches the device shell). Every tap is checked to lie
-    on the screen."""
+    on the screen. A shell that died (adb server restarted, device reconnected) is reopened
+    only after verify() passes again; a refusal then (SystemExit) leaves the tapper `dead`:
+    every later tap_pair raises TapError and nothing reaches the device."""
 
     def __init__(self, adb: str, serial: str, *, verify: Callable[[str, str], Any] | None,
                  size: Sequence[int] = DEVICE_SIZE, popen: Callable = subprocess.Popen,
@@ -429,21 +439,37 @@ class AdbTapper:
         self.size = (int(size[0]), int(size[1]))
         if verify is None:
             raise TapError("taps need scripts/emulator.verify; refusing to open the adb shell")
-        verify(self.serial, self.adb)
+        self._verify = verify
+        self._popen = popen
+        self.p = None
+        self.sent = 0
+        self.opened = 0
+        self.dead: str | None = None
+        verify(self.serial, self.adb)          # SystemExit unless this is the Clash Royale instance
         found = device_size(self.adb, self.serial, run=run)
         if found is not None and tuple(found) != self.size:
             raise TapError(f"{self.serial} reports a {found[0]}x{found[1]} screen; taps are computed "
                            f"for {self.size[0]}x{self.size[1]}. Set MuMu's resolution to "
                            f"{self.size[0]}x{self.size[1]} (do not let the bot change it).")
         self.device_size_seen = found
-        self._popen = popen
-        self.p = None
-        self.sent = 0
         self._open()
 
     def _open(self) -> None:
         self.p = self._popen([self.adb, "-s", self.serial, "shell"], stdin=subprocess.PIPE,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_no_window())
+        self.opened += 1
+
+    def _reopen(self) -> None:
+        """A new shell in place of one that died, after emulator.verify passes again (the
+        emulator may have been restarted since: never by this program)."""
+        self._kill()
+        try:
+            self._verify(self.serial, self.adb)
+        except (SystemExit, Exception) as exc:   # verify refuses with SystemExit
+            self.dead = (f"emulator.verify refused {self.serial} before reopening the adb shell "
+                         f"({type(exc).__name__}: {exc}); no more taps this run")
+            raise TapError(self.dead) from None
+        self._open()
 
     def _check(self, xy: Sequence[Any]) -> tuple[int, int]:
         x, y = int(xy[0]), int(xy[1])
@@ -453,13 +479,15 @@ class AdbTapper:
 
     def tap_pair(self, a: Sequence[Any], b: Sequence[Any]) -> None:
         """Tap `a` (the card slot) then `b` (the arena tile), device pixels."""
+        if self.dead:
+            raise TapError(self.dead)
         (ax, ay), (bx, by) = self._check(a), self._check(b)
         line = f"input tap {ax} {ay}\ninput tap {bx} {by}\n".encode("ascii")
         last: Exception | None = None
         for _ in range(2):
             try:
                 if self.p is None or self.p.poll() is not None:
-                    self._open()
+                    self._reopen()               # TapError (not caught here) when verify refuses
                 self.p.stdin.write(line)
                 self.p.stdin.flush()
                 self.sent += 1
@@ -490,6 +518,39 @@ class AdbTapper:
                 p.wait(timeout=3)
             except Exception:
                 pass
+
+
+class ScreenGuard:
+    """The last look before a tap: the newest frame the source holds, when it is newer than
+    the frame the decision was made on, must still show the battle screen (the HUD panel's
+    blue edge, no end screen). A battle that ends between capture and tap therefore gets no
+    tap: on the end screen the OK button covers hand slot 1 (u 0.37-0.63, v 0.88-0.94 against
+    the slot's 0.50, 0.89), and pressing it would navigate. A source that cannot be read
+    vetoes too. For live sources only (read() returns the newest frame without consuming
+    it: capture.LatestFrameSource, FallbackSource); a replay never taps."""
+
+    def __init__(self, source: Any):
+        self.source = source
+        self.vetoes = 0
+
+    def _veto(self, why: str) -> str:
+        self.vetoes += 1
+        return why
+
+    def __call__(self, frame: Any) -> str | None:
+        """None when the tap may go; else why not."""
+        try:
+            newest = self.source.read()
+        except Exception as exc:
+            return self._veto(f"no newest frame ({_short(exc)})")
+        if newest is None or float(newest.t) <= float(frame.t):
+            return None                          # nothing newer than what was decided on
+        cues = read_cues(np.asarray(newest.rgb))
+        if cues.end_screen:
+            return self._veto("the end screen is up")
+        if not cues.hud_present:
+            return self._veto("the battle screen is gone")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +776,8 @@ class VisionPlay:
     recorder    scripts/vision/record.VisionRecorder (write, log)
     geometry    ArenaGeometry: card slot and tile -> DEVICE pixels (device_size)
     tapper      AdbTapper (tap_pair) or None (no taps possible: a dry run)
+    tap_guard   ScreenGuard, or any guard(frame) -> None (tap) / why not; asked right before
+                each tap (None: no last look, as in the tests' scripted sources)
     seconds / battles   stop after this long / after this many battle results (0: never)
     clock       the vision clock (types.now); frame times are on it
     out         where the status lines go (print)
@@ -727,7 +790,8 @@ class VisionPlay:
                  idle_record_every: int = 20, status_every_s: float = 1.0,
                  clock: Callable[[], float] = now, sleep: Callable[[float], None] = time.sleep,
                  out: Callable[[str], Any] = print, poll_s: float = 0.002, max_error_logs: int = 50,
-                 max_stale_s: float = MAX_STALE_S):
+                 max_stale_s: float = MAX_STALE_S,
+                 tap_guard: Callable[[Any], str | None] | None = None):
         self.source = source
         self.perception = perception
         self.decider = decider
@@ -735,6 +799,8 @@ class VisionPlay:
         self.recorder = recorder
         self.geometry = geometry
         self.tapper = tapper
+        self.tap_guard = tap_guard
+        self.vetoed = 0
         self.battle = battle if battle is not None else BattleState()
         self.card_names = card_names
         self.seconds = float(seconds or 0.0)
@@ -833,7 +899,7 @@ class VisionPlay:
             if self.results.pending:
                 self._finish_result()
             self._log("session_end", reason=self.stop_reason, frames=self.frames, taps=self.taps,
-                      errors=dict(self.errors), results=dict(self.results.tally),
+                      vetoed=self.vetoed, errors=dict(self.errors), results=dict(self.results.tally),
                       control=dict(getattr(self.control, "counts", {}) or {}))
             self._flush_control()
         self.out(f"stopped: {self.stop_reason}; {self.frames} frames, {self.taps} taps, "
@@ -899,6 +965,16 @@ class VisionPlay:
             return None
         return self._decide(vf, frame, ctx, ms)
 
+    def _tap_veto(self, frame: Any) -> str | None:
+        """The tap guard's answer for the frame decided on; a guard that fails vetoes."""
+        guard = self.tap_guard
+        if guard is None:
+            return None
+        try:
+            return guard(frame)
+        except Exception as exc:
+            return f"screen check failed ({_short(exc)})"
+
     def can_decide(self, vf: VisionFrame) -> bool:
         """In a battle, on the battle screen, the clock read and running, past the deploy
         lockout, fresh pixels, and a tick we have not decided on yet."""
@@ -920,8 +996,14 @@ class VisionPlay:
                   "tile": list(self.geometry.tap_px(d.tx, d.ty, size=self.device_size))}
         tapped, why = False, ""
         if d.is_play and self.control.should_tap(s):
+            veto = None if self.tapper is None else self._tap_veto(frame)
             if self.tapper is None:
                 why = "no tapper"
+            elif veto:
+                why = f"not tapped: {veto}"
+                self.vetoed += 1
+                self._log("tap_vetoed", battle=ctx.number, tick=int(vf.tick), card=d.card,
+                          name=self.name(d.card), reason=veto)
             else:
                 t1 = self.clock()
                 try:
@@ -1025,7 +1107,9 @@ class VisionPlay:
         if ctl.stop_requested:
             return "STOPPED"
         if ctl.mode == CT.AUTO:
-            return "AUTO(tap)" if ctl.taps_enabled and self.tapper is not None else "AUTO(dry)"
+            if not ctl.taps_enabled or self.tapper is None:
+                return "AUTO(dry)"
+            return "AUTO(adb shell dead)" if getattr(self.tapper, "dead", None) else "AUTO(tap)"
         return "MANUAL"
 
     def status_line(self) -> str:
@@ -1242,8 +1326,8 @@ def _main(args: argparse.Namespace) -> int:
             except SystemExit as exc:                  # emulator.verify refused the device
                 print(f"refusing to tap: {exc}")
                 return 2
-            except TapError as exc:
-                print(f"refusing to tap: {exc}")
+            except (TapError, OSError) as exc:          # OSError: adb itself would not start
+                print(f"refusing to tap: {_short(exc)}")
                 return 2
         try:
             source = CAP.open_source(args.source, instance=instance, adb=adb, serial=serial)
@@ -1284,7 +1368,8 @@ def _main(args: argparse.Namespace) -> int:
         runner = VisionPlay(source=source, perception=perception, decider=decider, control=ctl,
                             recorder=recorder, geometry=geometry, tapper=tapper, card_names=names,
                             seconds=args.seconds, battles=args.battles,
-                            out=lambda s: print(s, flush=True))
+                            out=lambda s: print(s, flush=True),
+                            tap_guard=None if tapper is None else ScreenGuard(source))
         return runner.run()
     finally:
         if ctl is not None:

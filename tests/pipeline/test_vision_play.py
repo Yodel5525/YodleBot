@@ -236,7 +236,7 @@ def read_records(session_dir):
 
 
 def run_script(tmp_path, script, *, mode=CT.AUTO, taps=True, play_ticks=(100,), tapper=None,
-               size=(225, 400), on_read=None, decider=None, image_every=0):
+               size=(225, 400), on_read=None, decider=None, image_every=0, tap_guard=None):
     clock = FakeClock()
     rgb = np.zeros((size[1], size[0], 3), dtype=np.uint8)
     frames = [Frame(t, rgb, 0.0) for t, _ in script]
@@ -250,7 +250,7 @@ def run_script(tmp_path, script, *, mode=CT.AUTO, taps=True, play_ticks=(100,), 
     runner = VP.VisionPlay(source=FakeSource(frames, clock, on_read), perception=perception,
                            decider=decider or make_decider(FakePolicy(play_ticks)), control=control,
                            recorder=recorder, geometry=GEOMETRY, tapper=tapper, card_names=NAMES,
-                           clock=clock, sleep=lambda s: None, out=lines.append)
+                           clock=clock, sleep=lambda s: None, out=lines.append, tap_guard=tap_guard)
     rc = runner.run()
     recorder.close()
     return SimpleNamespace(rc=rc, runner=runner, tapper=tapper, perception=perception, control=control,
@@ -402,6 +402,68 @@ def test_a_failed_tap_is_logged_and_not_counted(tmp_path):
     assert res.records["tap_error"][0]["error"] == "OSError: pipe gone"
     [d] = decisions(res.records)
     assert d["action"] == CT.ACTION_SKIPPED and d["why"].startswith("tap failed")
+
+
+def test_a_changed_screen_vetoes_the_tap(tmp_path):
+    """The last look before the tap of tick 100 finds the end screen (the battle ended between
+    capture and tap): nothing is tapped there, the decision is "skipped" with the reason and a
+    tap_vetoed record; the play at tick 102, whose screen is fine, taps."""
+    vetoed_t = t_of(FRAME_OF_TICK[100])
+    looked = []
+
+    def guard(frame):
+        looked.append(frame.t)
+        return "the end screen is up" if frame.t == vetoed_t else None
+
+    res = run_script(tmp_path, standard_script(), play_ticks=(100, 102), tap_guard=guard)
+    assert looked == [vetoed_t, t_of(FRAME_OF_TICK[102])]       # asked only before a tap
+    assert [t["tick"] for t in res.records["tap"]] == [102] and len(res.tapper.calls) == 1
+    first, second = decisions(res.records)
+    assert (first["tick"], first["action"], first["why"]) == (100, CT.ACTION_SKIPPED,
+                                                              "not tapped: the end screen is up")
+    assert (second["tick"], second["action"]) == (102, CT.ACTION_TAP)
+    [veto] = res.records["tap_vetoed"]
+    assert (veto["tick"], veto["name"], veto["reason"]) == (100, "HogRider", "the end screen is up")
+    assert res.runner.vetoed == 1 and res.records["session_end"][0]["vetoed"] == 1
+
+
+def test_a_guard_that_fails_vetoes_and_a_dry_run_never_asks_it(tmp_path):
+    def broken(frame):
+        raise RuntimeError("grab failed")
+
+    res = run_script(tmp_path, standard_script(), play_ticks=(100,), tap_guard=broken)
+    assert res.tapper.calls == [] and "tap" not in res.records
+    [d] = decisions(res.records)
+    assert d["action"] == CT.ACTION_SKIPPED and d["why"].startswith("not tapped: screen check failed")
+    res = run_script(tmp_path / "dry", standard_script(), taps=False, play_ticks=(100,), tap_guard=broken)
+    assert "tap_vetoed" not in res.records and decisions(res.records)[0]["action"] == CT.ACTION_DRY
+
+
+class LatestSource:
+    """capture.LatestFrameSource's read(): the newest frame, not consumed."""
+
+    def __init__(self, frame=None, fail=False):
+        self.frame, self.fail, self.reads = frame, fail, 0
+
+    def read(self):
+        self.reads += 1
+        if self.fail:
+            raise RuntimeError("grab failed")
+        return self.frame
+
+
+def test_screen_guard_looks_at_the_newest_frame():
+    decided = Frame(5.0, battle_image(), 0.0)
+    black = np.zeros((400, 225, 3), dtype=np.uint8)
+    assert VP.ScreenGuard(LatestSource(None))(decided) is None                         # nothing yet
+    assert VP.ScreenGuard(LatestSource(Frame(5.0, end_image(), 0.0)))(decided) is None  # not newer
+    assert VP.ScreenGuard(LatestSource(Frame(5.02, battle_image(), 0.0)))(decided) is None
+    big = Frame(5.02, battle_image((1080, 1920)), 0.0)                                   # the adb fallback's size
+    assert VP.ScreenGuard(LatestSource(big))(decided) is None
+    guard = VP.ScreenGuard(LatestSource(Frame(5.02, end_image(), 0.0)))
+    assert guard(decided) == "the end screen is up" and guard.vetoes == 1
+    assert VP.ScreenGuard(LatestSource(Frame(5.02, black, 0.0)))(decided) == "the battle screen is gone"
+    assert VP.ScreenGuard(LatestSource(fail=True))(decided) == "no newest frame (RuntimeError: grab failed)"
 
 
 def test_opponent_plays_reach_the_memory_at_the_tick_they_are_reported(tmp_path):
@@ -577,6 +639,16 @@ def test_battle_state_starts_only_on_a_running_clock():
     assert b.number == 1 and b.last_tick == 54 and b.running(20.0 + 0.05 * 24)
 
 
+def test_battle_state_start_list_stays_bounded_on_a_frozen_clock():
+    """20 s of a clock frozen on a battle screen at 50 fps keep the start list bounded; once the
+    clock runs the battle starts exactly as before (20 ticks past the frozen reading)."""
+    b = VP.BattleState()
+    assert all(b.update(vf_at(10.0 + 0.02 * i, 19)) == [] for i in range(1000))
+    assert len(b._cand) <= 256
+    events = [b.update(vf_at(30.0 + 0.05 * i, 20 + i)) for i in range(25)]
+    assert events.index(["start"]) == 19 and events.count(["start"]) == 1 and b.number == 1
+
+
 def test_battle_state_end_rules():
     # a clock that is read but stops: over after 2.5 s; running() goes false after 1.2 s
     b = VP.BattleState()
@@ -650,9 +722,12 @@ class FakeAdb:
         self.wm = wm
         self.log = []
         self.procs = []
+        self.refuse = False
 
     def verify(self, serial, adb):
         self.log.append(("verify", serial, adb))
+        if self.refuse:
+            raise SystemExit("refusing to run: com.supercell.clashroyale is not installed")
 
     def run(self, cmd, **kw):
         self.log.append(("run", list(cmd)))
@@ -698,6 +773,30 @@ def test_adb_tapper_refuses_without_verify_or_on_the_wrong_device():
     with pytest.raises(VP.TapError, match="720x1280"):
         VP.AdbTapper("adb", "s", verify=small.verify, popen=small.popen, run=small.run)
     assert adb.procs == [] and small.procs == []
+
+
+def test_adb_tapper_verifies_again_before_reopening_a_dead_shell():
+    """The shell died (adb server restart): verify, then a new shell, then the tap. When verify
+    refuses at a reopen, no shell is opened and no tap is ever sent again."""
+    adb = FakeAdb()
+    tapper = VP.AdbTapper("adb", "s", verify=adb.verify, popen=adb.popen, run=adb.run)
+    first = adb.procs[0]
+    first.poll = lambda: 1                                  # exited
+    tapper.tap_pair((538, 1711), (766, 1083))
+    assert [entry[0] for entry in adb.log] == ["verify", "run", "popen", "verify", "popen"]
+    second = adb.procs[1]
+    assert first.stdin.closed and first.stdin.data == b""
+    assert second.stdin.data == b"input tap 538 1711\ninput tap 766 1083\n" and tapper.opened == 2
+    second.poll = lambda: 1
+    adb.refuse = True
+    with pytest.raises(VP.TapError, match="no more taps"):
+        tapper.tap_pair((538, 1711), (766, 1083))
+    assert tapper.dead and len(adb.procs) == 2 and second.stdin.data.count(b"input tap") == 2
+    adb.refuse = False
+    with pytest.raises(VP.TapError):                        # dead for good: not even verify again
+        tapper.tap_pair((538, 1711), (766, 1083))
+    assert [entry[0] for entry in adb.log].count("verify") == 3 and len(adb.procs) == 2
+    tapper.close()
 
 
 def test_parse_wm_size():
