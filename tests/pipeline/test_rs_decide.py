@@ -489,13 +489,25 @@ def test_pure_legality_pocket_opens_when_a_princess_falls():
     assert not at(c, hog, 3, 15)                   # the bridge: never offered (conservative)
     assert not at(c, cannon, 3, 12)                # buildings: own half only
     assert at(c, MINER, 3, 6)                      # the princess body is gone
-    # team 0 acting: red's slot 1 is ITS left, world x 14.5; its pocket is world rows 17-20
+    # team 0 acting: tower_hp slots are world sides for red too (RD.TOWER_CENTRE), so red's
+    # slot 1 is world x 3.5 and its pocket is world columns 0-8, rows 17-20
     c0 = RD.PureLegality(PURE_CAT).bind(live_state(team=0), 0)
     assert c0(0, hog, 9500 * SUB, 7500 * SUB)      # model (9, 24) of team 0 = world (9, 7)
-    assert not at(c0, hog, 14, 18)
+    assert not at(c0, hog, 3, 18) and not at(c0, hog, 14, 18)
     c0 = pure.bind(live_state(team=0, enemy_towers=[KING_HP, 0, PRINCESS_HP]), 0)
-    assert at(c0, hog, 14, 18) and at(c0, hog, 14, 20) and not at(c0, hog, 14, 21)
-    assert not at(c0, hog, 3, 18)
+    assert at(c0, hog, 3, 18) and at(c0, hog, 3, 20) and not at(c0, hog, 3, 21)
+    assert not at(c0, hog, 14, 18)
+
+
+def test_pure_legality_own_tower_bodies_follow_the_world_sides():
+    """Team 1 (the live bot) loses its world-left princess (slot 1, the HUD's own_left): that
+    body opens, the standing world-right one (slot 2, x 14.5) stays shut."""
+    hog, cannon = CID["HogRider"], CID["Cannon"]
+    c = RD.PureLegality(PURE_CAT).bind(live_state(tower_hp=[KING_HP, 0, PRINCESS_HP]), 1)
+    assert at(c, hog, 3, 25) and at(c, cannon, 3, 25)
+    assert not at(c, hog, 14, 25) and not at(c, cannon, 14, 25)
+    assert at(c, hog, 12, 25) and not at(c, hog, 13, 25)       # the body is 3 x 3 tiles
+    assert not at(c, hog, 9, 29)                                # our king, still standing
 
 
 def test_pure_legality_mirror_follows_its_target():
@@ -945,14 +957,17 @@ def test_towers_only_legality_on_royalesim():
     down = towers.bind(state([(0, 1)]), 1)
     assert legal(down, hog, 3, 12)                 # team 0's slot 1 (world left) fell
     assert not legal(down, hog, 14, 12)            # the other lane stays shut
-    for dead in ((), ((0, 1),), ((0, 2),), ((0, 1), (0, 2))):
+    # ((1, 1),): our own world-left princess fell (RD.TOWER_CENTRE). Pure then opens its body
+    # and keeps the standing world-right one shut; if the engine numbers team 1's slots the
+    # other way round, pure offers the standing tower's body here and this names those tiles.
+    for dead in ((), ((0, 1),), ((0, 2),), ((0, 1), (0, 2)), ((1, 1),)):
         st = state(dead)
         engine, fallback = towers.bind(st, 1), pure.bind(st, 1)
         for card in deck[:4]:
             bad = [(x, y) for y in range(32) for x in range(18)
                    if legal(fallback, card, x, y) and not legal(engine, card, x, y)]
             assert not bad, (cat[card][0], dead, bad[:5])
-    assert towers.builds == 4
+    assert towers.builds == 5
 
 
 @pytest.mark.engine

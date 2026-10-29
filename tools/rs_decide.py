@@ -461,13 +461,17 @@ ARENA_TILES: tuple[str, ...] = (
     '.......NNNN.......', '.......NNNN.......', '.......NNNN.......', 'NNNNNN......NNNNNN',
 )
 RIVER_ROWS = (15, 16)
-#: Crown tower centres in world TILES, (team, slot): slot 0 king, 1 / 2 the owner's own left /
-#: right as royalegym's TowerSlot names them (red's frame is turned, so its left is world
-#: right; conftest TOWER_MILLI). For team 0, the live bot's enemy, slot 1 is the world (screen)
-#: left the vision HUD reports, so the two conventions agree where the live bot needs them.
+#: Crown tower centres in world TILES, (team, slot), slot as players[team]["tower_hp"] holds
+#: it: 0 king, 1 the WORLD-left (x 3.5) princess, 2 the world-right (x 14.5) one, for BOTH
+#: teams. That is RoyaleSim's engine tower order k (king, left lane, right lane), which state_json
+#: and reset(tower_hp=) use as they stand because rs_engine builds every Battle with slot_of_k
+#: the identity (rs_engine.SLOT_OF_K), and it is what rs_rows.towers_vec and tools/public_state.py
+#: (screen = world sides, "own_left" = screen left) read and write. royalegym's own-frame
+#: TowerSlot, where red's slot 1 is world right (and conftest's TOWER_MILLI, which follows it),
+#: is a different numbering. The engine-marked test kills team 1's slot 1 to check this.
 TOWER_CENTRE: dict[tuple[int, int], tuple[float, float]] = {
     (0, 0): (9.0, 3.0), (0, 1): (3.5, 6.5), (0, 2): (14.5, 6.5),
-    (1, 0): (9.0, 29.0), (1, 1): (14.5, 25.5), (1, 2): (3.5, 25.5),
+    (1, 0): (9.0, 29.0), (1, 1): (3.5, 25.5), (1, 2): (14.5, 25.5),
 }
 #: Half the side of a tower's body in tiles: the king is 4 x 4, a princess 3 x 3.
 TOWER_BODY_HALF = {0: 2.0, 1: 1.5, 2: 1.5}
