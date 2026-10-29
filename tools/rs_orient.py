@@ -21,10 +21,13 @@ dataset always says so, and the median test was dead logic. `orient` replaces bo
 * each side's own-half share is the fraction of its troop plays on the half its seat
   owns (y < HALF_Y for blue, y >= HALF_Y for red); a side with no troop play has share
   1.0, since nothing contradicts it;
-* a match with either share below MIN_SHARE (0.9) is skipped as SKIP ("orient") and
-  counted by the caller: either the frame is not what this module assumes or the side
-  labels are wrong. Troops are legal on the enemy half only in a pocket opened by a
-  fallen princess tower, hence 0.9 and not 1.0.
+* a match with either share below MIN_SHARE (0.5) is skipped as SKIP ("orient") and
+  counted by the caller: a side that put most of its troops on the wrong half means
+  the frame is not what this module assumes or the side labels are wrong. Troops are
+  legal on the enemy half in a pocket opened by a fallen princess tower, and in long
+  matches many plays go there, so the bar is a majority, not 0.9: on 20,000 IL_Replay
+  matches 0.9 skipped 24.5% (mostly games where a tower fell), while the orientation
+  itself was unambiguous (team at native low y in 19,998 of 20,000).
 
 Golden: when the team owns native low y, team_seat is 0 and the coordinates are the
 ones the tools always sent, so their output is unchanged. (The one exception was never
@@ -47,7 +50,7 @@ from typing import Any, NamedTuple
 
 BOARD_W, BOARD_H = 18_000, 32_000      # native / RoyaleSim world millitiles
 HALF_Y = 16_000                        # blue (team 0) owns y < HALF_Y, red the rest
-MIN_SHARE = 0.9                        # below this own-half share a match is skipped
+MIN_SHARE = 0.5                        # below this own-half share a match is skipped
 SKIP = "orient"                        # the skip reason the tools count
 #: catalogue_json column of card_kind ("TROOP" / "BUILDING" / "SPELL"); royalesim's
 #: CATALOGUE_FIELDS begin name, placement, elixir, count, radius, flying, hitpoints,

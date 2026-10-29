@@ -8,18 +8,18 @@
   "cards": {
     "rune-giant": {
       "name": "GiantBuffer",
-      "verified": false,
-      "evidence": "Rune Giant. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: the client's codename for it (scripts/sync_meta_decks.py PUBLISHED_ALIASES, giant_buffer)."
+      "verified": true,
+      "evidence": "Rune Giant. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: the client's codename for it (scripts/sync_meta_decks.py PUBLISHED_ALIASES, giant_buffer). Verified 2026-10-29 by tools/rs_cards.py --coverage --parts 4 on the owner's PC: rune-giant in 923 decks, spirit-empress in 616, void in 2,272; all 16 cards mapped in 20,000 of 20,000 matches."
     },
     "spirit-empress": {
       "name": "MergeMaiden",
-      "verified": false,
-      "evidence": "Spirit Empress. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: royalesim's calibration ledger calls it 'the Spirit Empress (MergeMaiden)'. It is a variant card, and its forms are MergeMaiden_Normal (3 elixir) and MergeMaiden_Mounted (6). The card in a deck is MergeMaiden."
+      "verified": true,
+      "evidence": "Spirit Empress. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: royalesim's calibration ledger calls it 'the Spirit Empress (MergeMaiden)'. It is a variant card, and its forms are MergeMaiden_Normal (3 elixir) and MergeMaiden_Mounted (6). The card in a deck is MergeMaiden. Verified 2026-10-29 by tools/rs_cards.py --coverage --parts 4 on the owner's PC: rune-giant in 923 decks, spirit-empress in 616, void in 2,272; all 16 cards mapped in 20,000 of 20,000 matches."
     },
     "void": {
       "name": "DarkMagic",
-      "verified": false,
-      "evidence": "Void. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv, and tests/test_replay_pipeline.py uses 'void' as an IL_Replay key. Name: the client calls it dark_magic (sim/spells.py)."
+      "verified": true,
+      "evidence": "Void. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv, and tests/test_replay_pipeline.py uses 'void' as an IL_Replay key. Name: the client calls it dark_magic (sim/spells.py). Verified 2026-10-29 by tools/rs_cards.py --coverage --parts 4 on the owner's PC: rune-giant in 923 decks, spirit-empress in 616, void in 2,272; all 16 cards mapped in 20,000 of 20,000 matches."
     }
   }
 }

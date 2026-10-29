@@ -64,10 +64,11 @@ NAMES = {"cannon": "Cannon", "fireball": "Fireball", "hog-rider": "HogRider",
          "giant": "Giant", "arrows": "Arrows", "valkyrie": "Valkyrie",
          "mini-pekka": "MiniPekka", "baby-dragon": "BabyDragon", "zap": "Zap"}
 
-#: A match whose team puts one troop on each half: skipped by every tool.
+#: A match whose team puts most of its troops on the wrong half: skipped by every tool.
 GARBAGE_PLAYS = ((100, "team", "musketeer", 3500, 7500), (160, "team", "hog-rider", 3500, 24_000),
+                 (180, "team", "ice-golem", 14_500, 24_000),
                  (200, "opponent", "knight", 14_500, 24_500))
-GARBAGE_DETAIL = "team at native low y, own-half share team 0.50 opponent 1.00"
+GARBAGE_DETAIL = "team at native low y, own-half share team 0.33 opponent 1.00"
 
 
 def key_of(key: str) -> tuple[str, int]:
@@ -89,7 +90,7 @@ def side(n_low: int, n_high: int, card: str = "Knight") -> list[tuple]:
 # ---------------------------------------------------------------------------
 
 def test_constants():
-    assert (rs_orient.HALF_Y, rs_orient.MIN_SHARE, rs_orient.SKIP) == (16_000, 0.9, "orient")
+    assert (rs_orient.HALF_Y, rs_orient.MIN_SHARE, rs_orient.SKIP) == (16_000, 0.5, "orient")
     assert rs_orient.ANYWHERE == {"Miner", "GoblinDrill"}
 
 
@@ -164,12 +165,12 @@ def test_no_troop_play_keeps_the_team_blue_and_the_opponent_alone_can_decide():
 
 
 @pytest.mark.parametrize("plays, expected", [
-    # the team's troops on both halves
-    ({0: side(3, 2), 1: side(0, 1, "HogRider")}, (0, (0.6, 1.0))),
+    # the team's troops mostly on the wrong half (a vote tie keeps it blue)
+    ({0: side(2, 3), 1: side(0, 1, "HogRider")}, (0, (0.4, 1.0))),
     # both sides on the same half: a tie, so blue, and the opponent is all off its half
     ({0: side(1, 0), 1: side(1, 0, "HogRider")}, (0, (1.0, 0.0))),
-    # the opponent's troops on both halves, the team clearly high
-    ({0: side(0, 4), 1: side(1, 1, "HogRider")}, (1, (1.0, 0.5))),
+    # the opponent's troops mostly on the wrong half, the team clearly high
+    ({0: side(0, 4), 1: side(1, 2, "HogRider")}, (1, (1.0, 1 / 3))),
 ])
 def test_garbage_is_skipped(plays, expected):
     ori = rs_orient.orient(plays, TROOP)
@@ -177,11 +178,18 @@ def test_garbage_is_skipped(plays, expected):
 
 
 def test_the_share_threshold_is_inclusive():
-    at = rs_orient.orient({0: side(9, 1), 1: side(0, 5)}, TROOP)
-    assert at.share == (0.9, 1.0) and at.ok()
-    under = rs_orient.orient({0: side(8, 1), 1: side(0, 5)}, TROOP)
-    assert under.share[0] == pytest.approx(8 / 9) and not under.ok()
-    assert under.ok(min_share=0.85)
+    at = rs_orient.orient({0: side(1, 1), 1: side(0, 5)}, TROOP)
+    assert at.share == (0.5, 1.0) and at.ok()
+    under = rs_orient.orient({0: side(2, 3), 1: side(0, 5)}, TROOP)
+    assert under.share[0] == pytest.approx(0.4) and not under.ok()
+    assert under.ok(min_share=0.35)
+
+
+def test_pocket_heavy_matches_are_kept():
+    # 7 of 10 troops on the own half, 3 in a pocket after a tower fell: kept by default,
+    # and the old 0.9 bar would have skipped it
+    ori = rs_orient.orient({0: side(7, 3), 1: side(0, 6)}, TROOP)
+    assert ori.share == (0.7, 1.0) and ori.ok() and not ori.ok(min_share=0.9)
 
 
 def test_to_engine_is_the_one_mapping():
@@ -203,11 +211,11 @@ def test_survey_counts_seats_skips_and_raw_halves():
     assert (out["matches"], out["not_1v1"]) == (3, 1)
     assert (out["team_low"], out["team_high"], out["skipped"], out["no_troop_plays"]) == \
         (2, 1, 1, 0)
-    assert out["team_troops"] == [3 + 0 + 1, 0 + 3 + 1]          # low, high per match summed
+    assert out["team_troops"] == [3 + 0 + 1, 0 + 3 + 2]          # low, high per match summed
     assert out["opponent_troops"] == [0 + 1 + 0, 1 + 0 + 1]
-    assert out["min_share"] == {"1.00": 2, "0.90-0.99": 0, "0.80-0.89": 0, "0.50-0.79": 1,
-                                "<0.50": 0}
-    assert rs_orient.survey(payloads, NAMES, TROOP, key_of, min_share=0.5)["skipped"] == 0
+    assert out["min_share"] == {"1.00": 2, "0.90-0.99": 0, "0.80-0.89": 0, "0.50-0.79": 0,
+                                "<0.50": 1}
+    assert rs_orient.survey(payloads, NAMES, TROOP, key_of, min_share=0.3)["skipped"] == 0
 
 
 # ---------------------------------------------------------------------------
