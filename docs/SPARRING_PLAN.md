@@ -113,38 +113,51 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - E13: opponent elixir counter.
 - R03: league pool and deck sampling.
 
-**Batch 3: training-row correctness**
-- E03: fidelity grid.
+**Batch 3: live path first** (reordered 2026-10-29 to reach a first friendly sooner; in progress)
 - E08: opponent memory updated only when a play lands.
+- E16: one shared class list for vision and the model.
+- V09: detector wrapper and dataset prep that keep the side column.
+- V04: opponent-play detection.
+- V12: takeover toggle.
+- V07: screen readers for clock, elixir, tower HP, hand and HP bars.
+- Then, once batch 2 lands:
+  - V05: screen-to-simulator state converter;
+  - V06: shared decision function;
+  - V10: `scripts/vision_play.py`, the friendly-only live runner;
+  - V11: latency probe;
+  - wiring the new modules into the row builder and the evaluator.
+
+**Batch 4: training-row correctness**
+- E03: fidelity grid.
 - E09: trust cut when the simulation diverges from the recording.
 - E10: replay hero and champion ability presses.
 - E11: decision-time rows.
 - E12: hide invisible units.
-- V07: screen readers for clock, elixir, tower HP, hand and HP bars.
 
-**Batch 4: model and data**
-- E14: observation v2: spells in flight, opponent elixir, pending plays, abilities.
+**Batch 5: model and data**
+- E14: observation v2.
 - E15: model v2 with an ability head and a critic.
-- E16: one shared class list for vision and the model.
 - E17: perception-noise model.
 - E18: full-corpus memory-mapped training with mirroring.
-- V09: detector wrapper and dataset prep.
+- Upgrading V06 to the v2 model.
 
-**Batch 5: live loop and evaluation**
-- V04: opponent-play detection.
-- V05: screen-to-simulator state converter.
-- V06: shared decision function.
-- V10: `scripts/vision_play.py`, the friendly-only live runner.
-- V12: takeover toggle. Press F8, click the control-window button, or create a `MANUAL` file to take control mid-match; do the same again to hand back. While you play, the bot keeps watching and shows what it would do.
-- V11: latency probe and noise fitting.
+**Batch 6: evaluation and RL**
 - L02: general match runner.
 - L03: league evaluation and promotion gate.
-
-**Batch 6: RL**
 - R01: vectorised rollouts.
-- R02: PPO with GAE, reward shaping and an adaptive KL pull.
-- R04: training driver with gating and resume.
+- R02: PPO.
+- R04: RL driver.
 - R05: optional search teacher.
+
+## First-match milestone (bot plays a friendly against you)
+
+1. **Code:** batches 2 and 3 land on the branch.
+2. **First model, on the PC, about half a day.** Build `--live-compat` rows, where each unit is identified by the card that created it, which is what screen vision can supply. Train the author's token model on them and fine-tune on Hog 2.6.
+3. **Detector, on the PC, overnight (6-10 h GPU).** Train it on the public KataCR detection dataset (`vendor/CR-Detection-Dataset`). Our own friendlies fill gaps later.
+4. **One calibration friendly.** Check the screen geometry and capture the HUD templates (digits, hand-card art).
+5. **Dry-run friendly:** the bot only watches and logs. Then a friendly where it plays, with the takeover toggle available.
+
+This first version is deliberately simple. It uses landing-time rows and no RL, so expect it to be clearly weaker than the final bot. Batches 4-6 then make it stronger.
 
 ## Main risks
 
