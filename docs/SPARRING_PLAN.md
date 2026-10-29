@@ -23,7 +23,11 @@ The game build is newer than:
 - the original author's build, `160402012`;
 - RoyaleSim 0.1.42's newest card table, `client160402017_20261019`.
 
-So any balance changes in this update are not yet in the simulator. Phase 2 measures whether that matters for Hog 2.6. If the update changed our deck's cards, we will build an updated card table.
+So any balance changes in this update are not yet in the simulator. The owner, who knows the game well, reports that nothing major changed for our purposes since the 19 October Season 88 mid-season balance update. RoyaleSim's 16.402.22 card table is therefore the target, and small differences will be handled later.
+
+Done on the PC so far:
+- the fork is cloned at `C:\hcr` with a sparse checkout, on the `sparring` branch;
+- IL_Replay is downloaded to `C:\hcr\data\il_replay`: 104 files, 1,888 MB, all SHA-256 verified.
 
 This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run on the PC. Status of each code batch is at the bottom.
 
