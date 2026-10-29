@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
+sys.path[:0] = [str(ROOT), str(ROOT / "tools"), str(ROOT / "src")]
 
 RUNS = ROOT / "runs" / "selfplay"
 KEYS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "opp_seen", "opp_last", "opp_last_age")
@@ -350,8 +350,9 @@ def loop(args):
     run = RUNS / args.name
     run.mkdir(parents=True, exist_ok=True)
     (run / "args.json").write_text(json.dumps(vars(args), default=str))
-    rg = ROOT / ".venvs" / "royalegym" / "Scripts" / "python.exe"
-    bb = ROOT / ".venvs" / "buildabot" / "Scripts" / "python.exe"
+    # Interpreters: HASTYCR_PY_ENGINE / HASTYCR_PY_TRAIN, machine.json, or .venvs/ (hastycr.machine).
+    from hastycr import machine
+    rg, bb = machine.py_engine(), machine.py_train()
     me = str(Path(__file__).resolve())
     # args.json next to each checkpoint so RSAgent reads the right wait_keep
     init_args = Path(args.ref or args.init).with_name("args.json")

@@ -3,6 +3,8 @@ $ErrorActionPreference = "Continue"
 # Autonomous overnight loop. Runs blocks of 5 matches, analyses each block,
 # restarts the bot on any crash, and keeps the capture daemon alive.
 # Deliberately model-free: nothing here needs an AI to be awake.
+# Friendly battles only: the runner no longer queues (--auto-queue is refused),
+# so each block plays only the battles a person starts.
 
 $root       = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $py         = Join-Path $root ".venvs\buildabot\Scripts\python.exe"
@@ -10,8 +12,10 @@ $runner     = Join-Path $root "scripts\mumu_katacr.py"
 $capture    = Join-Path $root "scripts\capture_daemon.py"
 $analyzer   = Join-Path $root "scripts\analyze_run.py"
 $reviewer   = Join-Path $root "scripts\peer_review.py"
-$adb        = "C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"
-$serial     = "127.0.0.1:16480"
+# adb and serial: HASTYCR_ADB / HASTYCR_SERIAL, machine.json, defaults (src\hastycr\machine.py).
+$machinePy  = Join-Path $root "src\hastycr\machine.py"
+$adb        = (& $py -I $machinePy --get adb | Select-Object -Last 1)
+$serial     = (& $py -I $machinePy --get serial | Select-Object -Last 1)
 
 $liveDir    = Join-Path $root "tmp\live"
 $frameDir   = Join-Path $root "tmp\live\frames"
@@ -102,7 +106,6 @@ while ($true) {
         --serial $serial `
         --epoch 3 `
         --hours 2 `
-        --auto-queue `
         --shims `
         --max-matches 5 `
         --log $blockLog

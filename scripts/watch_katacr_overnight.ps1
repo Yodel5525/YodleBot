@@ -3,7 +3,10 @@ $ErrorActionPreference = "Continue"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $pythonExe = Join-Path $projectRoot ".venvs\buildabot\Scripts\python.exe"
 $runner = Join-Path $projectRoot "scripts\mumu_katacr.py"
-$adbExe = "C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"
+# adb and serial: HASTYCR_ADB / HASTYCR_SERIAL, machine.json, defaults (src\hastycr\machine.py).
+$machinePy = Join-Path $projectRoot "src\hastycr\machine.py"
+$adbExe = (& $pythonExe -I $machinePy --get adb | Select-Object -Last 1)
+$serial = (& $pythonExe -I $machinePy --get serial | Select-Object -Last 1)
 $checkpoint = Join-Path $projectRoot "vendor\KataCR\logs\Policy\StARformer_3L_v0.8_golem_ai_cnn_blocks__nbc128__ep30__step50__0__20240512_181646\ckpt"
 $logDir = Join-Path $projectRoot "tmp\live"
 $runLog = Join-Path $logDir "katacr_overnight.log"
@@ -18,11 +21,10 @@ while ((Get-Date) -lt $deadline) {
     Add-Content -Path $supervisorLog -Value "$(Get-Date -Format s) START remaining_hours=$([math]::Round($remainingHours, 3))"
     & $pythonExe $runner `
         --adb $adbExe `
-        --serial "127.0.0.1:16480" `
+        --serial $serial `
         --checkpoint $checkpoint `
         --epoch 3 `
         --hours $remainingHours `
-        --auto-queue `
         --log $runLog
     $exitCode = $LASTEXITCODE
     Add-Content -Path $supervisorLog -Value "$(Get-Date -Format s) EXIT code=$exitCode"

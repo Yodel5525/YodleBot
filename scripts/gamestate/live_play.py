@@ -3,17 +3,16 @@
     .venvs\\royalegym\\Scripts\\python.exe scripts\\gamestate\\live_play.py ^
         --ckpt runs\\tokens\\rs_big_hog\\best.pt
 
-Between battles it navigates with the old bot's screen logic
-(scripts/gamestate/nav.py, ported from scripts/cr_bot.py): Battle in the
-lobby, the end screen's button, chest / card-reveal screens, connection-lost
-RELOAD, popup close buttons, and an app relaunch after 75 s stuck. It plays every battle
-until Ctrl+C or a file named STOP in the repo root (--no-queue: you press
-Battle yourself).
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): you start each battle;
+it never presses Battle or the end screen's button. Between battles it only
+recovers with the old bot's screen logic (scripts/gamestate/nav.py, ported from
+scripts/cr_bot.py): chest / card-reveal screens, connection-lost RELOAD, popup
+close buttons, and an app relaunch after 75 s stuck. It plays every battle
+until Ctrl+C or a file named STOP in the repo root. --no-queue is still
+accepted and changes nothing.
 After each battle it prints the result and the running record, kept in
 reports/live_play/record.json. Every tap, every opponent play and every result
 is logged to reports/live_play/<time>.jsonl.
-
-Ladder play was authorised by the owner on 2026-10-10.
 
 Decision = the evaluator's (tools/rs_eval.RSAgent.act) with the measured live
 configuration: the board is rebuilt from what is on screen and run 21 ticks
@@ -48,7 +47,7 @@ from gamestate.live_bridge import CARD_MAP, card_of_form, rs_state_from_frame  #
 from gamestate.memread import GameMemory  # noqa: E402
 from gamestate.nav import Navigator  # noqa: E402
 
-ADB = r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"
+ADB = str(emulator.DEFAULT_ADB)                 # HASTYCR_ADB / machine.json / PATH / MuMu
 CARD_CENTRES = ((334, 1711), (538, 1711), (742, 1711), (946, 1711))   # mumu_overnight_bot
 # Grid tile -> MuMu 1080x1920 pixel, copied from scripts/brain/arena.py (measured
 # against the live emulator there; importing brain pulls in PIL and the old bot).
@@ -224,7 +223,9 @@ def main() -> int:
     ap.add_argument("--side", type=int, default=1,
                     help="fallback when the side probe is ambiguous")
     ap.add_argument("--no-cap-rule", action="store_true")
-    ap.add_argument("--no-queue", action="store_true", help="do not press Battle / OK")
+    ap.add_argument("--no-queue", action="store_true",
+                    help="accepted for old command lines; changes nothing (friendly battles "
+                         "only: the bot never presses Battle or OK)")
     ap.add_argument("--no-lane-guard", action="store_true",
                     help="let Cannon / Ice Golem go to the lane without the enemy push")
     args = ap.parse_args()
@@ -292,7 +293,7 @@ def main() -> int:
     print(f"Log: {log_path}   record so far: {record}")
     in_battle, last_frame, plays = False, None, 0
     ended_at, last_nav = None, 0.0
-    nav = Navigator(dev.serial, queue=not args.no_queue)
+    nav = Navigator(dev.serial)                  # friendly only: never queues
     prev_tick_seen = None
     delays, misses = [], []
     prev_present = {0: set(), 1: set()}

@@ -1,0 +1,14 @@
+# .venvs\rs022 - optional, throwaway reference venv with the original author's
+# engine, royalesim 0.1.22. It exists only so his re-drive numbers (62.6% winner
+# agreement, 49.0% exact crowns) can be reproduced on the same match sample
+# (tools/royalesim_redrive.py, Phase 2). Never build training rows, train or
+# evaluate models here: everything else uses royalesim 0.1.42 (engine.txt, gpu.txt).
+#
+# Created by: scripts/setup_windows.ps1 -Reference. No torch: the re-drive does not use it.
+# The re-drive also reads the IL_Replay card map. Until change E02 vendors it into
+# data/cards/, that map comes from royaleimitate, which this file does not install.
+#
+# Every line is an exact pin, name==version (tests/pipeline/test_requirements.py).
+royalesim==0.1.22
+numpy==2.5.4
+pyarrow==26.0.0

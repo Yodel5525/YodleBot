@@ -1,0 +1,275 @@
+{
+ "schema": "hastycr.vision.geometry/1",
+ "name": "default_1080x1920",
+ "frame_size": [
+  1080,
+  1920
+ ],
+ "homography_px": [
+  [
+   0.051,
+   0.0,
+   78.0
+  ],
+  [
+   0.0,
+   0.0414,
+   151.2
+  ],
+  [
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "card_slots_px": [
+  [
+   334,
+   1711
+  ],
+  [
+   538,
+   1711
+  ],
+  [
+   742,
+   1711
+  ],
+  [
+   946,
+   1711
+  ]
+ ],
+ "ability_buttons": {
+  "left": {
+   "screen_tiles": [
+    [
+     0,
+     30
+    ],
+    [
+     0,
+     31
+    ],
+    [
+     1,
+     30
+    ],
+    [
+     1,
+     31
+    ],
+    [
+     2,
+     31
+    ]
+   ]
+  },
+  "right": {
+   "screen_tiles": [
+    [
+     16,
+     30
+    ],
+    [
+     16,
+     31
+    ],
+    [
+     17,
+     30
+    ],
+    [
+     17,
+     31
+    ]
+   ]
+  }
+ },
+ "ability_button_places": {
+  "1": [
+   "right"
+  ],
+  "2": [
+   "left",
+   "right"
+  ]
+ },
+ "ground_offsets": {
+  "default": {
+   "anchor_y": 1.0,
+   "dx_mt": 0.0,
+   "dy_mt": 0.0,
+   "note": "box bottom-centre (vision.py convention); uncalibrated"
+  },
+  "flying": {
+   "anchor_y": 1.0,
+   "dx_mt": 0.0,
+   "dy_mt": 600.0,
+   "note": "unmeasured prior: flyers drawn ~0.6 tile above ground"
+  },
+  "classes": {}
+ },
+ "landmarks": [
+  {
+   "name": "enemy_king",
+   "world_tiles": [
+    9.0,
+    3.0
+   ],
+   "px": [
+    537.0,
+    275.4
+   ]
+  },
+  {
+   "name": "own_king",
+   "world_tiles": [
+    9.0,
+    29.0
+   ],
+   "px": [
+    537.0,
+    1351.8
+   ]
+  },
+  {
+   "name": "enemy_left_princess",
+   "world_tiles": [
+    3.5,
+    6.5
+   ],
+   "px": [
+    256.5,
+    420.3
+   ]
+  },
+  {
+   "name": "enemy_right_princess",
+   "world_tiles": [
+    14.5,
+    6.5
+   ],
+   "px": [
+    817.5,
+    420.3
+   ]
+  },
+  {
+   "name": "own_left_princess",
+   "world_tiles": [
+    3.5,
+    25.5
+   ],
+   "px": [
+    256.5,
+    1206.9
+   ]
+  },
+  {
+   "name": "own_right_princess",
+   "world_tiles": [
+    14.5,
+    25.5
+   ],
+   "px": [
+    817.5,
+    1206.9
+   ]
+  },
+  {
+   "name": "left_bridge_top",
+   "world_tiles": [
+    3.5,
+    15.0
+   ],
+   "px": [
+    256.5,
+    772.2
+   ]
+  },
+  {
+   "name": "left_bridge_bottom",
+   "world_tiles": [
+    3.5,
+    17.0
+   ],
+   "px": [
+    256.5,
+    855.0
+   ]
+  },
+  {
+   "name": "right_bridge_top",
+   "world_tiles": [
+    14.5,
+    15.0
+   ],
+   "px": [
+    817.5,
+    772.2
+   ]
+  },
+  {
+   "name": "right_bridge_bottom",
+   "world_tiles": [
+    14.5,
+    17.0
+   ],
+   "px": [
+    817.5,
+    855.0
+   ]
+  },
+  {
+   "name": "river_top_left_edge",
+   "world_tiles": [
+    0.0,
+    15.0
+   ],
+   "px": [
+    78.0,
+    772.2
+   ]
+  },
+  {
+   "name": "river_top_right_edge",
+   "world_tiles": [
+    18.0,
+    15.0
+   ],
+   "px": [
+    996.0,
+    772.2
+   ]
+  },
+  {
+   "name": "river_bottom_left_edge",
+   "world_tiles": [
+    0.0,
+    17.0
+   ],
+   "px": [
+    78.0,
+    855.0
+   ]
+  },
+  {
+   "name": "river_bottom_right_edge",
+   "world_tiles": [
+    18.0,
+    17.0
+   ],
+   "px": [
+    996.0,
+    855.0
+   ]
+  }
+ ],
+ "meta": {
+  "description": "Default arena geometry for a 9:16 portrait screen. homography_px maps RoyaleSim world millitiles (team 1 = screen orientation) to pixels at frame_size; other 9:16 sizes scale through normalised coordinates.",
+  "provenance": "The author's linear fit measured on his MuMu at 1080x1920 (scripts/brain/arena.py:38-40, scripts/gamestate/live_play.py:55): tile index t -> 103.5 + 51 t, 171.9 + 41.4 t px at the tile centre, i.e. px = 78 + 0.051 x_mt, py = 151.2 + 0.0414 y_mt. Card slots: live_play.py:52. Ability-button tiles: royalegym 0.1.25 action.py UI_BUTTON_TILES/UI_BUTTON_PLACES converted to screen tiles (world = (17 - gx, 31 - gy) for team 1).",
+  "landmarks_note": "Synthetic: the linear map evaluated at RoyaleSim arena.json landmarks, not clicked on a screenshot. Refit on the PC with `python -m scripts.vision.geometry template/fit`.",
+  "status": "uncalibrated on this PC"
+ }
+}

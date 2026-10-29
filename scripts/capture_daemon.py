@@ -46,9 +46,11 @@ def prune(folder: Path, budget_mb: float) -> int:
 
 
 def main() -> int:
+    from emulator import DEFAULT_SERIAL                  # hastycr.machine settings
+
     parser = argparse.ArgumentParser(description="Low-res periodic capture with disk cap")
     parser.add_argument("--adb", required=True, type=Path)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--width", type=int, default=360)

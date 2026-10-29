@@ -1,0 +1,28 @@
+# .venvs\buildabot - the GPU venv: CUDA torch, RoyaleSim and the vision stack.
+# Used for training, YOLO and live play.
+#
+# torch and torchvision MUST come from PyTorch's CUDA index and be installed FIRST.
+# PyPI's Windows torch wheel is CPU-only, so `pip install -r` on its own gives a
+# CPU torch and training silently runs on the CPU:
+#     python -m pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
+#     python -m pip install -r requirements/gpu.txt
+# scripts/setup_windows.ps1 does this, and re-installs the CUDA builds if a package
+# in this file replaced them. Pass -GpuIndexUrl to use another CUDA index.
+# The cu128 index stops at torch 2.11.0. 2.14.1+cu130 is verified on the PC: CUDA 13.0,
+# RTX 4070 SUPER, bf16 (docs/SPARRING_PLAN.md).
+#
+# Every line is an exact pin, name==version (tests/pipeline/test_requirements.py).
+# Pins shared with engine.txt are identical. These are the versions installed and
+# working in the PC's buildabot venv on 2026-10-29 (installing ultralytics after the
+# CUDA torch kept 2.14.1+cu130). Change a pin only after trying the new version there.
+torch==2.14.1
+torchvision==0.29.1
+royalesim==0.1.42
+numpy==2.5.4
+pyarrow==26.0.0
+scipy==1.18.1
+pillow==13.0.0
+opencv-python==5.0.0.93
+ultralytics==8.4.192
+matplotlib==3.11.2
+pytest==9.2.0

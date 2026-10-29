@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from loguru import logger  # noqa: E402
 
 import mumu_overnight_bot as guarded  # noqa: E402
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402
 from clashroyalebuildabot.detectors.detector import Detector  # noqa: E402
 from clashroyalebuildabot.namespaces.cards import Cards  # noqa: E402
 
@@ -31,9 +32,8 @@ DECK = [
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Dump detected hand vs the screen")
-    parser.add_argument("--adb", type=Path,
-                        default=Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"))
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--out", type=Path, default=ROOT / "tmp" / "live" / "hand")
     args = parser.parse_args()

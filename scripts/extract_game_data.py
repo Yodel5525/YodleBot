@@ -24,12 +24,15 @@ from __future__ import annotations
 import argparse
 import lzma
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ADB = Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# adb and serial defaults: HASTYCR_ADB / HASTYCR_SERIAL, machine.json, then hastycr.machine's.
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402
 PACKAGE = "com.supercell.clashroyale"
 
 
@@ -150,7 +153,7 @@ def pull_live_patch(adb: Path, serial: str, out_dir: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract CR gameplay data from the APK")
     parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--apk-dir", type=Path, default=ROOT / "tmp" / "apk")
     parser.add_argument("--out", type=Path, default=ROOT / "tmp" / "gamedata")
     parser.add_argument("--skip-live-patch", action="store_true",

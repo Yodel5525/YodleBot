@@ -31,7 +31,7 @@ DECK = [
     Cards.CANNON, Cards.FIREBALL, Cards.HOG_RIDER, Cards.ICE_GOLEM,
     Cards.ICE_SPIRIT, Cards.MUSKETEER, Cards.SKELETONS, Cards.THE_LOG,
 ]
-DEFAULT_ADB = Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe")
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402  (hastycr.machine settings)
 
 
 def report(name: str, samples: list[float]) -> float:
@@ -48,7 +48,7 @@ def report(name: str, samples: list[float]) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Profile the decision loop")
     parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--frames", type=int, default=25)
     args = parser.parse_args()
 

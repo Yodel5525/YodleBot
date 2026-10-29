@@ -9,8 +9,9 @@
 # restarting it would kill that run. So this is pinned to instance 3 and refuses
 # to act unless the instance still has the name it was identified by.
 #
-# The identification, recorded so it can be re-checked rather than trusted:
-#   - the bot talks to 127.0.0.1:16480
+# The identification, recorded so it can be re-checked rather than trusted
+# (the original author's PC; a fresh MuMu install has only instance 0):
+#   - the bot talked to port 16480 on localhost
 #   - MuMuManager reports instance 3 ("Android Device-1-2") on port 16480
 #   - both ports return the same focused window handle, running
 #     com.supercell.clashroyale, so they are one device
@@ -22,9 +23,11 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 $root       = 'C:\Users\aksha\Downloads\HastyCR'
-$adb        = 'C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe'
-$manager    = 'C:\Program Files\Netease\MuMuPlayer\nx_main\MuMuManager.exe'
-$serial     = '127.0.0.1:16480'
+# adb and serial are never guessed here: this script restarts emulators. Set
+# HASTYCR_ADB and HASTYCR_SERIAL (python -m hastycr.machine shows the values).
+$adb        = $env:HASTYCR_ADB
+$manager    = if ($env:HASTYCR_MUMU_MANAGER) { $env:HASTYCR_MUMU_MANAGER } else { 'C:\Program Files\Netease\MuMuPlayer\nx_main\MuMuManager.exe' }
+$serial     = $env:HASTYCR_SERIAL
 $vmIndex    = 3
 $vmName     = 'Android Device-1-2'
 $logFile    = Join-Path $root 'tmp\live\emulator_watchdog.log'
@@ -32,6 +35,11 @@ $strikeFile = Join-Path $root 'tmp\live\emulator_strike.txt'
 
 function Write-Log($message) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message" | Out-File -Append -Encoding utf8 $logFile
+}
+
+if (-not $adb -or -not $serial) {
+    Write-Log 'HASTYCR_ADB / HASTYCR_SERIAL not set; not touching any instance'
+    exit 1
 }
 
 # --- is the device reachable? -------------------------------------------------

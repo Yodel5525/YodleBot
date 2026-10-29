@@ -87,3 +87,10 @@ data/rs_rows/
 .venvs/
 data/rs_rows_live60/
 runs/tokens/
+
+# Machine settings for one PC (src/hastycr/machine.py); machine.example.json is the template.
+/machine.json
+
+# Live-play recordings (frames show clanmates' names); local only.
+reports/vision/
+reports/vision_play/

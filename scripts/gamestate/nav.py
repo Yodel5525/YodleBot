@@ -1,13 +1,14 @@
-"""Between-battle navigation, ported from the old bot (scripts/cr_bot.py).
+"""Between-battle screen handling, ported from the old bot (scripts/cr_bot.py).
 
-The studio's bot got through lobby -> battle -> end screen -> rewards -> lobby
-unattended; this is the same logic, minus its vision battle reader (the
-memory reader replaces that):
+FRIENDLY BATTLES ONLY (hastycr.machine.FRIENDLY_ONLY). A person starts every
+battle, so this never presses the lobby Battle button and never taps the end
+screen's button: Navigator(queue=True) raises FriendlyOnlyError, and there is
+no option that would queue. What is left is recovery on unrecognised screens:
 
-  lobby          BuildABot's screen hash says "lobby" AND the orange Battle
-                 button is there (mumu_overnight_bot.home_guard)  -> tap Battle
-  end_of_game /  BuildABot's screen hash; tap that screen's own button
-  bypass_end     (Screens.*.click_xy, 720p x 1.5)
+  lobby          BuildABot's screen hash says "lobby" -> nothing (wait)
+  end_of_game /  BuildABot's screen hash -> nothing; the person dismisses it.
+  bypass_end     (Its click point is BuildABot's ladder end screen, unverified
+                 on a friendly's.)
   unknown        reward_screen (empty top band = chest / card reveal) -> tap
                  to advance; connection_lost -> RELOAD; after 15 s a popup's
                  close button (popup_guard); after 75 s relaunch Clash Royale
@@ -18,7 +19,6 @@ win screen for the Battle button (2026-10-10).
 """
 from __future__ import annotations
 
-import io
 import subprocess
 import sys
 import time
@@ -28,16 +28,18 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / "scripts")]
+sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "src")]
 
 import connection_lost  # noqa: E402
+import emulator  # noqa: E402
 import popup_guard  # noqa: E402
 import reward_screen  # noqa: E402
+from hastycr import machine  # noqa: E402
 
-ADB = r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"
+ADB = str(emulator.DEFAULT_ADB)                 # HASTYCR_ADB / machine.json / PATH / MuMu
 SCREEN_DIR = ROOT / "vendor" / "ClashRoyaleBuildABot" / "clashroyalebuildabot" / "images" / "screen"
-HOME_BATTLE = (540, 1490)                       # mumu_overnight_bot.HOME_BATTLE
-# BuildABot Screens (720x1280 regions and click points), copied as data.
+# BuildABot Screens (720x1280 regions and click points), copied as data. The click
+# points are kept as data only: nothing here taps them (friendly battles only).
 SCREENS = {
     "in_game": ((148, 1254, 163, 1274), None),
     "lobby": ((424, 126, 506, 181), (360, 1000)),
@@ -53,17 +55,26 @@ def _hash(img):
     return np.asarray(img.resize((8, 8), Image.Resampling.BILINEAR), dtype=np.float32).flatten()
 
 
-_REF = {name: _hash(Image.open(SCREEN_DIR / f"{name}.jpg")) for name in SCREENS}
+_REF: dict | None = None
+
+
+def _references():
+    """BuildABot's reference crops, loaded on first use (vendor/ is installed separately)."""
+    global _REF
+    if _REF is None:
+        _REF = {name: _hash(Image.open(SCREEN_DIR / f"{name}.jpg")) for name in SCREENS}
+    return _REF
 
 
 def classify(small):
     """BuildABot's ScreenDetector.run: nearest reference crop under threshold 30."""
+    refs = _references()
     best, best_diff = "unknown", 30.0
     w, h = small.size
     for name, (ltrb, _) in SCREENS.items():
         box = (int(ltrb[0] * w / 720), int(ltrb[1] * h / 1280),
                int(ltrb[2] * w / 720), int(ltrb[3] * h / 1280))
-        diff = float(np.mean(np.abs(_hash(small.crop(box)) - _REF[name])))
+        diff = float(np.mean(np.abs(_hash(small.crop(box)) - refs[name])))
         if diff < best_diff:
             best, best_diff = name, diff
     return best
@@ -91,7 +102,8 @@ def capture(serial):
 
 
 def home_guard(full):
-    """mumu_overnight_bot.home_guard: the orange Battle button fills its region."""
+    """mumu_overnight_bot.home_guard: the orange Battle button fills its region.
+    Detection only: it tells the lobby apart, nothing taps the button."""
     roi = np.asarray(full)[1380:1600, 350:730].astype(np.int16)
     r, g, b = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
     orange = (r > 180) & (g > 80) & (g < 210) & (b < 100) & (r > g * 1.25)
@@ -104,10 +116,17 @@ def tap(serial, xy):
 
 
 class Navigator:
-    """Call step() whenever no battle is being read. Returns a log line or None."""
+    """Call step() whenever no battle is being read. Returns a log line or None.
 
-    def __init__(self, serial, queue=True):
-        self.serial, self.queue = serial, queue
+    Friendly battles only: queue=True raises FriendlyOnlyError, the lobby and the
+    end screen are never tapped. `queue` stays a parameter so an old caller that
+    asks for ladder fails loudly instead of silently getting something else.
+    """
+
+    def __init__(self, serial, queue=False):
+        if queue:
+            machine.refuse_queue("Navigator(queue=True)")
+        self.serial, self.queue = serial, False
         now = time.monotonic()
         self.last_nav = self.last_reward = self.last_reload = 0.0
         self.last_popup = self.last_recover = 0.0
@@ -126,20 +145,11 @@ class Navigator:
         if screen == "in_game":
             self.unknown_since = now
             return note
-        if screen == "lobby":
+        if screen == "lobby":                   # a person starts the next friendly
             self.unknown_since, self.reward_taps = now, 0
-            if self.queue and now - self.last_nav > 5 and home_guard(full):
-                tap(self.serial, HOME_BATTLE)
-                self.last_nav = now
-                return "    tapped Battle"
             return note
         if screen in ("end_of_game", "bypass_end_of_game"):
-            self.unknown_since = now
-            if self.queue and now - self.last_nav > 4:
-                xy = SCREENS[screen][1]
-                tap(self.serial, (round(xy[0] * 1.5), round(xy[1] * 1.5)))
-                self.last_nav = now
-                return f"    tapped {screen} button"
+            self.unknown_since = now            # a person dismisses the end screen
             return note
         # unknown
         if now - self.last_reward > 1.5 and reward_screen.is_reward_screen(full):

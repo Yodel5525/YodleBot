@@ -90,7 +90,7 @@ This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run 
 
 Each change has an ID. Full specs live in the session's plan; one-line summaries are below.
 
-**Batch 1: foundation** (in progress)
+**Batch 1: foundation** (done; see `docs/SPARRING_RUNBOOK.md` for the PC steps)
 - P01: machine config for adb path, serial, venvs and data folders, via environment variables or `machine.json`.
 - P02: remove the original author's hard-coded paths and ports.
 - P03: friendly-only by construction.
@@ -102,7 +102,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V08: screen capture sources.
 - L01: statistics and ratings.
 
-**Batch 2: engine and training core**
+**Batch 2: engine and training core** (in progress)
 - E01: a single RoyaleSim factory with a fingerprint.
 - E02: card map, including 3 missing cards.
 - E04: refuse to load a checkpoint into the wrong engine.

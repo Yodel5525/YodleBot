@@ -14,12 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "tmp" / "live" / "cr_bot.log"
-DEFAULT_ADB = Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe")
 
-# One source of truth for which emulator this project may touch: the
-# other MuMu instance on this machine runs a Clash of Clans bot.
+# One source of truth for which emulator this project may touch (adb, serial:
+# hastycr.machine via scripts/emulator.py).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.emulator import DEFAULT_SERIAL          # noqa: E402
+from scripts.emulator import DEFAULT_ADB, DEFAULT_SERIAL          # noqa: E402
 
 
 def main(argv=None) -> int:

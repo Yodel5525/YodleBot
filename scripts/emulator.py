@@ -1,33 +1,40 @@
 """Which emulator this project is allowed to talk to.
 
-Two MuMu instances run on this machine. One plays Clash Royale. The other
-runs a Clash of Clans bot, and driving it by accident means taps landing in
-somebody's village - so getting this wrong is not a crash, it is damage.
+verify() runs before anything sends a tap, and refuses any device that is not
+running Clash Royale. On the author's PC two MuMu instances ran: one Clash
+Royale, one a Clash of Clans bot, and driving the wrong one by accident means
+taps landing in somebody's village - so getting this wrong is not a crash, it
+is damage. The check stays on every machine.
 
-Identity cannot come from the hardware. Both instances report the same spoofed
+Identity cannot come from the hardware. Instances report the same spoofed
 model (`SM_G9980`), the same 1080x1920, and the same density, because that is
 what MuMu presents. It has to come from the instance itself:
 
     MuMuManager.exe info -v all      lists instances by index and name
     MuMuManager.exe adb -v <index>   gives that instance's adb port
 
-Instance 3 is "Android Device-1-2" and answers on port 16480. Instance 0 is
-"Android Device" - the Clash of Clans one - on 16384. The legacy 7555 and 5555
-endpoints that this project used to hardcode both resolve to Clash of Clans
-instances, which is exactly the bug this module exists to prevent.
+Port = 16384 + 32 * index, so a fresh single-instance install (index 0) is on
+127.0.0.1:16384. The adb path, serial and instance name come from
+src/hastycr/machine.py: HASTYCR_ADB / HASTYCR_SERIAL / HASTYCR_INSTANCE, then
+machine.json, then the defaults (`python -m hastycr.machine` shows them).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
+import sys
 from pathlib import Path
 
-DEFAULT_ADB = Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe")
+_SRC = str(Path(__file__).resolve().parents[1] / "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)                    # hastycr, also without `pip install -e .`
 
-# MuMu instance 3. Override for a different machine with the env vars.
-DEFAULT_SERIAL = os.environ.get("HASTYCR_SERIAL", "127.0.0.1:16480")
-DEFAULT_INSTANCE = os.environ.get("HASTYCR_INSTANCE", "Android Device-1-2")
+from hastycr import machine  # noqa: E402
+
+_MACHINE = machine.get()
+DEFAULT_ADB = _MACHINE.adb
+DEFAULT_SERIAL = _MACHINE.serial
+DEFAULT_INSTANCE = _MACHINE.instance
 
 REQUIRED_PACKAGE = "com.supercell.clashroyale"
 FORBIDDEN_PACKAGE = "com.supercell.clashofclans"
@@ -37,7 +44,8 @@ def packages(serial: str = DEFAULT_SERIAL, adb: str | Path = DEFAULT_ADB) -> set
     """Every package installed on `serial`, or an empty set if unreachable."""
     try:
         out = subprocess.run([str(adb), "-s", serial, "shell", "pm", "list", "packages"],
-                             capture_output=True, text=True, timeout=20)
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=20)
     except (OSError, subprocess.SubprocessError):
         return set()
     return {line.strip().replace("package:", "")
@@ -72,7 +80,6 @@ def verify(serial: str = DEFAULT_SERIAL, adb: str | Path = DEFAULT_ADB) -> None:
 
 
 if __name__ == "__main__":                      # a quick check from the shell
-    import sys
     target = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SERIAL
     verify(target)
     print(f"{target} is the Clash Royale instance ({DEFAULT_INSTANCE})")

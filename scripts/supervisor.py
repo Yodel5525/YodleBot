@@ -11,6 +11,11 @@ it does is therefore either idempotent or bounded:
   unattended run that fills the disk takes the desktop down with it,
 * a heartbeat file lets an outside watchdog (or a takeover agent) tell the
   difference between "working" and "wedged".
+
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): every block runs cr_bot
+with --no-queue, and cr_bot never presses Battle anyway, so a block waits for a
+person to start each friendly. adb, serial and the interpreter come from
+hastycr.machine (HASTYCR_ADB / HASTYCR_SERIAL / HASTYCR_PY_TRAIN, machine.json).
 """
 
 from __future__ import annotations
@@ -24,7 +29,10 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venvs" / "buildabot" / "Scripts" / "python.exe"
+sys.path.insert(0, str(ROOT / "src"))
+from hastycr import machine  # noqa: E402
+
+PYTHON = machine.py_train()                     # .venvs/buildabot unless configured
 LIVE = ROOT / "tmp" / "live"
 STATE_PATH = LIVE / "supervisor_state.json"
 LOG_PATH = LIVE / "supervisor.log"
@@ -146,6 +154,8 @@ def play_block(adb: Path, serial: str, matches: int, timeout: int,
         str(PYTHON), "scripts/cr_bot.py", "--adb", str(adb), "--serial", serial,
         "--max-matches", str(matches), "--hours", str(round(timeout / 3600.0, 3)),
         "--vision", "yolo",
+        # Friendly battles only. cr_bot never queues; the flag says so in the log too.
+        "--no-queue",
         # Reference crops of units as they render on this device. Bounded at 6
         # per class by MAX_PER_CLASS, so this gathers roughly 1200 small files
         # and then stops - it is not a training set and running longer does not
@@ -174,9 +184,8 @@ def play_block(adb: Path, serial: str, matches: int, timeout: int,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="HastyCR unattended supervisor")
-    parser.add_argument("--adb", type=Path,
-                        default=Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe"))
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--adb", type=Path, default=machine.adb())
+    parser.add_argument("--serial", default=machine.serial())
     parser.add_argument("--matches", type=int, default=5, help="matches per block")
     parser.add_argument("--block-timeout", type=int, default=2400)
     parser.add_argument("--review-timeout", type=int, default=900)

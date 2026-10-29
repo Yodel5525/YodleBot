@@ -1,0 +1,20 @@
+# .venvs\royalegym - the engine venv: CPU torch and RoyaleSim.
+# Used for building rows, evaluation and RL rollout workers (many processes, so CPU
+# torch keeps each worker small on Windows).
+#
+# scripts/setup_windows.ps1 installs this. It installs torch FIRST, from PyTorch's
+# CPU index, and only then this file from PyPI (torch is then already satisfied):
+#     python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+#     python -m pip install -r requirements/engine.txt
+#
+# Every line is an exact pin, name==version (tests/pipeline/test_requirements.py).
+# Packages in both engine.txt and gpu.txt have the same pin in both, so rows and
+# evaluations agree between the venvs. These are the versions installed and working
+# in the PC's royalegym venv on 2026-10-29 (docs/SPARRING_PLAN.md).
+# royalesim decides row vocab ids and checkpoint compatibility: change it only
+# together with a fidelity-grid re-run.
+torch==2.14.1
+royalesim==0.1.42
+numpy==2.5.4
+pyarrow==26.0.0
+pytest==9.2.0

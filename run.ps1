@@ -1,15 +1,20 @@
-# Launch the Clash Royale bot.
+# Launch the Clash Royale bot. FRIENDLY BATTLES ONLY: you start every battle
+# (clan chat or a friend's profile) and dismiss its end screen; the bot plays the
+# battle on screen and never presses Battle. There is no ladder option.
 #
 #   .\run.ps1                 play 5 matches, then stop
 #   .\run.ps1 -Matches 20     play 20 matches
-#   .\run.ps1 -Brain rl -NoQueue -Matches 3
-#                             friendly 1v1: you start the battle, it plays
+#   .\run.ps1 -Brain rl -Matches 3
+#                             the simulator-trained policy instead of the rules
 #   .\run.ps1 -Forever        run the supervisor loop: blocks of 5, reviewed
 #                             and tuned between blocks, until stopped
 #   .\run.ps1 -Stop           stop everything
 #
-# Requires MuMu running with Clash Royale open. The advisor needs Ollama, which
-# is checked below rather than left to fail silently mid-match.
+# adb and the emulator serial come from src\hastycr\machine.py: $env:HASTYCR_ADB /
+# $env:HASTYCR_SERIAL, else machine.json, else the defaults (adb on PATH or MuMu's
+# own; 127.0.0.1:16384). The interpreter is $env:HASTYCR_PY_TRAIN or
+# .venvs\buildabot. Requires MuMu running with Clash Royale open. The advisor
+# needs Ollama, which is checked below rather than left to fail silently mid-match.
 
 param(
     # NOT $Matches: that is a PowerShell automatic variable, and declaring it
@@ -32,8 +37,8 @@ param(
     # Who decides what to play.
     #
     #   rules  - the hand-written policy in brain/policy.py, optionally biased
-    #            by the local Qwen advisor (see -NoAdvisor). This is what has
-    #            been playing ladder.
+    #            by the local Qwen advisor (see -NoAdvisor). This is what
+    #            played the original author's matches.
     #   rl     - a policy trained in the simulator, deciding every play itself.
     #            The advisor is not consulted at all in this mode: it can only
     #            reweight candidates a rule engine produced, and in rl mode
@@ -51,11 +56,10 @@ param(
     # emulator watchdog restarts Clash Royale on its own schedule.
     [switch]$Watchdogs,
     [ValidateSet('rules', 'rl')][string]$Brain = 'rules',
-    # Play, but never press Battle. For a friendly 1v1: you start the match
-    # from your side and the bot plays whatever it finds itself in, because
-    # the runner decides it is in a game from the screen rather than from
-    # having queued one. Without this it would keep tapping Battle in the
-    # lobby and drag itself into ladder between your friendlies.
+    # Accepted for old callers (the studio sends it) and changes nothing: the
+    # bot never presses Battle, so every run already plays only the battle you
+    # start. The runner decides it is in a game from the screen rather than
+    # from having queued one. cr_bot always gets --no-queue below.
     [switch]$NoQueue,
     # The frozen Sprint 3 winner: step 4,392,960, 43.3% against the rule engine
     # over 300 held-out games (Wilson 37.8-49.0), 91% vs meta decks, 100% vs
@@ -64,16 +68,14 @@ param(
     #
     # This used to point at tmp\rl\hog26v6_best.pt, which was a collapsed run -
     # one win in fifty-nine. Checkpoints under tmp\ are scratch and get
-    # overwritten by whatever is training; anything meant to touch a real ladder
+    # overwritten by whatever is training; anything meant to touch a real
     # match lives under checkpoints\ with a manifest saying what it scored.
     [string]$Checkpoint = 'checkpoints\sprint4_baseline\pilot_best_4392960.pt'
 )
 
 $ErrorActionPreference = 'Continue'
 $root   = $PSScriptRoot
-$python = Join-Path $root '.venvs\buildabot\Scripts\python.exe'
-$adb    = 'C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe'
-$serial = '127.0.0.1:16480'
+$python = if ($env:HASTYCR_PY_TRAIN) { $env:HASTYCR_PY_TRAIN } else { Join-Path $root '.venvs\buildabot\Scripts\python.exe' }
 
 if ($Stop) {
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
@@ -84,6 +86,22 @@ if ($Stop) {
     Write-Host 'stopped.' -ForegroundColor Yellow
     exit 0
 }
+
+if (-not (Test-Path $python)) {
+    Write-Host "no Python at $python - create .venvs\buildabot (see docs\SPARRING_RUNBOOK.md) or set HASTYCR_PY_TRAIN" -ForegroundColor Red
+    exit 1
+}
+# adb and serial: HASTYCR_ADB / HASTYCR_SERIAL, machine.json, defaults. Asking
+# machine.py (stdlib only, -I: no site customisation) keeps this launcher and the
+# Python scripts on the same device.
+$machinePy = Join-Path $root 'src\hastycr\machine.py'
+$adb    = (& $python -I $machinePy --get adb    | Select-Object -Last 1)
+$serial = (& $python -I $machinePy --get serial | Select-Object -Last 1)
+if (-not $adb -or -not $serial) {
+    Write-Host "could not read adb / serial from $machinePy (is machine.json valid JSON?)" -ForegroundColor Red
+    exit 1
+}
+Write-Host "adb: $adb   serial: $serial" -ForegroundColor DarkGray
 
 # The emulator has to be reachable before anything else is worth trying.
 # Note the -join: `-match` against an array filters it rather than returning a
@@ -206,6 +224,9 @@ $botArgs = @(
 # from our own detector, so training on them would only teach it its own errors.
 $botArgs += '--harvest-sprites'
 if ($useAdvisor) { $botArgs += '--advisor' }
+# Friendly battles only (src\hastycr\machine.py FRIENDLY_ONLY): always --no-queue,
+# whatever was passed. cr_bot never presses Battle in any case.
+$NoQueue = $true
 if ($NoQueue)    { $botArgs += '--no-queue' }
 if ($Brain -eq 'rl') { $botArgs += @('--rl', $checkpointPath) }
 

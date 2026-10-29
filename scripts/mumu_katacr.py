@@ -1,3 +1,9 @@
+"""Guarded KataCR sequence-model runner for MuMu.
+
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): a person starts every
+battle and dismisses its end screen. --auto-queue, which used to press Battle,
+now refuses to start.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +27,8 @@ import heuristic_policy  # noqa: E402
 import policy_shims  # noqa: E402
 import popup_guard  # noqa: E402
 import tower_hp  # noqa: E402
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402
+from hastycr import machine  # noqa: E402
 from hastycr.adapters.katacr import KataPolicy, MODEL_DECK_NAMES, grid_to_mumu  # noqa: E402
 
 
@@ -55,8 +63,8 @@ def valid_model_hand(state) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Guarded sequence-model runner for MuMu")
-    parser.add_argument("--adb", required=True, type=Path)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--model-root", dest="kata_root", type=Path, default=ROOT / "vendor" / "KataCR")
     parser.add_argument("--verbose", action="store_true", help="show upstream library debug logs")
@@ -66,10 +74,13 @@ def main() -> int:
     parser.add_argument("--epoch", type=int, default=3)
     parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--auto-queue", action="store_true")
+    parser.add_argument("--auto-queue", action="store_true",
+                        help="refused: friendly battles only, the runner never presses Battle")
     parser.add_argument("--max-actions", type=int)
     parser.add_argument("--log", type=Path, default=ROOT / "tmp" / "live" / "katacr.log")
     args = parser.parse_args()
+    if args.auto_queue:
+        parser.error(f"--auto-queue is disabled. {machine.FRIENDLY_ONLY_MESSAGE}")
     # Upstream perception logs one DEBUG line per frame, which buries this
     # runner's own PLAY/BLOCK output. Keep warnings, drop the per-frame noise.
     if not args.verbose:
@@ -88,13 +99,13 @@ def main() -> int:
     log("LOAD policy checkpoint epoch=%03d" % args.epoch)
     detector = Detector(DECK)
     policy = KataPolicy(args.kata_root, args.checkpoint, args.epoch)
-    log(f"READY n_step={policy.n_step} dry_run={args.dry_run} auto_queue={args.auto_queue}")
+    log(f"READY n_step={policy.n_step} dry_run={args.dry_run} auto_queue=False")
 
     deadline = time.monotonic() + args.hours * 3600
     in_match = False
-    match_started = last_action = last_nav = 0.0
+    match_started = last_action = 0.0
     match_action_start = 0
-    actions = matches = candidates = finished = popups = recoveries = 0
+    actions = candidates = finished = popups = recoveries = 0
     last_screen = None
     last_towers = "?"
     last_confirmed_live_towers = "?"
@@ -112,16 +123,10 @@ def main() -> int:
                 log(f"SCREEN {last_screen}->{screen}")
                 last_screen = screen
 
-            # Guarded lobby -> battle queue.
+            # Lobby: wait for a person to start a friendly battle.
             if screen == "lobby":
                 in_match = False
                 last_confirmed_live_towers = "?"
-                if args.auto_queue and not args.dry_run and now - last_nav > 5:
-                    if guarded.home_guard(full, state):
-                        guarded.tap(args.adb, args.serial, guarded.HOME_BATTLE)
-                        last_nav = now
-                        matches += 1
-                        log(f"QUEUE match={matches}")
                 time.sleep(0.7)
                 continue
 
@@ -140,14 +145,7 @@ def main() -> int:
                     if args.max_matches is not None and finished >= args.max_matches:
                         log(f"STOP max_matches finished={finished} actions={actions}")
                         return 0
-                if args.auto_queue and not args.dry_run and now - last_nav > 5:
-                    _, check = guarded.detect(detector, args.adb, args.serial)
-                    if check is not None and check.screen.name == screen:
-                        xy = state.screen.click_xy
-                        guarded.tap(args.adb, args.serial, (round(xy[0] * 1.5), round(xy[1] * 1.5)))
-                        last_nav = now
-                        log("RESULT_EXIT")
-                time.sleep(0.7)
+                time.sleep(0.7)                 # a person dismisses the end screen
                 continue
 
             # An offer dialog covers the lobby and reads as `unknown`, which
@@ -309,7 +307,7 @@ def main() -> int:
             log(f"ERROR {type(exc).__name__}: {exc}")
             time.sleep(1)
 
-    log(f"STOP deadline matches={matches} actions={actions} candidates={candidates}")
+    log(f"STOP deadline matches={finished} actions={actions} candidates={candidates}")
     return 0
 
 

@@ -1,3 +1,8 @@
+"""Guarded MuMu heuristic runner, and the capture / tap / guard helpers other runners import.
+
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): a person starts every
+battle. Nothing here taps the lobby Battle button; the runner waits in the lobby.
+"""
 from __future__ import annotations
 
 import argparse
@@ -24,7 +29,8 @@ DECK = [
     Cards.ICE_SPIRIT, Cards.MUSKETEER, Cards.SKELETONS, Cards.THE_LOG,
 ]
 CARD_CENTRES = ((334, 1711), (538, 1711), (742, 1711), (946, 1711))
-HOME_BATTLE = (540, 1490)
+# The lobby Battle button (540, 1490) is deliberately not a constant any more: nothing
+# may tap it. home_guard() still looks at that region to recognise the lobby.
 
 
 def adb(path: Path, serial: str, *args: str, binary: bool = False):
@@ -277,9 +283,12 @@ def choose(state):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Guarded MuMu ladder heuristic")
-    parser.add_argument("--adb", required=True, type=Path)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    from emulator import DEFAULT_ADB, DEFAULT_SERIAL      # hastycr.machine settings
+
+    parser = argparse.ArgumentParser(
+        description="Guarded MuMu heuristic for friendly battles (never presses Battle)")
+    parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument("--log", type=Path, default=ROOT / "tmp" / "live" / "overnight-bot.log")
     args = parser.parse_args()
@@ -288,7 +297,7 @@ def main() -> int:
     deadline = time.monotonic() + args.hours * 3600
     last_action = 0.0
     last_nav = 0.0
-    actions = matches = 0
+    actions = 0
 
     def log(message):
         line = f"{datetime.now():%H:%M:%S} {message}"
@@ -296,7 +305,7 @@ def main() -> int:
         with args.log.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
 
-    log("START guarded ladder runner; unknown screens are no-click")
+    log("START guarded friendly-battle runner; lobby and unknown screens are no-click")
     while time.monotonic() < deadline:
         try:
             full, state = detect(detector, args.adb, args.serial)
@@ -306,13 +315,8 @@ def main() -> int:
             now = time.monotonic()
             screen = state.screen.name
 
-            if home_guard(full, state) and now - last_nav > 8:
-                full2, state2 = detect(detector, args.adb, args.serial)
-                if state2 is not None and home_guard(full2, state2):
-                    tap(args.adb, args.serial, HOME_BATTLE)
-                    last_nav = now
-                    matches += 1
-                    log(f"QUEUE match={matches}")
+            if screen == "lobby":
+                # Friendly battles only: wait for a person to start one.
                 time.sleep(1)
                 continue
 
@@ -357,7 +361,7 @@ def main() -> int:
         except Exception as exc:
             log(f"ERROR {type(exc).__name__}: {exc}")
             time.sleep(2)
-    log(f"STOP deadline matches={matches} actions={actions}")
+    log(f"STOP deadline actions={actions}")
     return 0
 
 

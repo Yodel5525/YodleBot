@@ -10,6 +10,12 @@ Differences from the old `mumu_katacr.py` runner that matter for play quality:
   in exchange for a guard that only ever mattered outside a battle.
 * Every finished match is written to `matches/*.json` so the review loop can
   read outcomes without parsing prose logs.
+
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): a person starts every
+battle and dismisses its end screen. The runner never taps the lobby Battle
+button or the end screen's button; --no-queue is still accepted and changes
+nothing. --adb / --serial default to hastycr.machine (HASTYCR_ADB /
+HASTYCR_SERIAL, machine.json, then PATH / MuMu and 127.0.0.1:16384).
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import reward_screen  # noqa: E402
 from sprite_harvest import SpriteHarvester  # noqa: E402
 import connection_lost  # noqa: E402
 import tower_hp  # noqa: E402
-from emulator import verify as verify_emulator  # noqa: E402
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL, verify as verify_emulator  # noqa: E402
 from brain import arena  # noqa: E402
 from brain.knowledge import BOOK  # noqa: E402
 from brain.policy import Brain  # noqa: E402
@@ -109,8 +115,10 @@ def patch_tower_numbers(state, full, hp_filter=None, now=0.0):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="HastyCR live runner")
-    parser.add_argument("--adb", required=True, type=Path)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--adb", type=Path, default=DEFAULT_ADB,
+                        help=f"adb executable (default from hastycr.machine: {DEFAULT_ADB})")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL,
+                        help=f"emulator adb serial (default from hastycr.machine: {DEFAULT_SERIAL})")
     parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument("--max-matches", type=int)
     parser.add_argument("--dry-run", action="store_true")
@@ -121,7 +129,9 @@ def main() -> int:
                              "540x960, and capture is the largest single cost "
                              "in the decision loop. Opt-in until it has been "
                              "through a live match")
-    parser.add_argument("--no-queue", action="store_true", help="do not start matches")
+    parser.add_argument("--no-queue", action="store_true",
+                        help="accepted for old command lines; changes nothing. Friendly "
+                             "battles only: the runner never starts a match itself")
     parser.add_argument("--harvest-sprites", action="store_true",
                         help="save reference crops of enemy units for a future detector")
     parser.add_argument("--advisor", action="store_true",
@@ -136,7 +146,7 @@ def main() -> int:
     parser.add_argument("--rl-temperature", type=float, default=0.0,
                         help="0 is greedy, which is the right default live - "
                              "sampling is exploration and there is nothing to "
-                             "explore on ladder")
+                             "explore in a real battle")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log", type=Path, default=ROOT / "tmp" / "live" / "cr_bot.log")
     parser.add_argument("--matches-dir", type=Path, default=ROOT / "tmp" / "live" / "matches")
@@ -184,13 +194,13 @@ def main() -> int:
     else:
         brain = Brain(use_advisor=args.advisor)
     harvester = SpriteHarvester() if args.harvest_sprites else None
-    log(f"READY units={BOOK.source} dry_run={args.dry_run} queue={not args.no_queue} "
+    log(f"READY units={BOOK.source} dry_run={args.dry_run} queue=False "
         f"advisor={'on' if args.advisor else 'off'}")
 
     deadline = time.monotonic() + args.hours * 3600
     in_match = False
-    match_started = last_nav = 0.0
-    finished = queued = ticks = 0
+    match_started = 0.0
+    finished = ticks = 0
     last_screen = None
     unknown_since = last_popup = last_recover = last_reward_tap = time.monotonic()
     reward_taps = 0
@@ -229,13 +239,8 @@ def main() -> int:
                 guard_blocked_since = None
 
             if screen == "lobby":
+                # Friendly battles only: wait here for a person to start one.
                 in_match = False
-                if not args.no_queue and not args.dry_run and now - last_nav > 5:
-                    if guarded.home_guard(full, state):
-                        guarded.tap(args.adb, args.serial, guarded.HOME_BATTLE)
-                        last_nav = now
-                        queued += 1
-                        log(f"QUEUE #{queued}")
                 unknown_since = now
                 time.sleep(0.7)
                 continue
@@ -286,11 +291,8 @@ def main() -> int:
                     if args.max_matches and finished >= args.max_matches:
                         log(f"STOP max_matches={finished}")
                         return 0
-                if not args.no_queue and not args.dry_run and now - last_nav > 4:
-                    xy = state.screen.click_xy
-                    guarded.tap(args.adb, args.serial,
-                                (round(xy[0] * 1.5), round(xy[1] * 1.5)))
-                    last_nav = now
+                # The end screen is left for the person to dismiss: its button
+                # was tapped only to requeue, and friendly battles never queue.
                 unknown_since = now
                 time.sleep(0.7)
                 continue
@@ -516,7 +518,7 @@ def main() -> int:
             log(f"ERROR {type(exc).__name__}: {exc}")
             time.sleep(1)
 
-    log(f"STOP deadline matches={finished} queued={queued}")
+    log(f"STOP deadline matches={finished} queued=0")
     return 0
 
 

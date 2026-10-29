@@ -1,3 +1,8 @@
+"""Guarded native BuildABot scoring on MuMu.
+
+Friendly battles only (hastycr.machine.FRIENDLY_ONLY): a person starts every
+battle. Nothing here taps the lobby Battle button; the runner waits in the lobby.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +17,7 @@ sys.path.insert(0, str(ROOT / "vendor" / "ClashRoyaleBuildABot"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mumu_overnight_bot as guarded  # noqa: E402
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402
 from clashroyalebuildabot.actions import (  # noqa: E402
     ArchersAction,
     BabyDragonAction,
@@ -95,8 +101,8 @@ def validate_battle(detector, adb_path, serial, slot=None, card_name=None, count
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Guarded native BuildABot policy on MuMu")
-    parser.add_argument("--adb", required=True, type=Path)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument(
         "--log",
@@ -108,7 +114,7 @@ def main() -> int:
     detector = Detector(DECK)
     deadline = time.monotonic() + args.hours * 3600
     last_action = last_nav = 0.0
-    actions = matches = 0
+    actions = 0
 
     def log(message: str) -> None:
         line = f"{datetime.now():%H:%M:%S} {message}"
@@ -126,13 +132,8 @@ def main() -> int:
             now = time.monotonic()
             screen = state.screen.name
 
-            if guarded.home_guard(full, state) and now - last_nav > 8:
-                full2, state2 = guarded.detect(detector, args.adb, args.serial)
-                if state2 is not None and guarded.home_guard(full2, state2):
-                    guarded.tap(args.adb, args.serial, guarded.HOME_BATTLE)
-                    last_nav = now
-                    matches += 1
-                    log(f"QUEUE match={matches}")
+            if screen == "lobby":
+                # Friendly battles only: wait for a person to start one.
                 time.sleep(1)
                 continue
 
@@ -189,7 +190,7 @@ def main() -> int:
         except Exception as exc:
             log(f"ERROR {type(exc).__name__}: {exc}")
             time.sleep(2)
-    log(f"STOP deadline matches={matches} actions={actions}")
+    log(f"STOP deadline actions={actions}")
     return 0
 
 

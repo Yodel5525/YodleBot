@@ -30,10 +30,22 @@ live = [
     "av>=12.0",
 ]
 dev = ["pytest>=8.0"]
+# The RoyaleSim pipeline (tools/rs_*.py). royalesim is pinned exactly because row
+# vocab ids and checkpoints depend on the engine version. The exact pins for the two
+# venvs are in requirements/*.txt; scripts/setup_windows.ps1 installs them, torch first
+# from the right PyTorch index (PyPI's Windows torch is CPU-only).
+engine = ["royalesim==0.1.42", "pyarrow>=15"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Used by tests/pipeline; its conftest skips a marked test when the need is not met.
+markers = [
+    "engine: needs royalesim; skipped when it does not import",
+    "il_replay: needs data/il_replay/replays/*.parquet; skipped when absent",
+    "gpu: needs torch with CUDA; skipped otherwise",
+    "device: talks to the emulator; runs only with HASTYCR_DEVICE_TESTS=1",
+]
 

@@ -48,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import emulator  # noqa: E402
 from gamestate.memread import GameMemory, _sh  # noqa: E402
 
 CARD_MAP = json.loads((Path(__file__).with_name("card_map.json")).read_text())["cards"]
@@ -119,7 +120,7 @@ def main() -> int:
     dev = GameMemory()
     reader = "/data/local/tmp/hcr_reader"
     proc = subprocess.Popen(
-        [r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe",
+        [str(emulator.DEFAULT_ADB),
          "-s", dev.serial, "exec-out",
          f"HCR_SIDE={args.side} {reader} {dev.pid} {dev.libg:x} 100"],
         stdout=subprocess.PIPE, text=True)

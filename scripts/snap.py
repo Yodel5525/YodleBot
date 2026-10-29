@@ -12,11 +12,14 @@ from __future__ import annotations
 import argparse
 import io
 import subprocess
+import sys
 from pathlib import Path
 
 from PIL import Image
 
-DEFAULT_ADB = Path(r"C:\Program Files\Netease\MuMuPlayer\nx_device\15.0\shell\adb.exe")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# adb and serial defaults: HASTYCR_ADB / HASTYCR_SERIAL, machine.json, then hastycr.machine's.
+from emulator import DEFAULT_ADB, DEFAULT_SERIAL  # noqa: E402
 
 
 def capture(adb: Path, serial: str) -> Image.Image:
@@ -30,7 +33,7 @@ def capture(adb: Path, serial: str) -> Image.Image:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Screenshot the emulator, downscaled")
     parser.add_argument("--adb", type=Path, default=DEFAULT_ADB)
-    parser.add_argument("--serial", default="127.0.0.1:16480")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
     parser.add_argument("--out", type=Path, default=Path("tmp/live/snap.jpg"))
     parser.add_argument("--scale", type=float, default=3.0)
     parser.add_argument("--quality", type=int, default=60)

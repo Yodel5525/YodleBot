@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Machine settings for this PC. Copy this file to machine.json (gitignored) and change what",
+    "differs here; null means 'use the default'. Environment variables win over this file:",
+    "HASTYCR_ADB, HASTYCR_SERIAL, HASTYCR_INSTANCE, HASTYCR_PY_ENGINE, HASTYCR_PY_TRAIN,",
+    "HASTYCR_DATA, HASTYCR_RUNS, HASTYCR_MUMU_MANAGER. Check the result with:",
+    "    .venvs\\buildabot\\Scripts\\python.exe -m hastycr.machine",
+    "Paths: forward slashes, or double every backslash. Relative paths start at the repo root.",
+    "adb: null finds adb on PATH, then MuMu's own shell\\adb.exe under Program Files\\Netease.",
+    "     Prefer MuMu's own: two adb versions restart each other's server. To list them:",
+    "     Get-ChildItem 'C:\\Program Files\\Netease' -Recurse -Filter adb.exe | % FullName",
+    "serial: MuMu instance i answers on 127.0.0.1:(16384 + 32 * i); a fresh install has",
+    "     only instance 0. 'MuMuManager.exe adb -v 0' prints it."
+  ],
+  "adb": null,
+  "serial": "127.0.0.1:16384",
+  "instance": "Android Device",
+  "py_engine": null,
+  "py_train": null,
+  "data": null,
+  "runs": null,
+  "mumu_manager": null
+}
