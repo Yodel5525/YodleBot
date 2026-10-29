@@ -68,6 +68,20 @@ This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run 
 4. **Evaluation.** Paired matches on held-out decks and seeds, both sides of the board, with confidence intervals. A new model replaces the champion only when it is clearly better. Real friendlies against clanmates are the final check.
 5. **Live loop:** screen capture → unit detector → tracker → screen readers (hand, next card, elixir, clock, tower HP, unit HP bars) → the same observation encoder used in training → model → tap through adb. It runs in dry-run mode by default and stops when a `STOP` file is created.
 
+## Results so far
+
+**First model, `live_big_hog`** (2026-10-29, owner's PC, `scripts/first_model.ps1`):
+
+| Item | Value |
+|---|---|
+| Rows | `--live-compat`: 13,659 Hog 2.6 matches plus 20,000 others, 135 shards. 3 matches were skipped by the orientation check. |
+| General model `live_big` | d256, 6 layers, 8 heads, 3 epochs in 33 min on the RTX 4070 Super. Hog card 65.9%, tile-within-1 54.6%. |
+| Hog 2.6 fine-tune `live_big_hog` | 3 epochs in 9.4 min. **Hog card 66.8%, tile exact 31.8%, tile-within-1 55.7%**, which matches the author's best (`rs_big_hog`: 66.8 / 31.7 / 55.7). |
+| Simulator evaluation, no delay | vs a reactive `live_big` epoch-1 opponent on 300 held-out Hog 2.6 matches: **56.7%** [51.0, 62.2], crown difference +0.07, 38.9 plays per match. The real Hog players in these matches won 49.0%. |
+| Simulator evaluation, 21-tick command delay | **46.0%** [40.4, 51.7], crown difference -0.33, 32.9 plays per match. The delay costs about 11 points, in line with the author's measurement. |
+
+The next lever is delay: decision-time rows (E11), which predict the play about 1.2 s before it lands. This first model is good enough to drive the first live friendlies.
+
 ## Phases
 
 | # | Phase | Where | Done when | Compute |
