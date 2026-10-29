@@ -39,6 +39,15 @@ are sent and reads the memory at each decision, as before E08: identical results
 with a card in memory up to `delay` ticks before it exists. A run whose lag is
 not the default says so in its name; reports/rs_ghost.jsonl records "mem_lag".
 
+Decisions (V06): RSAgent.act builds the row and hands it to tools/rs_decide.decide, the one
+decision function the live runner and RL use too, with check_deploy on the match battle as the
+legality. `--decide legacy` (the default) is the rule this file always had, decision for
+decision and random draw for draw (tests/pipeline/test_rs_decide.py replays the old code);
+`--decide live` is the live runner's: slots of our plays still in flight under --delay are
+blocked (RoyaleSim refuses them CARD_PENDING), a card with no legal tile hands over to the next
+one, no wait at 9.5 elixir, and the Cannon's lane guard. A run that is not legacy says so in its
+name; reports/rs_ghost.jsonl then records "decide".
+
 The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
 """
 from __future__ import annotations
@@ -60,6 +69,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import rs_rows as RR  # noqa: E402
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
+import rs_decide  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
@@ -78,6 +88,10 @@ class RSAgent:
     # The engine config of the battles this agent builds itself (rebuilt look-aheads, the
     # catalogue): an rs_engine.EngineConfig, or None for the process's rs_engine.active().
     engine = None
+    # The decision rule (tools/rs_decide.py): MODE_LEGACY, the rule this agent always had, or
+    # MODE_LIVE, the live runner's. last_decision is the rs_decide.Decision of the last act.
+    decide_mode = rs_decide.MODE_LEGACY
+    last_decision = None
 
     _CAT = None
 
@@ -85,6 +99,12 @@ class RSAgent:
         if RSAgent._CAT is None:
             RSAgent._CAT = rs_engine.catalogue(rs_engine.resolve(self.engine).undelayed())
         return RSAgent._CAT[card][8]
+
+    def _catalogue(self):
+        """The catalogue rows cat_kind reads (built once per process)."""
+        if RSAgent._CAT is None:
+            RSAgent._CAT = rs_engine.catalogue(rs_engine.resolve(self.engine).undelayed())
+        return RSAgent._CAT
 
     def aim_spell(self, order, state, team, card, sub, top=5):
         """Among the model's top tiles for a spell, the one whose radius holds
@@ -320,12 +340,7 @@ class RSAgent:
         # is low by log(1 / wait_keep). Read the value the checkpoint was
         # trained with: a fixed 0.35 against a 0.25-trained model
         # under-corrected and the agent overplayed (~47 plays a match).
-        args_json = Path(ckpt).with_name("args.json")
-        if args_json.exists():
-            try:
-                wait_keep = float(json.loads(args_json.read_text())["wait_keep"])
-            except (KeyError, ValueError):
-                pass
+        wait_keep = rs_decide.wait_keep_for(ckpt, wait_keep)
         self.wait_bias = math.log(1 / wait_keep)
 
     def batch(self, row):
@@ -340,6 +355,33 @@ class RSAgent:
         b["next"] = t.as_tensor([int(row["next"])]).long()
         return b
 
+    @property
+    def policy(self):
+        """The model as rs_decide sees it (batch / gate / tiles), with this agent's batch."""
+        p = self.__dict__.get("_policy")
+        if p is None or p.model is not self.model or p.torch is not self.torch:
+            p = self.__dict__["_policy"] = rs_decide.TokenPolicyAdapter(
+                self.model, self.torch, batch=self.batch)
+        return p
+
+    def decide_config(self):
+        """The rs_decide.DecideConfig of `decide_mode`, with this checkpoint's wait bias."""
+        if self.decide_mode == rs_decide.MODE_LEGACY:
+            return rs_decide.DecideConfig.legacy(self.wait_bias, dt=DECIDE)
+        if self.decide_mode == rs_decide.MODE_LIVE:
+            guard = rs_decide.card_ids(self._catalogue(), rs_decide.GUARD_CARD_NAMES)
+            return rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard, dt=DECIDE)
+        raise ValueError(f"RSAgent.decide_mode: {rs_decide.MODE_LEGACY!r} or "
+                         f"{rs_decide.MODE_LIVE!r}, got {self.decide_mode!r}")
+
+    def _spell_aim(self, view, team, sub):
+        """rs_decide's aim hook for --spell-aim: aim_spell on a spell's tile order."""
+        def aim(order, slot, card):
+            if self.cat_kind(card) == "SPELL":
+                return self.aim_spell(order, view, team, card, sub)
+            return order
+        return aim
+
     def act(self, battle, state, team, mem, tick, sub, royalesim):
         self._team = team
         if getattr(self, "hold_pending", False) and battle.pending_commands(team):
@@ -350,35 +392,13 @@ class RSAgent:
             return None
         view = self.ahead(battle, state)
         row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live)
-        b = self.batch(row)
-        with self.torch.no_grad():
-            gate, _, _ = self.model(b, card_ids=b["hand"][:, 0].clamp(min=0))
-        g = gate[0].float().numpy()
-        g[0] += self.wait_bias
-        p = state["players"][team]
-        pending_cost = int(p.get("pending_cost", 0) or 0)
-        for slot in range(4):
-            cost = p["hand_costs"][slot] if slot < len(p["hand_costs"]) else 99
-            if (slot >= len(p["hand"]) or p["elixir_milli"] - pending_cost * 1000 < cost * 1000
-                    or p["hand"][slot] < 0):
-                g[1 + slot] = -1e9
-        pr = np.exp(g - g.max())
-        pr /= pr.sum()
-        if self.rng.random() < float(pr[0]) ** (DECIDE / 20) or g[1:].max() < -1e8:
-            return None
-        slot = int(np.argmax(g[1:]))
-        with self.torch.no_grad():
-            _, tile, _ = self.model(b, card_ids=b["hand"][:, slot])
-        order = np.argsort(-tile[0].float().numpy())
-        card = p["hand"][slot]
-        if getattr(self, "spell_aim", False) and self.cat_kind(card) == "SPELL":
-            order = self.aim_spell(order, view, team, card, sub)
-        for t in order[:60]:
-            tx, ty = int(t % 18), int(t // 18)
-            wx, wy = to_world(tx * 1000 + 500, ty * 1000 + 500, team)
-            if battle.check_deploy(team, slot, wx * sub, wy * sub) == 0:
-                return (team, slot, wx * sub, wy * sub)
-        return None
+        aim = self._spell_aim(view, team, sub) if getattr(self, "spell_aim", False) else None
+        # Masks, wait cadence, slot and tile: tools/rs_decide.decide, on the present state
+        # (hand, elixir, our pending plays), legality from check_deploy on this battle.
+        d = rs_decide.decide(self.policy, row, state, team, rs_decide.BattleLegality(battle),
+                             self.decide_config(), rng=self.rng, tick=tick, sub=sub, aim=aim)
+        self.last_decision = d
+        return d.command
 
 
 _SPAWN = {}
@@ -558,12 +578,17 @@ def split_results(results):
 
 def play(args):
     """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
-    shadow, spell_aim, engine, mem_lag]); `engine` (an rs_engine config's to_json()) becomes
-    this process's rs_engine.active() config, else the active one is used. `mem_lag` as
-    --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc)."""
+    shadow, spell_aim, engine, mem_lag, decide]); `engine` (an rs_engine config's to_json())
+    becomes this process's rs_engine.active() config, else the active one is used. `mem_lag` as
+    --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc). `decide` as --decide
+    (missing or None: legacy), for both RSAgent seats."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
+    decide_mode = args[12] if len(args) > 12 and args[12] is not None else rs_decide.MODE_LEGACY
+    if decide_mode not in (rs_decide.MODE_LEGACY, rs_decide.MODE_LIVE):
+        raise ValueError(f"decide: {rs_decide.MODE_LEGACY!r} or {rs_decide.MODE_LIVE!r}, "
+                         f"got {decide_mode!r}")
     mem_lag = RR.mem_lag_value(args[11] if len(args) > 11 and args[11] is not None
                                else rs_memory.BOARD_LAG)
     legacy = mem_lag == RR.MEM_LEGACY
@@ -646,10 +671,12 @@ def play(args):
         agent.lead_extrapolate = lead >= 1000
         agent.hold_pending = hold
         agent.spell_aim = spell_aim
+        agent.decide_mode = decide_mode
     ghost_team = 1 - hog_team
     opponent = RSAgent(opp_ckpt, seed=seed + 7) if opp_ckpt else None
     if opponent is not None:
         opponent.engine = cfg
+        opponent.decide_mode = decide_mode
     scripted = [(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]
                 if (mode_ == "pro" or rs[s] == ghost_team) and not
                 (opponent is not None and rs[s] == ghost_team)]
@@ -748,6 +775,12 @@ def main() -> int:
         "opponent memory: a seat deciding at tick t knows the plays that ran by t - TICKS "
         f"(default {rs_memory.BOARD_LAG}: what the board shows; a play runs --delay ticks after "
         "it is sent); 'legacy': dated when sent, as before E08"))
+    ap.add_argument("--decide", choices=(rs_decide.MODE_LEGACY, rs_decide.MODE_LIVE),
+                    default=rs_decide.MODE_LEGACY,
+                    help="decision rule of the checkpoint seats (tools/rs_decide.py): 'legacy' "
+                         "(default) as this tool always decided; 'live' the live runner's "
+                         "(pending-slot mask, next card when no tile is legal, cap rule, lane "
+                         "guard). --search keeps its own rule")
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     try:
@@ -774,7 +807,6 @@ def main() -> int:
         _spawn_tables()             # checked (or regenerated) once, before the workers read it
     picked = []
     for part in sorted((CORPUS / "replays").glob("part-*.parquet")):
-        acts = None
         for r in pq.read_table(part, columns=["replay_tag", "game_mode", "payload_json"]).to_pylist():
             if r["game_mode"] not in RR.MODES or RR.split_of(r["replay_tag"]) != "test":
                 continue
@@ -799,7 +831,8 @@ def main() -> int:
                              initargs=(cfg.to_json(),)) as pool:
         rows, skipped = split_results(list(pool.map(
             play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
-                    args.hold_pending, args.shadow, args.spell_aim, cfg.to_json(), args.mem_lag)
+                    args.hold_pending, args.shadow, args.spell_aim, cfg.to_json(), args.mem_lag,
+                    args.decide)
                    for k, t in enumerate(picked)])))
     if skipped:
         print(f"  skipped matches: {dict(skipped)} (orient = a side's troop plays are off "
@@ -817,6 +850,7 @@ def main() -> int:
             + (" shadow" if args.shadow else "")
             + (" spell-aim" if args.spell_aim else "")
             + (f" mem-lag {args.mem_lag}" if args.mem_lag != rs_memory.BOARD_LAG else "")
+            + (f" decide {args.decide}" if args.decide != rs_decide.MODE_LEGACY else "")
             + (f" vs reactive {Path(args.opponent_ckpt).parent.name}" if args.opponent_ckpt else " vs ghost"))
     real_w = sum(r["real"] == "win" for r in rows)
     print(f"  real result of the Hog player in these matches: {real_w}/{len(rows)} "
@@ -832,6 +866,8 @@ def main() -> int:
               "mem_lag": args.mem_lag, "rows": rows}
     if skipped:                       # only then, so a run with none writes what it did
         record["skipped"] = dict(skipped)
+    if args.decide != rs_decide.MODE_LEGACY:     # likewise: a legacy run writes what it did
+        record["decide"] = args.decide
     with out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return 0
