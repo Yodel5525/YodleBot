@@ -28,6 +28,11 @@ So any balance changes in this update are not yet in the simulator. The owner, w
 Done on the PC so far:
 - the fork is cloned at `C:\hcr` with a sparse checkout, on the `sparring` branch;
 - IL_Replay is downloaded to `C:\hcr\data\il_replay`: 104 files, 1,888 MB, all SHA-256 verified.
+- `.venvs\royalegym` is created with `royalesim==0.1.42`, numpy 2.5.4 and pyarrow 26.0.0. Engine probe on Windows: `0.1.42 cards-15535.1 11 11 237`. That means:
+  - the default card table is the older 15.535 one;
+  - card level and tower level are both 11;
+  - there are **237 unit types**, not the 335 assumed in the plan. Tests must not hard-code unit-type counts.
+- PyTorch's `cu128` index only has torch up to 2.11.0. Torch 2.14.x needs a newer CUDA index (`cu130` or later). The GPU requirements are pinned to whatever actually installs on this PC.
 
 This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run on the PC. Status of each code batch is at the bottom.
 
