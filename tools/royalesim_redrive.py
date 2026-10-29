@@ -17,7 +17,20 @@ How a match is played, kept as close to our harness as the API allows:
   match's most common card level, both sides on 6 starting elixir;
 * each play at its recorded tick and native tile. RoyaleSim cannot be told to
   ignore elixir, so a play it refuses is counted and dropped rather than
-  forced. That is a harder test than ours, which tops elixir up.
+  forced. That is a harder test than ours, which tops elixir up;
+* the side whose troops go down at native low y plays blue, with coordinates
+  as recorded (tools/rs_orient.py); a match where either side has under 90% of
+  its troop plays on its own half fails with error "orient: ...".
+
+The engine (card table, levels) is data/engine.json's, through
+tools/rs_engine.make_battle, with no command delay (plays go in at their
+recorded ticks). `--card-table default` runs the engine's own table, as this
+tool did before rs_engine; `--card-table client15535` names it explicitly.
+
+Cards map to RoyaleSim names through tools/rs_cards.py (data/cards/, no royaleimitate
+needed). HASTYCR_CARD_EXTRAS=0 drops the void / rune-giant / spirit-empress extras and
+leaves royaleimitate 0.2.15's 119-key map, which this tool read before. Matches with those
+cards then fail with "card not in RoyaleSim" as they used to, so runs stay comparable.
 """
 from __future__ import annotations
 
@@ -33,6 +46,11 @@ from statistics import mode
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "data" / "il_replay"
+if str(ROOT / "tools") not in sys.path:      # also when imported as tools.royalesim_redrive
+    sys.path.insert(0, str(ROOT / "tools"))
+import rs_cards  # noqa: E402
+import rs_engine  # noqa: E402
+import rs_orient  # noqa: E402
 
 
 def deal_order(deck, plays):
@@ -61,20 +79,25 @@ def base_key(key):
 _ENGINE = {}
 
 
-def _engine():
-    if not _ENGINE:
+def _engine(engine=None):
+    """royalesim, the card map (rs_cards.load()), catalogue ids and the troop names that
+    decide the seat (rs_orient.troop_names) under `engine` (an rs_engine.EngineConfig or its
+    to_json(); None = rs_engine.active()), cached per config, delay forced to 0."""
+    cfg = rs_engine.resolve(engine).undelayed()
+    if _ENGINE.get("key") != cfg.key():
         import royalesim
-        import royaleimitate
-        names = json.loads((Path(royaleimitate.__file__).with_name("replay_cards.json"))
-                           .read_text(encoding="utf-8"))
-        b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-        ids = {row[0]: i for i, row in enumerate(json.loads(b.catalogue_json()))}
-        _ENGINE.update(royalesim=royalesim, names=names, ids=ids)
+        names = rs_cards.load()
+        b = rs_engine.make_battle(cfg, royalesim)
+        cat = json.loads(b.catalogue_json())
+        ids = {row[0]: i for i, row in enumerate(cat)}
+        _ENGINE.clear()
+        _ENGINE.update(royalesim=royalesim, names=names, ids=ids,
+                       troop=rs_orient.troop_names(cat), cfg=cfg, key=cfg.key())
     return _ENGINE
 
 
-def one(payload_text: str) -> dict:
-    eng = _engine()
+def one(payload_text: str, engine=None) -> dict:
+    eng = _engine(engine)
     royalesim, names, ids = eng["royalesim"], eng["names"], eng["ids"]
     p = json.loads(payload_text)
     battle = p["battle"]
@@ -106,10 +129,13 @@ def one(payload_text: str) -> dict:
         name = names.get(key)
         u = e["coordinates"]["native_world_units"]
         plays[seat].append((int(e["replay_tick_20hz"]), name, int(u["x"]), int(u["y"])))
-    # Which end the team owns, from its troop plays: blue is RoyaleSim's low-y side.
-    ys = sorted(y for _, _, _, y in plays[0]) or [0]
-    team_low = ys[len(ys) // 2] < 16_000
-    team_seat = 0 if team_low else 1           # RoyaleSim team index of "team"
+    # Which end each side owns, from troop plays (tools/rs_orient.py): the side at native
+    # low y plays blue, and every coordinate goes in as recorded.
+    ori = rs_orient.orient(plays, eng["troop"])
+    if not ori.ok():
+        out["error"] = f"{rs_orient.SKIP}: {ori.describe()}"
+        return out
+    team_seat = ori.team_seat                  # RoyaleSim team index of "team"
     dealt = []
     for seat in (0, 1):
         order = deal_order(decks[seat], [c for _, c, _, _ in plays[seat]])
@@ -124,7 +150,7 @@ def one(payload_text: str) -> dict:
         by_team[rs_side[seat]] = seat
     lv_all = [lv for s in levels for lv in s]
     tower = max(1, min(16, mode(lv_all)))
-    b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+    b = rs_engine.make_battle(eng["cfg"], royalesim)
     b.reset(seed=0,
             decks=[[ids[c] for c in dealt[by_team[t]]] for t in (0, 1)],
             shuffle=0, start_tick=0, elixir_milli=[6000, 6000], tower_hp=None, spawns=[],
@@ -154,9 +180,7 @@ def one(payload_text: str) -> dict:
             if cid not in hand:
                 forced["hand"] += 1
             else:
-                if team_seat == 1:     # team owned high y: turn the board half a turn
-                    x, y = 18_000 - x, 32_000 - y
-                cmds.append((team, hand.index(cid), x * SUB, y * SUB))
+                cmds.append((team, hand.index(cid), *rs_orient.to_engine(x, y, SUB)))
             i += 1
         if cmds:
             res = b.step(cmds, 1)
@@ -193,7 +217,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pair", default="b2000")
     ap.add_argument("--workers", type=int, default=6)
+    rs_engine.add_engine_args(ap)
     args = ap.parse_args()
+    try:
+        cfg = rs_engine.config_from_args(args).undelayed()
+    except (ValueError, FileNotFoundError) as exc:
+        ap.error(str(exc))
+    rs_engine.set_active(cfg)
+    fp = rs_engine.fingerprint(rs_engine.make_battle(cfg), cfg=cfg)
+    print(f"engine: {cfg.describe()}\n        {rs_engine.summary(fp)}", flush=True)
+    print(f"cards:  {rs_cards.summary(rs_cards.load())}", flush=True)
     import pyarrow.parquet as pq
     wanted = {json.loads(l)["tag"] for l in
               (ROOT / "reports" / "redrive" / f"{args.pair}.jsonl").open(encoding="utf-8")}
@@ -215,7 +248,8 @@ def main() -> int:
             break
     print(f"{len(payloads)} of {len(wanted)} matches found", flush=True)
     t0 = time.time()
-    with ProcessPoolExecutor(args.workers) as pool:
+    with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
+                             initargs=(cfg.to_json(),)) as pool:
         rows = list(pool.map(one, list(payloads.values()), chunksize=8))
     out = ROOT / "reports" / "redrive" / f"{args.pair}_royalesim.jsonl"
     with out.open("w", encoding="utf-8") as f:

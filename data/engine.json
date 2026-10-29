@@ -1,0 +1,16 @@
+{
+  "_comment": [
+    "RoyaleSim settings for every battle the pipeline builds (tools/rs_engine.py; check with: tools/rs_engine.py --probe).",
+    "card_table: a cards.CARD_TABLE arm of royalesim 0.1.42. client160402017_20261019 is content 16.402.22, the 2026-10-19 Season 88 mid-season balance update; its Battle.card_table() reads cards-160402017-20261019.1. client15535 is the engine's own default (cards-15535.1). 'default' or null passes no override: the engine's own table, as the tools ran before.",
+    "level / tower_level: the Battle constructor's unified card level and crown-tower level. Friendly battles play every card at 11. null leaves the engine's own (11 in 0.1.42).",
+    "delay: [blue, red] command delay in ticks, set before the first reset. null never sets it (the engine's own 0). Re-drives of recordings always run at 0; tools/rs_eval.py --delay sets its own.",
+    "calibration_overrides: more ledger keys, 'section.KEY': value as royalesim's data/calibration.json writes it. The card table goes in card_table.",
+    "Overridden per run by a tool's --card-table, then HASTYCR_CARD_TABLE, HASTYCR_CARD_LEVEL, HASTYCR_TOWER_LEVEL, HASTYCR_COMMAND_DELAY, HASTYCR_CALIBRATION_OVERRIDES; HASTYCR_ENGINE_CONFIG names another file.",
+    "Changing the card table changes the unit vocabulary: rebuild data/rs_rows and retrain."
+  ],
+  "card_table": "client160402017_20261019",
+  "level": 11,
+  "tower_level": 11,
+  "delay": [0, 0],
+  "calibration_overrides": {}
+}

@@ -10,8 +10,21 @@ Two numbers per run, on the same matches:
   This is what the real player achieves in this engine - the bar.
 * `agent`: the checkpoint in that seat.
 
+Engine: every Battle comes from tools/rs_engine.make_battle under
+data/engine.json (card table, levels); `--delay` sets the command delay of the
+match battle, and look-ahead rebuilds run without one. `--card-table default`
+runs the engine's own table; `--engine-config legacy` builds every Battle
+exactly as before rs_engine. A checkpoint whose card / unit vocabulary or card
+table is not this engine's is refused (tools/rs_checkpoint.py;
+`--allow-vocab-drift` loads it with a warning). The card -> unit-type table
+data/rs_rows/spawn_primary.json is regenerated when it is missing or was made
+under another engine (tools/rs_spawn_table.py).
+
 Matches come from the test split (hash of the tag, as the row builders use),
-so no training row ever came from them. The ghost cannot react - it plays the
+so no training row ever came from them. The side whose troops go down at native
+low y plays blue, with coordinates as recorded (tools/rs_orient.py); a match
+where either side has under 90% of its troop plays on its own half is skipped,
+counted and printed. The ghost cannot react - it plays the
 recorded commands even when the board has changed - which flatters an agent
 that disrupts a scripted push; the `pro` row is measured the same way, so the
 comparison between the two is fair even if both numbers are optimistic.
@@ -35,6 +48,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import rs_rows as RR  # noqa: E402
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
+import rs_engine  # noqa: E402
+import rs_orient  # noqa: E402
 
 DECIDE = 10           # ticks between agent decisions (0.5 s)
 
@@ -56,14 +71,15 @@ def to_world(ox, oy, team):
 
 class RSAgent:
     lead = 0      # ticks to look ahead before deciding (delay compensation)
+    # The engine config of the battles this agent builds itself (rebuilt look-aheads, the
+    # catalogue): an rs_engine.EngineConfig, or None for the process's rs_engine.active().
+    engine = None
 
     _CAT = None
 
     def cat_kind(self, card):
         if RSAgent._CAT is None:
-            import royalesim
-            RSAgent._CAT = json.loads(royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-                                      .catalogue_json())
+            RSAgent._CAT = rs_engine.catalogue(rs_engine.resolve(self.engine).undelayed())
         return RSAgent._CAT[card][8]
 
     def aim_spell(self, order, state, team, card, sub, top=5):
@@ -258,7 +274,8 @@ class RSAgent:
                     if card is None:
                         continue
             spawns.append((e[F["team"]], card, e[F["x"]], e[F["y"]], e[F["hp"]]))
-        b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+        # No command delay: our pending plays are stepped in at the ticks they land.
+        b = rs_engine.make_battle(rs_engine.resolve(self.engine).undelayed(), royalesim)
         decks = [None, None]
         decks[team], decks[1 - team] = mine[:8], list(opp)[:8]
         elixir = [0, 0]
@@ -272,16 +289,20 @@ class RSAgent:
             return None
         return b
 
-    def __init__(self, ckpt, seed=0, wait_keep=0.35):
+    def __init__(self, ckpt, seed=0, wait_keep=0.35, *, engine=None, allow_drift=None):
         import torch
         torch.set_num_threads(1)
-        from sim.model_tokens import TokenPolicy
-        blob = torch.load(ckpt, map_location="cpu")
-        meta = blob["meta"]
+        import rs_checkpoint
+        if engine is not None:
+            self.engine = engine
+        # The checkpoint's card and unit ids are catalogue / unit_types indexes of the
+        # engine its rows came from; another card table or royalesim renumbers them.
+        # load_policy refuses a checkpoint that does not fit this agent's engine
+        # (rs_checkpoint.VocabMismatch); allow_drift None reads HASTYCR_ALLOW_VOCAB_DRIFT.
+        self.model, meta, self.vocab_drift = rs_checkpoint.load_policy(
+            ckpt, rs_engine.resolve(self.engine), allow_drift=allow_drift)
+        self.meta = meta
         self.torch = torch
-        self.model = TokenPolicy(meta["n_cards"], meta["n_units"], d=meta.get("d", 192),
-                                 layers=meta.get("layers", 4), heads=meta.get("heads", 6)).eval()
-        self.model.load_state_dict(blob["model"])
         # A live-compatible checkpoint was trained on card-id unit tokens.
         self.live = bool(meta.get("live_compat", False))
         self.rng = np.random.default_rng(seed)
@@ -355,22 +376,26 @@ _UNITS = []
 
 
 def _unit_names():
+    """Unit names in unit_type order, under the process's rs_engine.active() config."""
     if not _UNITS:
-        import royalesim
-        _UNITS.extend(json.loads(royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-                                 .unit_types_json()))
+        _UNITS.extend(rs_engine.unit_types(rs_engine.active().undelayed()))
     return _UNITS
 
 
+#: The card -> unit-type table tools/rs_spawn_table.py writes.
+SPAWN_TABLE = ROOT / "data" / "rs_rows" / "spawn_primary.json"
+
+
 def _spawn_tables():
-    """card id -> the unit type a spawn of it makes, and the inverse."""
+    """card id -> the unit type a spawn of it makes, and the inverse (a unit type several
+    cards make maps to the lowest card id). Read from SPAWN_TABLE, which is regenerated
+    first when it is missing or was made under another engine than the process's
+    rs_engine.active() config (rs_spawn_table.ensure compares the fingerprints)."""
     if not _SPAWN:
-        raw = json.loads((ROOT / "data" / "rs_rows" / "spawn_primary.json").read_text())
-        prim = {int(k): v for k, v in raw["primary"].items()}
-        by_unit = {}
-        for card, unit in sorted(prim.items()):
-            by_unit.setdefault(unit, card)
-        _SPAWN.update(prim=prim, by_unit=by_unit)
+        import rs_spawn_table
+        table = rs_spawn_table.ensure(SPAWN_TABLE, rs_engine.active())
+        prim = rs_spawn_table.primary_of(table)
+        _SPAWN.update(prim=prim, by_unit=rs_spawn_table.by_unit(prim))
     return _SPAWN["prim"], _SPAWN["by_unit"]
 
 
@@ -506,11 +531,32 @@ class RSSearchAgent(RSAgent):
 
 
 
+def skip_record(tag, mode_, why, detail=""):
+    """What play() returns for a match it does not play: {"tag", "mode", "skipped": why,
+    "detail"}. It has no "result" or "records", so callers that keep only played
+    matches (split_results here, rs_selfplay's `out.get("records")`) drop it."""
+    return {"tag": tag, "mode": mode_, "skipped": why, "detail": detail}
+
+
+def split_results(results):
+    """play() results -> (played matches, Counter of skip reasons). None (no deal order
+    fits the plays) is dropped uncounted, as before."""
+    played = [r for r in results if r and not r.get("skipped")]
+    skipped = Counter(r["skipped"] for r in results if r and r.get("skipped"))
+    return played, skipped
+
+
 def play(args):
+    """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
+    shadow, spell_aim, engine]); `engine` (an rs_engine config's to_json()) becomes this
+    process's rs_engine.active() config, else the active one is used."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
-    royalesim, names, ids, cat = RR._setup()
+    if len(args) > 10 and args[10] is not None:
+        rs_engine.set_active(args[10])
+    cfg = rs_engine.active()
+    royalesim, names, ids, cat = RR._setup(cfg)
     sub = royalesim.SUBTILE_PER_MILLITILE
     p = json.loads(payload_text)
     battle = p["battle"]
@@ -533,8 +579,11 @@ def play(args):
         u = e["coordinates"]["native_world_units"]
         plays[seat].append((int(e["replay_tick_20hz"]), names[base_key(e["card_key"])[0]],
                             int(u["x"]), int(u["y"])))
-    ys = sorted(y for _, _, _, y in plays[0]) or [0]
-    team_seat = 0 if ys[len(ys) // 2] < 16_000 else 1
+    # The seat from troop plays; coordinates go to the engine as recorded (rs_orient).
+    ori = rs_orient.orient(plays, rs_orient.troop_names(cat))
+    if not ori.ok():
+        return skip_record(p["source"]["replay_tag"], mode_, rs_orient.SKIP, ori.describe())
+    team_seat = ori.team_seat
     rs = {0: team_seat, 1: 1 - team_seat}
     seat_of = {rs[0]: 0, rs[1]: 1}
     hog_seat = 0 if frozenset(decks[0]) == RR.HOG26 else 1
@@ -547,15 +596,14 @@ def play(args):
         dealt.append(order)
     perm = [[decks[s].index(c) for c in dealt[s]] for s in (0, 1)]
     tower = max(1, min(16, mode([lv for s in levels for lv in s])))
-    b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-    if delay:
-        # Real taps land 21-22 ticks after they are sent (RoyaleSim's measured
-        # client delay). Both seats get it; the recorded ghost commands were
-        # logged at the tick they executed, so they are sent `delay` early.
-        # It must be set BEFORE reset: it is battle configuration, and set
-        # after reset it silently does nothing (found when a delayed run came
-        # back identical, match for match, to an undelayed one).
-        b.set_command_delay_ticks(delay, delay)
+    # Real taps land 21-22 ticks after they are sent (RoyaleSim's measured
+    # client delay). Both seats get it; the recorded ghost commands were
+    # logged at the tick they executed, so they are sent `delay` early.
+    # It must be set BEFORE reset: it is battle configuration, and set
+    # after reset it silently does nothing (found when a delayed run came
+    # back identical, match for match, to an undelayed one). make_battle
+    # sets it before returning; a legacy config with delay 0 sets nothing.
+    b = rs_engine.make_battle(cfg.delayed(delay), royalesim)
     b.reset(seed=seed, decks=[[ids[c] for c in dealt[seat_of[t]]] for t in (0, 1)],
             shuffle=0, start_tick=0, elixir_milli=[6000, 6000], tower_hp=None, spawns=[],
             forms=[[forms[seat_of[t]][i] for i in perm[seat_of[t]]] for t in (0, 1)],
@@ -575,8 +623,10 @@ def play(args):
         me_seat = seat_of[hog_team]
         agent.shadow = Shadow(royalesim, cat, hog_team,
                               [ids[c] for c in dealt[me_seat]],
-                              [levels[me_seat][i] for i in perm[me_seat]], tower, prim)
+                              [levels[me_seat][i] for i in perm[me_seat]], tower, prim,
+                              engine=cfg)
     if agent is not None:
+        agent.engine = cfg
         agent.lead = abs(lead) % 1000
         agent.lead_rebuild = -1000 < lead < 0
         agent.lead_extrapolate = lead >= 1000
@@ -584,6 +634,8 @@ def play(args):
         agent.spell_aim = spell_aim
     ghost_team = 1 - hog_team
     opponent = RSAgent(opp_ckpt, seed=seed + 7) if opp_ckpt else None
+    if opponent is not None:
+        opponent.engine = cfg
     scripted = [(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]
                 if (mode_ == "pro" or rs[s] == ghost_team) and not
                 (opponent is not None and rs[s] == ghost_team)]
@@ -603,9 +655,7 @@ def play(args):
             hand = state["players"][team]["hand"]
             cid = ids[card]
             if cid in hand:
-                if team_seat == 1:
-                    x, y = 18_000 - x, 32_000 - y
-                cmds.append((team, hand.index(cid), x * sub, y * sub))
+                cmds.append((team, hand.index(cid), *rs_orient.to_engine(x, y, sub)))
                 mem["seen"][team].add(cid + 2)
                 mem["last"][team].append((cid + 2, tick))
         if agent is not None and getattr(agent, "shadow", None) is not None:
@@ -673,9 +723,33 @@ def main() -> int:
     ap.add_argument("--opponent-ckpt", default="",
                     help="a reactive opponent: this checkpoint plays the recorded opponent's "
                          "deck instead of the ghost replaying its commands")
+    ap.add_argument("--allow-vocab-drift", action="store_true",
+                    help="load checkpoints whose card / unit vocabulary or card table is not "
+                         "this engine's, with a warning (tools/rs_checkpoint.py)")
+    rs_engine.add_engine_args(ap)
     args = ap.parse_args()
+    try:
+        cfg = rs_engine.config_from_args(args)
+    except (ValueError, FileNotFoundError) as exc:
+        ap.error(str(exc))
+    rs_engine.set_active(cfg)
     import pyarrow.parquet as pq
-    royalesim, names, ids, cat = RR._setup()
+    royalesim, names, ids, cat = RR._setup(cfg)
+    fp = rs_engine.fingerprint(rs_engine.make_battle(cfg.undelayed(), royalesim), royalesim, cfg)
+    print(f"engine: {cfg.delayed(args.delay).describe()}\n        {rs_engine.summary(fp)}",
+          flush=True)
+    import rs_checkpoint
+    if args.allow_vocab_drift:
+        rs_checkpoint.set_allow_drift(True)          # the workers inherit it
+    for ck in ([] if args.pro else [args.ckpt]) + [args.opponent_ckpt]:
+        if ck:          # once here, rather than a traceback from every worker
+            try:
+                rs_checkpoint.check_file(ck, cfg)
+            except rs_checkpoint.VocabMismatch as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+    if args.shadow or args.rebuild or -1000 < args.lead < 0:
+        _spawn_tables()             # checked (or regenerated) once, before the workers read it
     picked = []
     for part in sorted((CORPUS / "replays").glob("part-*.parquet")):
         acts = None
@@ -699,11 +773,15 @@ def main() -> int:
     mode_ = ("pro" if args.pro else "search_rebuild" if args.search and args.rebuild
              else "search" if args.search else "agent")
     t0 = time.time()
-    with ProcessPoolExecutor(args.workers) as pool:
-        rows = [r for r in pool.map(play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
-                                        args.hold_pending, args.shadow, args.spell_aim)
-                                       for k, t in enumerate(picked)])
-                if r]
+    with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
+                             initargs=(cfg.to_json(),)) as pool:
+        rows, skipped = split_results(list(pool.map(
+            play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
+                    args.hold_pending, args.shadow, args.spell_aim, cfg.to_json())
+                   for k, t in enumerate(picked)])))
+    if skipped:
+        print(f"  skipped matches: {dict(skipped)} (orient = a side's troop plays are off "
+              "its own half, tools/rs_orient.py)", flush=True)
     wins = sum(r["result"] == "win" for r in rows)
     draws = sum(r["result"] == "draw" for r in rows)
     lo, hi = wilson(wins, len(rows))
@@ -725,10 +803,14 @@ def main() -> int:
           f"{draws} draws, crown diff {cd:+.2f}, agent plays/match "
           f"{sum(r['agent_plays'] for r in rows) / max(1, len(rows)):.1f} ({time.time() - t0:.0f}s)")
     out = ROOT / "reports" / "rs_ghost.jsonl"
+    record = {"name": name, "ckpt": args.ckpt, "wins": wins, "n": len(rows),
+              "ci": [lo, hi], "crown_diff": cd,
+              "engine": cfg.delayed(args.delay).to_json(), "engine_id": fp["id"],
+              "rows": rows}
+    if skipped:                       # only then, so a run with none writes what it did
+        record["skipped"] = dict(skipped)
     with out.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"name": name, "ckpt": args.ckpt, "wins": wins, "n": len(rows),
-                            "ci": [lo, hi], "crown_diff": cd,
-                            "rows": rows}) + "\n")
+        f.write(json.dumps(record) + "\n")
     return 0
 
 

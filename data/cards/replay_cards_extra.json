@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "IL_Replay card keys that data/cards/replay_cards.json (royaleimitate 0.2.15, vendored unchanged) lacks. tools/rs_cards.py load() adds them to it.",
+    "key: the IL_Replay (RoyaleAPI) card key without its -ev1 / -hero form suffix. name: the RoyaleSim catalogue name, which is row[0] of catalogue_json().",
+    "verified: false until `tools/rs_cards.py --coverage` finds the key in the IL_Replay corpus decks. Set it to true then. The keys come from the RoyaleAPI deck strings in data/ladder/. The names come from the engine: the catalogue has DarkMagic, GiantBuffer and MergeMaiden (tools/rs_cards.py --catalogue, and the engine-marked test in tests/pipeline/test_rs_cards.py).",
+    "An extra may not give a key that the vendored file already maps to a different name. HASTYCR_CARD_EXTRAS=0 leaves all of them out."
+  ],
+  "cards": {
+    "rune-giant": {
+      "name": "GiantBuffer",
+      "verified": false,
+      "evidence": "Rune Giant. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: the client's codename for it (scripts/sync_meta_decks.py PUBLISHED_ALIASES, giant_buffer)."
+    },
+    "spirit-empress": {
+      "name": "MergeMaiden",
+      "verified": false,
+      "evidence": "Spirit Empress. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv. Name: royalesim's calibration ledger calls it 'the Spirit Empress (MergeMaiden)'. It is a variant card, and its forms are MergeMaiden_Normal (3 elixir) and MergeMaiden_Mounted (6). The card in a deck is MergeMaiden."
+    },
+    "void": {
+      "name": "DarkMagic",
+      "verified": false,
+      "evidence": "Void. Key: the decks in data/ladder/opponent_meta.json and battles_2p6.csv, and tests/test_replay_pipeline.py uses 'void' as an IL_Replay key. Name: the client calls it dark_magic (sim/spells.py)."
+    }
+  }
+}

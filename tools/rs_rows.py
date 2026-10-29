@@ -14,8 +14,31 @@ y growing toward its own king (the same as sim/replay_rows.py). RoyaleSim's
 blue owns low y, so blue is reflected in y and red in x; both are reflections,
 so left and right mean the same thing to either seat.
 
+Seat: tools/rs_orient.py decides from troop plays which IL_Replay side owns native
+low y; that side plays blue, and every coordinate goes to the engine as recorded.
+A match where either side has under 90% of its troop plays on its own half is
+skipped as "orient" (the old median test plus half turn cancelled out and checked
+nothing). Matches with the team at native low y give the same rows as before; the
+one exception, a team whose median play (spells included) was past the river, used
+to be put in red and turned, and now plays blue with the same own-frame rows.
+
 Ids: units are RoyaleSim `unit_type` + 2, cards are catalogue ids + 2 (0 pad,
-1 unknown). `data/rs_rows/vocab.json` records both lists.
+1 unknown). `data/rs_rows/vocab.json` records both lists, and the engine config
+and fingerprint they came from (tools/rs_engine.py), the card table, the row
+schema, the observation delay and wait_keep_at_build (vocab_record).
+tools/rs_checkpoint.py refuses a checkpoint whose lists or card table are not
+the engine's it is loaded into.
+
+Engine: every Battle comes from rs_engine.make_battle under data/engine.json
+(card table, levels), with no command delay: plays are sent at their recorded
+ticks. `--card-table default` (or HASTYCR_CARD_TABLE=default) runs the engine's
+own table, as this tool did before rs_engine.
+
+Cards: IL_Replay card keys map to RoyaleSim names through tools/rs_cards.py
+(data/cards/: royaleimitate 0.2.15's replay_cards.json, vendored and hash-checked,
+plus void, rune-giant and spirit-empress). Matches with an unmapped card are
+skipped. HASTYCR_CARD_EXTRAS=0 gives the 119-key map this tool used before.
+vocab.json records the map under "card_map".
 
 Outcome and trust as in sim/replay_rows.py: tower swing over the next 10 s;
 rows after the first refused play, or after the engine has taken more crowns
@@ -37,6 +60,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
+import rs_cards  # noqa: E402
+import rs_engine  # noqa: E402
+import rs_orient  # noqa: E402
 
 OUT = ROOT / "data" / "rs_rows"
 MAX_UNITS, UF = 48, 7
@@ -62,16 +88,18 @@ def split_of(tag: str) -> str:
     return "test" if h < 5 else "val" if h < 10 else "train"
 
 
-def _setup():
+def _setup(engine=None):
+    """(royalesim, IL_Replay key -> card name, card name -> id, catalogue rows) under
+    `engine` (an rs_engine.EngineConfig or its to_json(); None = rs_engine.active()).
+    The card map is rs_cards.load(). Also sets F, after checking royalesim.ENTITY_FIELDS
+    (rs_engine.field_index)."""
     global F
     import royalesim
-    import royaleimitate
-    names = json.loads((Path(royaleimitate.__file__).with_name("replay_cards.json"))
-                       .read_text(encoding="utf-8"))
-    b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+    names = rs_cards.load()
+    b = rs_engine.make_battle(rs_engine.resolve(engine).undelayed(), royalesim)
     cat = json.loads(b.catalogue_json())
     ids = {row[0]: i for i, row in enumerate(cat)}
-    F = {k: i for i, k in enumerate(royalesim.ENTITY_FIELDS)}
+    F = rs_engine.field_index(royalesim)
     for i, row in enumerate(cat):
         CARD_FLY[i] = bool(row[5])
         CARD_BUILDING[i] = row[8] == "BUILDING"
@@ -145,7 +173,9 @@ def obs_row(state, team, sub, mem, tick, live=None):
     }
 
 
-def rows_for(payload: dict, ctx):
+def rows_for(payload: dict, ctx, engine=None):
+    """Rows of one match. `engine` as in _setup; the battle runs without command delay,
+    since the recorded ticks are the ticks the plays executed."""
     royalesim, names, ids, cat = ctx
     sub = royalesim.SUBTILE_PER_MILLITILE
     battle = payload["battle"]
@@ -174,8 +204,12 @@ def rows_for(payload: dict, ctx):
         name = names.get(base_key(e["card_key"])[0])
         u = e["coordinates"]["native_world_units"]
         plays[seat].append((int(e["replay_tick_20hz"]), name, int(u["x"]), int(u["y"])))
-    ys = sorted(y for _, _, _, y in plays[0]) or [0]
-    team_seat = 0 if ys[len(ys) // 2] < 16_000 else 1
+    # The seat from troop plays: the side at native low y plays blue, and every
+    # coordinate goes to the engine as recorded (tools/rs_orient.py).
+    ori = rs_orient.orient(plays, rs_orient.troop_names(cat))
+    if not ori.ok():
+        return None, rs_orient.SKIP
+    team_seat = ori.team_seat
     dealt = []
     for seat in (0, 1):
         order = deal_order(decks[seat], [c for _, c, _, _ in plays[seat]])
@@ -186,7 +220,7 @@ def rows_for(payload: dict, ctx):
     rs = {0: team_seat, 1: 1 - team_seat}
     seat_of = {rs[0]: 0, rs[1]: 1}
     tower = max(1, min(16, mode([lv for s in levels for lv in s])))
-    b = royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+    b = rs_engine.make_battle(rs_engine.resolve(engine).undelayed(), royalesim)
     b.reset(seed=0, decks=[[ids[c] for c in dealt[seat_of[t]]] for t in (0, 1)],
             shuffle=0, start_tick=0, elixir_milli=[6000, 6000], tower_hp=None, spawns=[],
             forms=[[forms[seat_of[t]][i] for i in perm[seat_of[t]]] for t in (0, 1)],
@@ -222,14 +256,13 @@ def rows_for(payload: dict, ctx):
             acting.add(team)
             cid = ids[card]
             hand = state["players"][team]["hand"]
-            if team_seat == 1:
-                x, y = 18_000 - x, 32_000 - y
-            ox, oy = own(x * sub, y * sub, team, sub)
+            ex, ey = rs_orient.to_engine(x, y, sub)
+            ox, oy = own(ex, ey, team, sub)
             row = obs_row(state, team, sub, mem, tick)
             row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
             rows.append(row)
             if cid in hand:
-                cmds.append((team, hand.index(cid), x * sub, y * sub))
+                cmds.append((team, hand.index(cid), ex, ey))
             elif cut > tick:
                 cut = tick
             mem["seen"][team].add(cid + 2)
@@ -270,18 +303,59 @@ FIELDS = ("tick", "side", "hand_exact", "unit_ids", "unit_feats", "towers", "sca
           "won", "hog")
 
 
-def build(batch_id, payload_texts, live=False, out_dir=None):
+#: vocab.json "schema": the row layout of these shards (obs_row and FIELDS above).
+SCHEMA = "rs_rows/legacy"
+
+
+def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
+                 obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None):
+    """vocab.json: the id maps of the rows and how they were made.
+
+    The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
+    (catalogue name -> id + 2), units (unit type -> id + 2), engine, version (`version`,
+    else the fingerprint's), engine_config, engine_fingerprint, card_map. Then:
+
+      card_table          what the Battle reported (fp["card_table"]; None before 0.1.42)
+      schema              the row layout (SCHEMA)
+      obs_delay           {"ticks", "jitter", "opp_lag"}: how far before a play's execution
+                          its row is observed; all 0 here: rows at the tick it executes
+      wait_keep_at_build  the share of wait rows the builder kept; None: no thinning at
+                          build, every WAIT_EVERY-tick wait row is in the shards
+      wait_every          ticks between wait-row samples
+
+    sim/train_tokens.py copies all of it into every checkpoint's meta, and
+    tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
+    a checkpoint is loaded into.
+    """
+    return {
+        "n_cards": len(cat) + 2,
+        "n_units": (len(cat) + 2) if live else (len(unit_types) + 2),
+        "live_compat": live,
+        "cards": {row[0]: i + 2 for i, row in enumerate(cat)},
+        "units": {u: i + 2 for i, u in enumerate(unit_types)},
+        "engine": "royalesim", "version": fp.get("version", "?") if version is None else version,
+        "engine_config": cfg.to_json(), "engine_fingerprint": fp, "card_map": card_map,
+        "card_table": fp.get("card_table"),
+        "schema": schema,
+        "obs_delay": {"ticks": int(obs_delay), "jitter": int(obs_delay_jitter),
+                      "opp_lag": int(opp_lag)},
+        "wait_keep_at_build": None if wait_keep_at_build is None else float(wait_keep_at_build),
+        "wait_every": WAIT_EVERY,
+    }
+
+
+def build(batch_id, payload_texts, live=False, out_dir=None, engine=None):
     global LIVE, OUT
     LIVE = live
     if out_dir:
         OUT = Path(out_dir)
-    ctx = _setup()
+    ctx = _setup(engine)
     rows, tags, skipped = [], [], {}
     for text in payload_texts:
         p = json.loads(text)
         tag = p["source"]["replay_tag"]
         try:
-            r, why = rows_for(p, ctx)
+            r, why = rows_for(p, ctx, engine)
         except Exception as exc:
             r, why = None, f"error {type(exc).__name__}"
         if r is None:
@@ -309,13 +383,24 @@ def main() -> int:
     ap.add_argument("--live-compat", action="store_true",
                     help="unit tokens limited to what the live reader provides")
     ap.add_argument("--out", type=Path, default=None)
+    rs_engine.add_engine_args(ap)
     args = ap.parse_args()
+    try:
+        cfg = rs_engine.config_from_args(args).undelayed()
+    except (ValueError, FileNotFoundError) as exc:
+        ap.error(str(exc))
+    rs_engine.set_active(cfg)
     global OUT, LIVE
     LIVE = args.live_compat
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
-    royalesim, names, ids, cat = _setup()
+    royalesim, names, ids, cat = _setup(cfg)
+    vocab_battle = rs_engine.make_battle(cfg, royalesim)
+    fp = rs_engine.fingerprint(vocab_battle, royalesim, cfg)
+    print(f"engine: {cfg.describe()}\n        {rs_engine.summary(fp)}", flush=True)
+    card_map = rs_cards.describe(names)
+    print(f"cards:  {rs_cards.summary(names)}", flush=True)
     t0 = time.time()
     hog, others = [], []
     parts = sorted((CORPUS / "replays").glob("part-*.parquet"))
@@ -345,19 +430,16 @@ def main() -> int:
     picked = hog + others
     print(f"selected {len(hog):,} Hog 2.6 + {len(others):,} others ({time.time() - t0:.0f}s)", flush=True)
     OUT.mkdir(parents=True, exist_ok=True)
-    unit_types = json.loads(royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
-                            .unit_types_json())
-    (OUT / "vocab.json").write_text(json.dumps({
-        "n_cards": len(cat) + 2,
-        "n_units": (len(cat) + 2) if LIVE else (len(unit_types) + 2),
-        "live_compat": LIVE,
-        "cards": {row[0]: i + 2 for i, row in enumerate(cat)},
-        "units": {u: i + 2 for i, u in enumerate(unit_types)},
-        "engine": "royalesim", "version": getattr(royalesim, "__version__", "?")}))
+    unit_types = json.loads(vocab_battle.unit_types_json())
+    (OUT / "vocab.json").write_text(json.dumps(vocab_record(
+        cat, unit_types, cfg, fp, card_map, LIVE,
+        version=getattr(royalesim, "__version__", "?"))), encoding="utf-8")
     batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
     total, skipped = 0, {}
-    with ProcessPoolExecutor(args.workers) as pool:
-        futs = [pool.submit(build, k, b, LIVE, str(OUT)) for k, b in enumerate(batches)]
+    with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
+                             initargs=(cfg.to_json(),)) as pool:
+        futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json())
+                for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
             bid, rows, sk = f.result()
             total += rows

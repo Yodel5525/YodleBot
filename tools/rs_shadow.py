@@ -24,6 +24,10 @@ show, towers from the match level.
 `Shadow.battle(now)` returns a fresh Battle at tick `now`; callers save/load
 it freely. Re-driving happens only when a new event arrives; otherwise the
 cached shadow is stepped forward.
+
+Battles come from tools/rs_engine.make_battle under `engine` (default: the
+process's rs_engine.active() config), always with no command delay: every event
+is placed at the tick it executes.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 from royalesim_redrive import deal_order
+import rs_engine
 
 Event = Tuple[int, int, int, int, int]      # (tick, team, card_id, x_sub, y_sub)
 DEPLOY_TICKS = 20                           # the usual troop deploy time, 1 s (assumption)
@@ -38,8 +43,9 @@ DEPLOY_TICKS = 20                           # the usual troop deploy time, 1 s (
 
 class Shadow:
     def __init__(self, royalesim, catalogue, me: int, my_deck: List[int], my_levels: List[int],
-                 tower_level: int, prim: Dict[int, int]):
+                 tower_level: int, prim: Dict[int, int], engine=None):
         self.rs = royalesim
+        self.engine = rs_engine.resolve(engine).undelayed()
         self.cat = catalogue
         self.me, self.opp = me, 1 - me
         self.my_deck, self.my_levels = list(my_deck), list(my_levels)
@@ -54,8 +60,8 @@ class Shadow:
         self._dirty = True
         self.refused = 0
         self.why: Dict[tuple, int] = {}         # (team, reason) -> count, last rebuild
-        self.F = {k: i for i, k in enumerate(royalesim.ENTITY_FIELDS)}
-        self.unit_names = json.loads(royalesim.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+        self.F = rs_engine.field_index(royalesim)
+        self.unit_names = json.loads(rs_engine.make_battle(self.engine, royalesim)
                                      .unit_types_json())
         self.SF = {k: i for i, k in enumerate(royalesim.SPELL_FIELDS)}
 
@@ -139,7 +145,7 @@ class Shadow:
             dealt[team] = order or decks[team]
         lv = {self.me: dict(zip(self.my_deck, self.my_levels)),
               self.opp: {c: (self.opp_cards.get(c) or self.tower_level) for c in decks[self.opp]}}
-        b = self.rs.Battle(card_names=None, slot_of_k=[[0, 1, 2], [0, 1, 2]])
+        b = rs_engine.make_battle(self.engine, self.rs)
         b.reset(seed=0, decks=[dealt[0], dealt[1]], shuffle=0, start_tick=0,
                 elixir_milli=[6000, 6000], tower_hp=None, spawns=[],
                 levels=[[lv[t][c] or self.tower_level for c in dealt[t]] for t in (0, 1)],
