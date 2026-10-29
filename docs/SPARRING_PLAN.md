@@ -104,7 +104,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V08: screen capture sources.
 - L01: statistics and ratings.
 
-**Batch 2: engine and training core** (in progress)
+**Batch 2: engine and training core** (done; PC steps in `docs/SPARRING_RUNBOOK.md` sections 13-14)
 - E01: a single RoyaleSim factory with a fingerprint.
 - E02: card map, including 3 missing cards.
 - E04: refuse to load a checkpoint into the wrong engine.
@@ -120,7 +120,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V09: detector wrapper and dataset prep that keep the side column.
 - V04: opponent-play detection.
 - V12: takeover toggle.
-- V07: screen readers for clock, elixir, tower HP, hand and HP bars.
+- V07: screen readers for clock, elixir, tower HP, hand and HP bars (done, calibrated on the owner's recorded friendly).
 - Then, once batch 2 lands:
   - V05: screen-to-simulator state converter;
   - V06: shared decision function;

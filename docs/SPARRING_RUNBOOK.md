@@ -258,6 +258,63 @@ This code was written in a sandbox that could not run it, so the first run may s
 
 The legacy suite (`pytest tests`) needs `tmp/gamedata`, has known failures, and is not needed.
 
+## 13. Engine checks (quick, MuMu can stay closed)
+
+Run these after each `git pull` that changes the engine code:
+
+```powershell
+& $RG tools\rs_engine.py --probe
+```
+
+This must report the card table `cards-160402017-20261019.1` (the 16.402.22 / 19 October balance update), card level 11 and tower level 11. `--engine-config legacy` shows the engine's built-in table instead, for comparison.
+
+```powershell
+& $RG tools\rs_cards.py --coverage --parts 4
+& $RG tools\rs_orient.py --parts 4
+& $RG tools\rs_spawn_table.py
+```
+
+- `rs_cards --coverage`: how many IL_Replay matches have every card in the simulator's card map.
+- `rs_orient`: how many matches pass the board-orientation check. A large "skipped" share means the check is too strict; send the output back.
+- `rs_spawn_table`: writes `data\rs_rows\spawn_primary.json`, the table of which units each card creates. Evaluation needs it.
+
+## 14. First model (Phase 3, live-compatible)
+
+**Close MuMu and the browser first.** These jobs use most of the RAM.
+
+The first model is trained on `--live-compat` rows. In those rows, units are identified by the card that created them, which is what screen vision can supply. It is the author's design, kept as the quickest route to a first live friendly. Later batches replace it with decision-time rows and RL.
+
+**1. Build the training rows.** This takes about 30-60 minutes. It uses every Hog 2.6 match plus 20,000 others:
+
+```powershell
+& $RG tools\rs_rows.py --live-compat --others 20000 --workers 8 --out data\rs_rows_live
+```
+
+If Task Manager shows less than 2 GB of RAM available, stop it with Ctrl+C and re-run with `--workers 6`.
+
+**2. Train a general model on all decks.** This takes a few hours on the GPU. It writes `runs\tokens\live_big\` with `ep01.pt`, `ep02.pt`, `ep03.pt`, `best.pt` and `last.pt`:
+
+```powershell
+& $BB -m sim.train_tokens --name live_big --data data\rs_rows_live --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8
+```
+
+**3. Fine-tune it on Hog 2.6.** This takes about an hour:
+
+```powershell
+& $BB -m sim.train_tokens --name live_big_hog --data data\rs_rows_live --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\live_big\best.pt
+```
+
+Each epoch prints `val card ... near ...` and `hog card ... near ...`. The author's comparable model reached about 65% Hog card accuracy and 54% tile-within-1.
+
+**4. Evaluate it in the simulator.** Each run is 300 matches on held-out games against the general model's first epoch. Run it once without the client's command delay and once with it:
+
+```powershell
+& $RG tools\rs_eval.py --ckpt runs\tokens\live_big_hog\best.pt --opponent-ckpt runs\tokens\live_big\ep01.pt --matches 300 --workers 8
+& $RG tools\rs_eval.py --ckpt runs\tokens\live_big_hog\best.pt --opponent-ckpt runs\tokens\live_big\ep01.pt --matches 300 --workers 8 --delay 21
+```
+
+Send back the last lines of each step: the row counts, the per-epoch `val` lines, and both win rates with their intervals.
+
 ## If something breaks
 
 Paste these back to the cloud session:
@@ -272,7 +329,6 @@ These need code that is not on the branch yet. Each one gets exact commands here
 | Phase | What you will run | Waits for |
 |---|---|---|
 | 2. Engine re-baseline | spawn tables for both card tables; then a fidelity grid over 2,000 validation matches (`tools/rs_fidelity_grid.py`), which picks the RoyaleSim card table and writes `data/engine.json` | E01, E03, E06 |
-| 3. Author baseline | build rows (`tools/rs_rows.py`), train `rs_bc`, `rs_big` and `rs_big_hog` (`sim/train_tokens.py`), and evaluate (`tools/rs_eval.py`). The scripts exist, but wait for: the vendored card map, the GPU guard and per-epoch checkpoints, and the engine factory. **Close MuMu and the browser for training.** | E01, E02, E05, E06 |
 | 4. Decision-time models | v2 rows on the vision class list, with delay and noise; memory-mapped training; the league evaluation | E11-E18, L01-L03 |
 | 5. Screen perception | detector dataset and training; HUD readers (clock, elixir, tower HP, hand) | V07, V09 |
 | 6. Live friendlies | `scripts/vision_play.py`: dry run by default; `--tap` only while you watch; stops when `C:\hcr\STOP` exists. Plus a latency probe to measure the real delay. | V04-V06, V10, V11 |

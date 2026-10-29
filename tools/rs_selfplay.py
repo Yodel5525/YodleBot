@@ -437,8 +437,9 @@ def main() -> int:
     lp.add_argument("--kl", type=float, default=0.05)
     lp.add_argument("--eval-every", type=int, default=5)
     lp.add_argument("--eval-matches", type=int, default=300)
-    lp.add_argument("--eval-opponent", default=str(ROOT / "runs" / "tokens" / "rs_bc" / "ep1.pt"),
-                    help="the reference every earlier number was measured against")
+    lp.add_argument("--eval-opponent", default=str(ROOT / "runs" / "tokens" / "rs_bc" / "ep01.pt"),
+                    help="the reference every earlier number was measured against (the model "
+                         "after rs_bc's first epoch; sim/train_tokens writes it as ep01.pt)")
     args = ap.parse_args()
     return {"collect": collect, "train": train, "loop": loop}[args.cmd](args) or 0
 

@@ -94,3 +94,8 @@ runs/tokens/
 # Live-play recordings (frames show clanmates' names); local only.
 reports/vision/
 reports/vision_play/
+
+# Training rows, compacted columns and model runs (gigabytes; rebuilt on the PC).
+data/rs_rows_*/
+data/rs_cols*/
+runs/

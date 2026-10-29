@@ -5,8 +5,10 @@
 # evaluate models here: everything else uses royalesim 0.1.42 (engine.txt, gpu.txt).
 #
 # Created by: scripts/setup_windows.ps1 -Reference. No torch: the re-drive does not use it.
-# The re-drive also reads the IL_Replay card map. Until change E02 vendors it into
-# data/cards/, that map comes from royaleimitate, which this file does not install.
+# The re-drive also reads the IL_Replay card map, which is vendored in data/cards/
+# and loaded by tools/rs_cards.py (change E02), so royaleimitate is not needed.
+# Run the 0.1.22 re-drive with --engine-config legacy: the default config passes a
+# card-table override and levels that 0.1.22 does not know.
 #
 # Every line is an exact pin, name==version (tests/pipeline/test_requirements.py).
 royalesim==0.1.22
