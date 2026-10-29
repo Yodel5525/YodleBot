@@ -28,6 +28,18 @@ counted and printed. The ghost cannot react - it plays the
 recorded commands even when the board has changed - which flatters an agent
 that disrupts a scripted push; the `pro` row is measured the same way, so the
 comparison between the two is fair even if both numbers are optimistic.
+
+Opponent memory (E08, tools/rs_memory.py; what opp_seen / opp_last show a seat):
+every play is dated on the tick it runs, send tick + --delay, and each seat
+decides on one view per tick, taken before anything is sent that tick, holding
+the plays with exec_tick + --mem-lag <= tick (default BOARD_LAG = 1: what the
+board of that tick shows). So no seat sees a card before it is on the board, nor
+the other seat's play of the same tick. `--mem-lag legacy` dates plays when they
+are sent and reads the memory at each decision, as before E08: identical results,
+with a card in memory up to `delay` ticks before it exists. A run whose lag is
+not the default says so in its name; reports/rs_ghost.jsonl records "mem_lag".
+
+The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
 """
 from __future__ import annotations
 
@@ -49,19 +61,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 import rs_rows as RR  # noqa: E402
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
 import rs_engine  # noqa: E402
+import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
+from tools.league.stats import wilson  # noqa: E402  (rs_eval.wilson, as before L01)
 
 DECIDE = 10           # ticks between agent decisions (0.5 s)
-
-
-def wilson(k, n, z=1.96):
-    if not n:
-        return 0.0, 0.0
-    p = k / n
-    d = 1 + z * z / n
-    c = (p + z * z / (2 * n)) / d
-    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
-    return c - h, c + h
 
 
 def to_world(ox, oy, team):
@@ -303,6 +307,12 @@ class RSAgent:
             ckpt, rs_engine.resolve(self.engine), allow_drift=allow_drift)
         self.meta = meta
         self.torch = torch
+        # A --units vision checkpoint (E16) reads vision-class unit tokens; the rows built
+        # here are unit types (or creating cards). Refused, also when vocab drift is allowed.
+        units = meta.get("units_mode", RR.UNITS_TYPES)
+        if units != RR.UNITS_TYPES:
+            raise ValueError(f"{ckpt}: a --units {units} checkpoint; rs_eval builds "
+                             f"--units {RR.UNITS_TYPES} rows only")
         # A live-compatible checkpoint was trained on card-id unit tokens.
         self.live = bool(meta.get("live_compat", False))
         self.rng = np.random.default_rng(seed)
@@ -548,11 +558,15 @@ def split_results(results):
 
 def play(args):
     """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
-    shadow, spell_aim, engine]); `engine` (an rs_engine config's to_json()) becomes this
-    process's rs_engine.active() config, else the active one is used."""
+    shadow, spell_aim, engine, mem_lag]); `engine` (an rs_engine config's to_json()) becomes
+    this process's rs_engine.active() config, else the active one is used. `mem_lag` as
+    --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc)."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
+    mem_lag = RR.mem_lag_value(args[11] if len(args) > 11 and args[11] is not None
+                               else rs_memory.BOARD_LAG)
+    legacy = mem_lag == RR.MEM_LEGACY
     if len(args) > 10 and args[10] is not None:
         rs_engine.set_active(args[10])
     cfg = rs_engine.active()
@@ -642,12 +656,17 @@ def play(args):
     if delay:
         scripted = [(max(0, t - delay), team, c, x, y) for (t, team, c, x, y) in scripted]
     scripted.sort()
-    mem = {"seen": {0: set(), 1: set()}, "last": {0: [], 1: []}}
+    # E08: a play sent on tick t runs on t + delay, and is recorded with that tick; every
+    # decision of a tick reads the one view taken before anything is sent. Legacy dates a
+    # play when it is sent and reads the memory at each decision (the dict before E08).
+    mem = rs_memory.PublicMemory()
+    runs_after = 0 if legacy else delay
     i, tick, n_agent = 0, 0, 0
     while tick < 6200:
         state = json.loads(b.state_json())
         if state["game_over"]:
             break
+        known = None if legacy else mem.view(tick, mem_lag)
         cmds = []
         while i < len(scripted) and scripted[i][0] <= tick:
             _, team, card, x, y = scripted[i]
@@ -656,12 +675,12 @@ def play(args):
             cid = ids[card]
             if cid in hand:
                 cmds.append((team, hand.index(cid), *rs_orient.to_engine(x, y, sub)))
-                mem["seen"][team].add(cid + 2)
-                mem["last"][team].append((cid + 2, tick))
+                mem.record(team, cid + 2, tick + runs_after)
         if agent is not None and getattr(agent, "shadow", None) is not None:
             agent.shadow.observe(state)
         if agent is not None and tick % DECIDE == 0 and tick >= 90:
-            cmd = agent.act(b, state, hog_team, mem, tick, sub, royalesim)
+            cmd = agent.act(b, state, hog_team, mem.view(tick, 0) if legacy else known, tick,
+                            sub, royalesim)
             if cmd is not None:
                 cmds.append(cmd)
                 agent.sent = getattr(agent, "sent", []) + [
@@ -670,16 +689,15 @@ def play(args):
                     agent.shadow.own_play(tick + delay, state["players"][hog_team]["hand"][cmd[1]],
                                           cmd[2], cmd[3])
                 card = state["players"][hog_team]["hand"][cmd[1]]
-                mem["seen"][hog_team].add(card + 2)
-                mem["last"][hog_team].append((card + 2, tick))
+                mem.record(hog_team, card + 2, tick + runs_after)
                 n_agent += 1
         if opponent is not None and tick % DECIDE == 0 and tick >= 90:
-            cmd = opponent.act(b, state, ghost_team, mem, tick, sub, royalesim)
+            cmd = opponent.act(b, state, ghost_team, mem.view(tick, 0) if legacy else known,
+                               tick, sub, royalesim)
             if cmd is not None:
                 cmds.append(cmd)
                 card = state["players"][ghost_team]["hand"][cmd[1]]
-                mem["seen"][ghost_team].add(card + 2)
-                mem["last"][ghost_team].append((card + 2, tick))
+                mem.record(ghost_team, card + 2, tick + runs_after)
         nxt = scripted[i][0] if i < len(scripted) else 6000
         step = max(1, min(nxt, (tick // DECIDE + 1) * DECIDE) - tick)
         b.step(cmds, step)
@@ -726,6 +744,10 @@ def main() -> int:
     ap.add_argument("--allow-vocab-drift", action="store_true",
                     help="load checkpoints whose card / unit vocabulary or card table is not "
                          "this engine's, with a warning (tools/rs_checkpoint.py)")
+    RR.add_mem_lag_arg(ap, help_text=(
+        "opponent memory: a seat deciding at tick t knows the plays that ran by t - TICKS "
+        f"(default {rs_memory.BOARD_LAG}: what the board shows; a play runs --delay ticks after "
+        "it is sent); 'legacy': dated when sent, as before E08"))
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     try:
@@ -777,7 +799,7 @@ def main() -> int:
                              initargs=(cfg.to_json(),)) as pool:
         rows, skipped = split_results(list(pool.map(
             play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
-                    args.hold_pending, args.shadow, args.spell_aim, cfg.to_json())
+                    args.hold_pending, args.shadow, args.spell_aim, cfg.to_json(), args.mem_lag)
                    for k, t in enumerate(picked)])))
     if skipped:
         print(f"  skipped matches: {dict(skipped)} (orient = a side's troop plays are off "
@@ -794,6 +816,7 @@ def main() -> int:
             + (" hold" if args.hold_pending else "")
             + (" shadow" if args.shadow else "")
             + (" spell-aim" if args.spell_aim else "")
+            + (f" mem-lag {args.mem_lag}" if args.mem_lag != rs_memory.BOARD_LAG else "")
             + (f" vs reactive {Path(args.opponent_ckpt).parent.name}" if args.opponent_ckpt else " vs ghost"))
     real_w = sum(r["real"] == "win" for r in rows)
     print(f"  real result of the Hog player in these matches: {real_w}/{len(rows)} "
@@ -806,7 +829,7 @@ def main() -> int:
     record = {"name": name, "ckpt": args.ckpt, "wins": wins, "n": len(rows),
               "ci": [lo, hi], "crown_diff": cd,
               "engine": cfg.delayed(args.delay).to_json(), "engine_id": fp["id"],
-              "rows": rows}
+              "mem_lag": args.mem_lag, "rows": rows}
     if skipped:                       # only then, so a run with none writes what it did
         record["skipped"] = dict(skipped)
     with out.open("a", encoding="utf-8") as f:
