@@ -1,0 +1,891 @@
+{
+ "about": "Spawn relations for scripts/vision/events.py, generated from RoyaleSim's card data by reading the JSON only. Names are RoyaleSim card and unit names; map units to vision classes (tools/vision_classes) and cards to catalogue ids (Battle.catalogue_json) with events.EventTables.from_names.",
+ "children": {
+  "AxeManTower_SpookyChess": [
+   "AxeMan_Small"
+  ],
+  "Balloon": [
+   "BalloonBomb"
+  ],
+  "BarbarianHut": [
+   "Barbarian"
+  ],
+  "BarbarianLauncher": [
+   "Barbarian"
+  ],
+  "BattleRam": [
+   "Barbarian"
+  ],
+  "BattleRam_EV1": [
+   "Barbarian_EV1"
+  ],
+  "BombTower": [
+   "BombTowerBomb",
+   "Bomber"
+  ],
+  "BombTower_chess": [
+   "Bomber_Chess"
+  ],
+  "Boost": [
+   "InvisibilityBottle"
+  ],
+  "BoostObject_TrickOrTreat_Pekka": [
+   "Pekka"
+  ],
+  "BoostObject_TrickOrTreat_Skeletons": [
+   "Skeleton"
+  ],
+  "Cannoneer": [
+   "TowerCannoneer"
+  ],
+  "CapturableArcherQueen": [
+   "ArcherQueen"
+  ],
+  "CapturableSparky": [
+   "ZapMachine"
+  ],
+  "CaptureTower": [
+   "CaptureTowerTop"
+  ],
+  "ChefTower": [
+   "Chef"
+  ],
+  "ClanWarsTowerXbow": [
+   "ClanWarsTowerBomb"
+  ],
+  "DaggerDuchess": [
+   "TowerKnifeThrower"
+  ],
+  "DarkPrinceTower_SpookyChess": [
+   "DarkPrince",
+   "DarkPrince_Small"
+  ],
+  "DarkWitch": [
+   "Bat"
+  ],
+  "DragonEgg": [
+   "BabyDragon"
+  ],
+  "EliteArcherTower_chess": [
+   "EliteArcher_Chess"
+  ],
+  "ElixirGolem1": [
+   "ElixirGolem2"
+  ],
+  "ElixirGolem2": [
+   "ElixirGolem4"
+  ],
+  "Event_HolidayFeast_Pancake": [
+   "Event_HolidayFeast_Pancake_Object"
+  ],
+  "FirespiritHut": [
+   "FireSpirits"
+  ],
+  "FishBoat": [
+   "Fisherman"
+  ],
+  "Ghost": [
+   "GhostOverlay"
+  ],
+  "Ghost_EV1_Clone": [
+   "GhostOverlay"
+  ],
+  "GiantSkeleton": [
+   "GiantSkeletonBomb"
+  ],
+  "GoblinCage": [
+   "GoblinBrawler"
+  ],
+  "GoblinCage_EV1_TEMPNAME": [
+   "GoblinCage_EV1_GoblinBrawler"
+  ],
+  "GoblinCannon": [
+   "Goblin"
+  ],
+  "GoblinDrill": [
+   "Goblin"
+  ],
+  "GoblinDrill_EV1": [
+   "Goblin"
+  ],
+  "GoblinGiant": [
+   "SpearGoblinGiant"
+  ],
+  "GoblinGiant_EV1": [
+   "SpearGoblinGiant_EV1"
+  ],
+  "GoblinHut": [
+   "SpearGoblin"
+  ],
+  "GoblinHut_Rework": [
+   "SpearGoblin"
+  ],
+  "GoblinPartyHut": [
+   "BlowdartGoblin",
+   "Goblin_Stab",
+   "SpearGoblin"
+  ],
+  "GoblinQueenTower": [
+   "GoblinQueenTowerTopCharacter"
+  ],
+  "Golem": [
+   "Golemite"
+  ],
+  "LavaHound": [
+   "LavaPups"
+  ],
+  "Mortar_EV1": [
+   "Goblin"
+  ],
+  "Mortar_Unowned": [
+   "Mortar_Owned"
+  ],
+  "Phoenix": [
+   "PhoenixEgg"
+  ],
+  "PhoenixEgg": [
+   "PhoenixNoRespawn"
+  ],
+  "PrinceTower_chess": [
+   "Prince",
+   "Prince_Chess"
+  ],
+  "PrincessTower": [
+   "TowerPrincess"
+  ],
+  "PrincessTowerClanBoatDefender": [
+   "TowerPrincess"
+  ],
+  "PrincessTowerSwapping": [
+   "TowerPrincess"
+  ],
+  "PrincessTower_AllRandom": [
+   "TowerPrincess"
+  ],
+  "PrincessTower_Battleground": [
+   "TowerPrincess"
+  ],
+  "PrincessTower_IgnoreBarrel": [
+   "TowerPrincess"
+  ],
+  "PrincessTower_LowHP": [
+   "TowerPrincess"
+  ],
+  "PrincessTower_SpookyChess": [
+   "VoodooHog",
+   "WitchMother"
+  ],
+  "PrincessTower_chess": [
+   "ArcherQueen_Chess"
+  ],
+  "RageBarbarian": [
+   "RageBarbarianBottle"
+  ],
+  "RageBarbarianBottleEvo": [
+   "RageBarbarianEvoGhost"
+  ],
+  "RageBarbarian_EV1": [
+   "RageBarbarianBottleEvo"
+  ],
+  "Ram": [
+   "RamRider"
+  ],
+  "RoyalDelivery": [
+   "Recruit"
+  ],
+  "SantaPresent": [
+   "InvisibilityBottle"
+  ],
+  "SkeletonBalloon": [
+   "SkeletonContainerNew"
+  ],
+  "SkeletonContainer": [
+   "Skeleton"
+  ],
+  "SkeletonContainerNew": [
+   "Skeleton"
+  ],
+  "SpearGoblinGiant": [
+   "SpearGoblin"
+  ],
+  "SpearGoblinGiant_EV1": [
+   "SpearGoblin"
+  ],
+  "SpellCauldron": [
+   "SpellCauldron_effect"
+  ],
+  "SuperHogRider": [
+   "SantaPresent"
+  ],
+  "SuperLavaHound": [
+   "SuperLavaHound2"
+  ],
+  "SuperLavaHound2": [
+   "LavaPups"
+  ],
+  "SuperMiniPekka": [
+   "SuperMiniPekkaPancakes"
+  ],
+  "SuperWitch": [
+   "Bat",
+   "Skeleton",
+   "VoodooHog"
+  ],
+  "SuspiciousBush": [
+   "BushGoblin"
+  ],
+  "Tombstone": [
+   "Skeleton"
+  ],
+  "TombstoneHero": [
+   "Skeleton"
+  ],
+  "Tombstone_Skeleton": [
+   "Ghost",
+   "Skeleton"
+  ],
+  "Tombstone_Skeleton_SK": [
+   "SkeletonKing",
+   "SkeletonWarrior"
+  ],
+  "Witch": [
+   "Skeleton"
+  ],
+  "WitchMother": [
+   "VoodooHog"
+  ],
+  "Witch_EV1": [
+   "Witch_EV1_Healing_Skeleton"
+  ],
+  "ZapMachine_Unowned": [
+   "ZapMachine_Owned"
+  ]
+ },
+ "compositions": {
+  "AngryBarbarians": {
+   "AngryBarbarian": 2
+  },
+  "Archer": {
+   "Archer": 2
+  },
+  "ArcherQueen": {
+   "ArcherQueen": 1
+  },
+  "Assassin": {
+   "Assassin": 1
+  },
+  "AxeMan": {
+   "AxeMan": 1
+  },
+  "BabyDragon": {
+   "BabyDragon": 1
+  },
+  "Balloon": {
+   "Balloon": 1
+  },
+  "BarbarianHut": {
+   "BarbarianHut": 1
+  },
+  "BarbarianLauncher": {
+   "BarbarianLauncher": 1
+  },
+  "Barbarians": {
+   "Barbarian": 5
+  },
+  "Bats": {
+   "Bat": 5
+  },
+  "BattleHealer": {
+   "BattleHealer": 1
+  },
+  "BattleRam": {
+   "BattleRam": 1
+  },
+  "Berserker": {
+   "Berserker": 1
+  },
+  "BlowdartGoblin": {
+   "BlowdartGoblin": 1
+  },
+  "BombTower": {
+   "BombTower": 1
+  },
+  "Bomber": {
+   "Bomber": 1
+  },
+  "BossBandit": {
+   "BossBandit": 1
+  },
+  "Bowler": {
+   "Bowler": 1
+  },
+  "Cannon": {
+   "Cannon": 1
+  },
+  "DarkPrince": {
+   "DarkPrince": 1
+  },
+  "DarkWitch": {
+   "DarkWitch": 1
+  },
+  "DartBarrell": {
+   "DartBarrell": 1
+  },
+  "ElectroDragon": {
+   "ElectroDragon": 1
+  },
+  "ElectroGiant": {
+   "ElectroGiant": 1
+  },
+  "ElectroSpirit": {
+   "ElectroSpirit": 1
+  },
+  "ElectroWizard": {
+   "ElectroWizard": 1
+  },
+  "EliteArcher": {
+   "EliteArcher": 1
+  },
+  "Elixir Collector": {
+   "ElixirCollector": 1
+  },
+  "ElixirGolem": {
+   "ElixirGolem1": 1
+  },
+  "FireSpirits": {
+   "FireSpirits": 1
+  },
+  "Firecracker": {
+   "Firecracker": 1
+  },
+  "FirespiritHut": {
+   "Furnace_rework": 1
+  },
+  "Fisherman": {
+   "Fisherman": 1
+  },
+  "Ghost": {
+   "Ghost": 1
+  },
+  "Giant": {
+   "Giant": 1
+  },
+  "GiantBuffer": {
+   "GiantBuffer": 1
+  },
+  "GiantSkeleton": {
+   "GiantSkeleton": 1
+  },
+  "GoblinCage": {
+   "GoblinCage": 1
+  },
+  "GoblinDemolisher": {
+   "GoblinDemolisher": 1
+  },
+  "GoblinDrill": {
+   "GoblinDrillDig": 1
+  },
+  "GoblinGang": {
+   "Goblin_Stab": 3,
+   "SpearGoblin": 3
+  },
+  "GoblinGiant": {
+   "GoblinGiant": 1
+  },
+  "GoblinHut": {
+   "GoblinHut_Rework": 1
+  },
+  "GoblinMachine": {
+   "GoblinMachine": 1
+  },
+  "GoblinPartyHut": {
+   "GoblinPartyHut": 1
+  },
+  "GoblinRocketSilo": {
+   "GoblinRocketSilo": 1
+  },
+  "Goblins": {
+   "Goblin_Stab": 4
+  },
+  "Goblinstein": {
+   "goblinstein": 1,
+   "goblinstein_doctor": 1
+  },
+  "GoldenKnight": {
+   "GoldenKnight": 1
+  },
+  "Golem": {
+   "Golem": 1
+  },
+  "HogRider": {
+   "HogRider": 1
+  },
+  "Hunter": {
+   "Hunter": 1
+  },
+  "IceGolemite": {
+   "IceGolemite": 1
+  },
+  "IceSpirits": {
+   "IceSpirits": 1
+  },
+  "IceWizard": {
+   "IceWizard": 1
+  },
+  "InfernoDragon": {
+   "InfernoDragon": 1
+  },
+  "InfernoTower": {
+   "InfernoTower": 1
+  },
+  "Knight": {
+   "Knight": 1
+  },
+  "LavaHound": {
+   "LavaHound": 1
+  },
+  "LittlePrince": {
+   "LittlePrince": 1
+  },
+  "MegaKnight": {
+   "MegaKnight": 1
+  },
+  "MegaMinion": {
+   "MegaMinion": 1
+  },
+  "MergeMaiden_Mounted": {
+   "MergeMaiden_Mounted": 1
+  },
+  "MergeMaiden_Normal": {
+   "MergeMaiden_Normal": 1
+  },
+  "MightyMiner": {
+   "MightyMiner": 1
+  },
+  "Miner": {
+   "Miner": 1
+  },
+  "MiniPekka": {
+   "MiniPekka": 1
+  },
+  "MiniSparkys": {
+   "MiniZapMachine": 3
+  },
+  "MinionGiant": {
+   "MinionGiant": 1
+  },
+  "MinionHorde": {
+   "Minion": 6
+  },
+  "Minions": {
+   "Minion": 3
+  },
+  "Monk": {
+   "Monk": 1
+  },
+  "Mortar": {
+   "Mortar": 1
+  },
+  "MovingCannon": {
+   "MovingCannon": 1
+  },
+  "Musketeer": {
+   "Musketeer": 1
+  },
+  "Pekka": {
+   "Pekka": 1
+  },
+  "Phoenix": {
+   "Phoenix": 1
+  },
+  "Prince": {
+   "Prince": 1
+  },
+  "PrinceBuff": {
+   "PrinceBuff": 1
+  },
+  "Princess": {
+   "Princess": 1
+  },
+  "RageBarbarian": {
+   "RageBarbarian": 1
+  },
+  "RamRider": {
+   "Ram": 1
+  },
+  "Rascals": {
+   "RascalBoy": 1,
+   "RascalGirl": 2
+  },
+  "Ronin": {
+   "Ronin": 1
+  },
+  "RoyalGiant": {
+   "RoyalGiant": 1
+  },
+  "RoyalHogs": {
+   "RoyalHog": 4
+  },
+  "RoyalRecruits": {
+   "Recruit": 6
+  },
+  "RoyalRecruits_Chess": {
+   "Recruit_Chess": 8
+  },
+  "SkeletonArmy": {
+   "Skeleton": 15
+  },
+  "SkeletonBalloon": {
+   "SkeletonBalloon": 1
+  },
+  "SkeletonDragons": {
+   "SkeletonDragon": 2
+  },
+  "SkeletonKing": {
+   "SkeletonKing": 1
+  },
+  "SkeletonWarriors": {
+   "SkeletonWarrior": 3
+  },
+  "SkeletonWarriors_SpookyChess": {
+   "SkeletonWarrior_SpookyChess": 8
+  },
+  "Skeletons": {
+   "Skeleton": 3
+  },
+  "SpearGoblins": {
+   "SpearGoblin": 3
+  },
+  "SuperArcher": {
+   "SuperArcher": 2
+  },
+  "SuperEliteArcher": {
+   "SuperEliteArcher": 1
+  },
+  "SuperHogRider": {
+   "SuperHogRider": 1
+  },
+  "SuperHogRiderTerry": {
+   "SuperHogRider_Terry": 1
+  },
+  "SuperIceGolemite": {
+   "SuperIceGolemite": 1
+  },
+  "SuperKnight": {
+   "SuperKnight": 1
+  },
+  "SuperLavaHound": {
+   "SuperLavaHound": 1
+  },
+  "SuperMiniPekka": {
+   "SuperMiniPekka": 1
+  },
+  "SuperWitch": {
+   "SuperWitch": 1
+  },
+  "SuspiciousBush": {
+   "SuspiciousBush": 1
+  },
+  "Tesla": {
+   "Tesla": 1
+  },
+  "ThreeMusketeers": {
+   "ThreeMusketeer_Rework_Character_1": 3,
+   "ThreeMusketeer_Rework_Character_2": 1
+  },
+  "Tombstone": {
+   "Tombstone": 1
+  },
+  "TriWizards": {
+   "ElectroWizard": 1,
+   "TriWizard": 1
+  },
+  "Valkyrie": {
+   "Valkyrie": 1
+  },
+  "Wallbreakers": {
+   "Wallbreaker": 2
+  },
+  "Witch": {
+   "Witch": 1
+  },
+  "WitchMother": {
+   "WitchMother": 1
+  },
+  "Wizard": {
+   "Wizard": 1
+  },
+  "Xbow": {
+   "Xbow": 1
+  },
+  "ZapMachine": {
+   "ZapMachine": 1
+  }
+ },
+ "kinds": {
+  "AngryBarbarians": "troop",
+  "Archer": "troop",
+  "ArcherQueen": "troop",
+  "Arrows": "spell",
+  "Assassin": "troop",
+  "AxeMan": "troop",
+  "BabyDragon": "troop",
+  "Balloon": "troop",
+  "BarbLog": "spell",
+  "BarbarianHut": "building",
+  "BarbarianLauncher": "building",
+  "Barbarians": "troop",
+  "Bats": "troop",
+  "BattleHealer": "troop",
+  "BattleRam": "troop",
+  "Berserker": "troop",
+  "BlowdartGoblin": "troop",
+  "BombTower": "building",
+  "Bomber": "troop",
+  "BossBandit": "troop",
+  "Bowler": "troop",
+  "Cannon": "building",
+  "Clone": "spell",
+  "DarkMagic": "spell",
+  "DarkPrince": "troop",
+  "DarkWitch": "troop",
+  "DartBarrell": "troop",
+  "Earthquake": "spell",
+  "ElectroDragon": "troop",
+  "ElectroGiant": "troop",
+  "ElectroSpirit": "troop",
+  "ElectroWizard": "troop",
+  "EliteArcher": "troop",
+  "Elixir Collector": "building",
+  "ElixirGolem": "troop",
+  "FireSpirits": "troop",
+  "Fireball": "spell",
+  "Firecracker": "troop",
+  "FirespiritHut": "troop",
+  "Fisherman": "troop",
+  "Freeze": "spell",
+  "Ghost": "troop",
+  "Giant": "troop",
+  "GiantBuffer": "troop",
+  "GiantSkeleton": "troop",
+  "GlobalClone": "spell",
+  "GlobalLightning": "spell",
+  "GoblinBarrel": "spell",
+  "GoblinCage": "building",
+  "GoblinCurse": "spell",
+  "GoblinDemolisher": "troop",
+  "GoblinDrill": "building",
+  "GoblinGang": "troop",
+  "GoblinGiant": "troop",
+  "GoblinHut": "building",
+  "GoblinMachine": "troop",
+  "GoblinPartyHut": "building",
+  "GoblinPartyRocket": "spell",
+  "GoblinRocketSilo": "building",
+  "Goblins": "troop",
+  "Goblinstein": "troop",
+  "GoldenKnight": "troop",
+  "Golem": "troop",
+  "Graveyard": "spell",
+  "Heal": "spell",
+  "HogRider": "troop",
+  "Hunter": "troop",
+  "IceGolemite": "troop",
+  "IceSpirits": "troop",
+  "IceWizard": "troop",
+  "InfernoDragon": "troop",
+  "InfernoTower": "building",
+  "Knight": "troop",
+  "LavaHound": "troop",
+  "Lightning": "spell",
+  "LittlePrince": "troop",
+  "Log": "spell",
+  "MegaKnight": "troop",
+  "MegaMinion": "troop",
+  "MergeMaiden": "spell",
+  "MergeMaiden_Mounted": "troop",
+  "MergeMaiden_Normal": "troop",
+  "MightyMiner": "troop",
+  "Miner": "troop",
+  "MiniPekka": "troop",
+  "MiniSparkys": "troop",
+  "MinionGiant": "troop",
+  "MinionHorde": "troop",
+  "Minions": "troop",
+  "Mirror": "spell",
+  "Monk": "troop",
+  "Mortar": "building",
+  "MovingCannon": "troop",
+  "Musketeer": "troop",
+  "Pekka": "troop",
+  "Phoenix": "troop",
+  "Poison": "spell",
+  "Prince": "troop",
+  "PrinceBuff": "troop",
+  "Princess": "troop",
+  "Rage": "spell",
+  "RageBarbarian": "troop",
+  "RamRider": "troop",
+  "Rascals": "troop",
+  "Rocket": "spell",
+  "Ronin": "troop",
+  "RoyalDelivery": "spell",
+  "RoyalGiant": "troop",
+  "RoyalHogs": "troop",
+  "RoyalRecruits": "troop",
+  "RoyalRecruits_Chess": "troop",
+  "SkeletonArmy": "troop",
+  "SkeletonBalloon": "troop",
+  "SkeletonDragons": "troop",
+  "SkeletonKing": "troop",
+  "SkeletonWarriors": "troop",
+  "SkeletonWarriors_SpookyChess": "troop",
+  "Skeletons": "troop",
+  "Snowball": "spell",
+  "SpearGoblins": "troop",
+  "SuperArcher": "troop",
+  "SuperEliteArcher": "troop",
+  "SuperHogRider": "troop",
+  "SuperHogRiderTerry": "troop",
+  "SuperIceGolemite": "troop",
+  "SuperKnight": "troop",
+  "SuperLavaHound": "troop",
+  "SuperMiniPekka": "troop",
+  "SuperWitch": "troop",
+  "SuspiciousBush": "troop",
+  "Tesla": "building",
+  "ThreeMusketeers": "troop",
+  "Tombstone": "building",
+  "Tornado": "spell",
+  "TriWizards": "troop",
+  "Valkyrie": "troop",
+  "Vines": "spell",
+  "Wallbreakers": "troop",
+  "WarmSpell": "spell",
+  "Witch": "troop",
+  "WitchMother": "troop",
+  "Wizard": "troop",
+  "Xbow": "building",
+  "Zap": "spell",
+  "ZapMachine": "troop"
+ },
+ "source": {
+  "file": "royalesim/data/derived/cards.json",
+  "note": "the default 15.535.29 extraction; the 16.402.22 table ships compiled into the engine only, with no JSON file, so it could not be read here",
+  "package": "royalesim==0.1.42",
+  "version": "cards-15535.1"
+ },
+ "spell_children": {
+  "BarbLog": [
+   "Barbarian"
+  ],
+  "GoblinBarrel": [
+   "Goblin"
+  ],
+  "GoblinCurse": [
+   "GoblinCurseGoblin"
+  ],
+  "GoblinPartyRocket": [
+   "GoblinParty"
+  ],
+  "Graveyard": [
+   "Graveyard_rework_Skeleton"
+  ],
+  "Heal": [
+   "HealSpirit"
+  ],
+  "Rage": [
+   "RageBottle"
+  ],
+  "RoyalDelivery": [
+   "DeliveryRecruit"
+  ]
+ },
+ "spell_objects": {
+  "Arrows": [
+   "ArrowsSpell"
+  ],
+  "BarbLog": [
+   "BarbLogProjectile",
+   "BarbLogProjectileRolling"
+  ],
+  "Clone": [
+   "Clone"
+  ],
+  "DarkMagic": [
+   "DarkMagicAOE"
+  ],
+  "Earthquake": [
+   "Earthquake"
+  ],
+  "Fireball": [
+   "FireballSpell"
+  ],
+  "Freeze": [
+   "Freeze"
+  ],
+  "GlobalClone": [
+   "Clone",
+   "GlobalClone"
+  ],
+  "GlobalLightning": [
+   "LighningSpell",
+   "Event_Global_Lightning",
+   "Event_Global_Lightning_Charge1",
+   "Event_Global_Lightning_Charge2"
+  ],
+  "GoblinBarrel": [
+   "GoblinBarrelSpell"
+  ],
+  "GoblinCurse": [
+   "GoblinCurse",
+   "GoblinCurseBase"
+  ],
+  "GoblinPartyRocket": [
+   "GoblinMorphProjectile",
+   "GoblinMorphAOEDamage",
+   "GoblinMorphAOEFoe",
+   "GoblinMorphAOEFriend"
+  ],
+  "Graveyard": [
+   "Graveyard_rework"
+  ],
+  "Heal": [],
+  "Lightning": [
+   "LighningSpell",
+   "Lightning"
+  ],
+  "Log": [
+   "LogProjectile",
+   "LogProjectileRolling"
+  ],
+  "MergeMaiden": [],
+  "Mirror": [],
+  "Poison": [
+   "Poison"
+  ],
+  "Rage": [],
+  "Rocket": [
+   "RocketSpell"
+  ],
+  "RoyalDelivery": [
+   "RoyalDeliveryProjectile",
+   "RoyalDeliveryArea"
+  ],
+  "Snowball": [
+   "SnowballSpell"
+  ],
+  "Tornado": [
+   "Tornado"
+  ],
+  "Vines": [
+   "Vines_AeO"
+  ],
+  "WarmSpell": [
+   "WarmAOE"
+  ],
+  "Zap": [
+   "Zap"
+  ]
+ }
+}

@@ -99,3 +99,8 @@ reports/vision_play/
 data/rs_rows_*/
 data/rs_cols*/
 runs/
+
+# Live-runner control files and machine-specific detector pin.
+/STOP
+/MANUAL
+data/vision/detector_pin.json
