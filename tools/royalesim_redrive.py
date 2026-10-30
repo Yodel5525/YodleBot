@@ -31,6 +31,17 @@ Cards map to RoyaleSim names through tools/rs_cards.py (data/cards/, no royaleim
 needed). HASTYCR_CARD_EXTRAS=0 drops the void / rune-giant / spirit-empress extras and
 leaves royaleimitate 0.2.15's 119-key map, which this tool read before. Matches with those
 cards then fail with "card not in RoyaleSim" as they used to, so runs stay comparable.
+
+Presses (E10, tools/rs_presses.py): `--presses off` (the default) replays play_card events
+only, as before, and writes reports/redrive/<pair>_royalesim.jsonl unchanged. `--presses on`
+also replays every activate_ability event as (team, HAND_SIZE + button, 0, 0) at its tick, in
+the same step as that tick's plays (the button: the card of the event among the side's heroes,
+form 2, in dealt-deck order, then its champions; the engine's own order when its abilities
+rows name the cards). Each result goes to the match's "presses" counts (events, sent, ok,
+refused by reason, skipped "unknown" / "ambiguous", order_mismatch), not to "forced", so the
+refusals per 100 plays stay comparable; the run ends at the last play or press + 200. Its
+output is <pair>_royalesim_presses.jsonl, so both runs can sit side by side and their winner
+and crown agreement be compared (rsim-02).
 """
 from __future__ import annotations
 
@@ -40,6 +51,7 @@ import sys
 import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from itertools import combinations, permutations
 from pathlib import Path
 from statistics import mode
@@ -51,6 +63,7 @@ if str(ROOT / "tools") not in sys.path:      # also when imported as tools.royal
 import rs_cards  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_orient  # noqa: E402
+import rs_presses  # noqa: E402
 
 
 def deal_order(deck, plays):
@@ -80,9 +93,10 @@ _ENGINE = {}
 
 
 def _engine(engine=None):
-    """royalesim, the card map (rs_cards.load()), catalogue ids and the troop names that
-    decide the seat (rs_orient.troop_names) under `engine` (an rs_engine.EngineConfig or its
-    to_json(); None = rs_engine.active()), cached per config, delay forced to 0."""
+    """royalesim, the card map (rs_cards.load()), catalogue ids, the troop names that decide
+    the seat (rs_orient.troop_names) and the champions' ids (rs_presses.champion_ids) under
+    `engine` (an rs_engine.EngineConfig or its to_json(); None = rs_engine.active()), cached
+    per config, delay forced to 0."""
     cfg = rs_engine.resolve(engine).undelayed()
     if _ENGINE.get("key") != cfg.key():
         import royalesim
@@ -92,11 +106,16 @@ def _engine(engine=None):
         ids = {row[0]: i for i, row in enumerate(cat)}
         _ENGINE.clear()
         _ENGINE.update(royalesim=royalesim, names=names, ids=ids,
-                       troop=rs_orient.troop_names(cat), cfg=cfg, key=cfg.key())
+                       troop=rs_orient.troop_names(cat), cfg=cfg, key=cfg.key(),
+                       champions=rs_presses.champion_ids(
+                           cat, getattr(royalesim, "CATALOGUE_FIELDS", None)))
     return _ENGINE
 
 
-def one(payload_text: str, engine=None) -> dict:
+def one(payload_text: str, engine=None, presses: str = rs_presses.PRESS_OFF) -> dict:
+    """Re-drive one match (module doc). `presses` as --presses: under "on" the recorded
+    ability presses are sent too and the result has "presses" (rs_presses.PressLog counts)."""
+    press_on = rs_presses.press_mode(presses) == rs_presses.PRESS_ON
     eng = _engine(engine)
     royalesim, names, ids = eng["royalesim"], eng["names"], eng["ids"]
     p = json.loads(payload_text)
@@ -159,17 +178,37 @@ def one(payload_text: str, engine=None) -> dict:
             tower_levels=[tower, tower])
     SUB = royalesim.SUBTILE_PER_MILLITILE
     queue = sorted([(t, seat, c, x, y) for seat in (0, 1) for (t, c, x, y) in plays[seat]])
+    # E10 (--presses on): the recorded presses, (tick, RoyaleSim team, rs_presses.Press) in
+    # tick order, and each team's button cards (the dealt decks and forms given to reset).
+    press_q, btns, plog, checked = [], {}, None, not press_on
+    if press_on:
+        for t in (0, 1):
+            seat = by_team[t]
+            btns[t] = rs_presses.side_buttons([ids[c] for c in dealt[seat]],
+                                              [forms[seat][k] for k in perm[seat]],
+                                              eng["champions"])
+        press_q = [(pr.tick, rs_side[pr.side], pr)
+                   for pr in rs_presses.parse(p["events"], names, ids)]
+        plog = rs_presses.PressLog(events=len(press_q))
+    hand_n = rs_presses.hand_size(royalesim)
     forced = Counter()
-    tick, i = 0, 0
-    last = queue[-1][0] if queue else 0
-    while i < len(queue):
-        t = queue[i][0]
+    tick, i, j = 0, 0, 0
+    last = max([queue[-1][0] if queue else 0] + [q[0] for q in press_q])
+    while i < len(queue) or j < len(press_q):
+        t = queue[i][0] if i < len(queue) else press_q[j][0]
+        if j < len(press_q):
+            t = min(t, press_q[j][0])
         if t > tick:
             b.step([], t - tick)
             tick = t
         state = json.loads(b.state_json())
         if state["game_over"]:
             break
+        if not checked:              # the engine's own button order, where it names the cards
+            for team in (0, 1):
+                btns[team], differs = rs_presses.engine_order(state["players"][team], btns[team])
+                plog.order_mismatch += int(differs)
+            checked = True
         cmds = []
         while i < len(queue) and queue[i][0] == t:
             _, seat, card, x, y = queue[i]
@@ -182,12 +221,24 @@ def one(payload_text: str, engine=None) -> dict:
             else:
                 cmds.append((team, hand.index(cid), *rs_orient.to_engine(x, y, SUB)))
             i += 1
+        n_plays = len(cmds)
+        while j < len(press_q) and press_q[j][0] == t:
+            _, team, press = press_q[j]
+            j += 1
+            button, why = rs_presses.button_of(press.cards, btns[team])
+            if button is None:
+                plog.skip(why)
+            else:
+                cmds.append(rs_presses.command(team, button, hand_n))
+                plog.sent += 1
         if cmds:
             res = b.step(cmds, 1)
             tick += 1
-            for row in res:
+            for k, row in enumerate(res):
                 reason = royalesim.DEPLOY_REASONS[row[1]]
-                if reason != "OK":
+                if press_on and k >= n_plays:      # a press's result: counted apart
+                    plog.result(reason)
+                elif reason != "OK":
                     forced[reason.lower()] += 1
     end = min(last + 200, 6000)
     if tick < end:
@@ -210,13 +261,41 @@ def one(payload_text: str, engine=None) -> dict:
                winner_agree=winner == rec_winner,
                crowns_agree=crowns == {"team": rec[0], "opponent": rec[1]},
                end=state["tick"])
+    if press_on:
+        out["presses"] = plog.to_json()
     return out
+
+
+def press_totals(rows) -> dict:
+    """The "presses" counts of every re-driven match summed (rs_presses.PressLog.to_json's
+    keys), for main's summary line; {} when no row has them (--presses off)."""
+    total: dict = {}
+    for r in rows:
+        for key, value in (r.get("presses") or {}).items():
+            if isinstance(value, dict):
+                bucket = total.setdefault(key, {})
+                for k, v in value.items():
+                    bucket[k] = bucket.get(k, 0) + v
+            else:
+                total[key] = total.get(key, 0) + value
+    return total
+
+
+def output_path(pair: str, presses: str = rs_presses.PRESS_OFF) -> Path:
+    """reports/redrive/<pair>_royalesim.jsonl, or <pair>_royalesim_presses.jsonl under
+    --presses on, so a run with presses does not overwrite the run without."""
+    suffix = "_presses" if rs_presses.press_mode(presses) == rs_presses.PRESS_ON else ""
+    return ROOT / "reports" / "redrive" / f"{pair}_royalesim{suffix}.jsonl"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pair", default="b2000")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--presses", choices=rs_presses.PRESS_MODES, default=rs_presses.PRESS_OFF,
+                    help="'off' (default): play_card events only, as before; 'on': also replay "
+                         "activate_ability events as button presses (output "
+                         "<pair>_royalesim_presses.jsonl)")
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     try:
@@ -227,6 +306,7 @@ def main() -> int:
     fp = rs_engine.fingerprint(rs_engine.make_battle(cfg), cfg=cfg)
     print(f"engine: {cfg.describe()}\n        {rs_engine.summary(fp)}", flush=True)
     print(f"cards:  {rs_cards.summary(rs_cards.load())}", flush=True)
+    print(f"presses: {rs_presses.describe_presses(args.presses)}", flush=True)
     import pyarrow.parquet as pq
     wanted = {json.loads(l)["tag"] for l in
               (ROOT / "reports" / "redrive" / f"{args.pair}.jsonl").open(encoding="utf-8")}
@@ -250,8 +330,9 @@ def main() -> int:
     t0 = time.time()
     with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
-        rows = list(pool.map(one, list(payloads.values()), chunksize=8))
-    out = ROOT / "reports" / "redrive" / f"{args.pair}_royalesim.jsonl"
+        rows = list(pool.map(partial(one, presses=args.presses), list(payloads.values()),
+                             chunksize=8))
+    out = output_path(args.pair, args.presses)
     with out.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
@@ -269,6 +350,9 @@ def main() -> int:
           f"3-crown {e3} vs recorded {r3}")
     print("  refused per 100 plays: " + ", ".join(
         f"{k} {100 * v / max(1, plays):.2f}" for k, v in forced.most_common()))
+    if args.presses == rs_presses.PRESS_ON:
+        print(f"  presses: {rs_presses.describe_log(press_totals(ok))}")
+    print(f"  -> {out}")
     return 0
 
 

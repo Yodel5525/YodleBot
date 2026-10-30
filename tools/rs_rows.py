@@ -102,6 +102,27 @@ matches where one princess fell both in the engine and in the recording, "slot1"
 the same tower if princess_left is slot 1, else "slot2" (world: slot1 for both seats; own:
 blue slot2, red slot1). vocab.json under v2 adds "trust" (TrustRule.to_json) and "trusted_v2"
 in "extra_columns" (trust_vocab). sim/train_tokens.py still filters on `trusted`.
+
+Presses (E10; tools/rs_presses.py): `--presses off` (the default) replays play_card events only,
+so the rows, vocab.json and manifest.json are byte-identical to the rows before E10. `--presses
+on` also replays every activate_ability event: its card ("card_key", else the candidates)
+picks one of the side's ability buttons (heroes, form 2, in dealt-deck order, then champions;
+the engine's own `abilities` order when it names the cards), and the command (team, HAND_SIZE
++ button, 0, 0) goes in with that tick's plays. Each press gets a row of its own, observed at
+its tick like a play row, with action (0, 0, 0) and "press" = button + 1 (shard column
+act_press; 0 on every other row); the side has no wait row on that tick, and no wait row in
+the 10 ticks before a press. A refused press (NO_HERO, ABILITY_NOT_READY, ABILITY_SPENT, short of
+elixir, ...) and a press whose card is no button of the side ("unknown") or several
+("ambiguous") cut `trusted` at its tick, reason CUT_PRESS ("press"); a skipped press has no
+row. The match's last recorded action (play or press) sets the end of the run and, under
+--trust v2, the wait tail. Every row also has "ability_card" (B int16: each button's card id +
+2, 0 none) and "ability_state" (B x 5 float16: reported, available, spent, cost / 10, cooldown
+/ 400, from players[t]["abilities"] when the engine reports them, else 0); B is
+royalesim.ABILITY_BUTTONS (fallback 2). sim/train_tokens.py reads none of them yet (E15 adds the
+press head): a press row's act_card is 0, so it trains as a wait. rows_for's info gets
+"presses" (rs_presses.PressLog counts), and manifest.json sums them under "presses" with
+press_rows. vocab.json adds "presses" (rs_presses.vocab_entry) and the three columns in
+"extra_columns" (press_vocab).
 """
 from __future__ import annotations
 
@@ -126,6 +147,7 @@ import rs_cards  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
+import rs_presses  # noqa: E402
 import vision_classes  # noqa: E402
 
 OUT = ROOT / "data" / "rs_rows"
@@ -177,6 +199,24 @@ STATUS_NAMES = ("underground", "invisible", "hidden")
 UNSEEN_STATUS = STATUS_INVISIBLE | STATUS_HIDDEN
 #: The columns --visibility public adds to FIELDS: 1.0 for a unit tunnelling now.
 VISIBILITY_FIELDS = ("unit_burrow",)
+
+#: --presses (module doc, "Presses"): rs_presses.PRESS_OFF (the rows before E10) or PRESS_ON.
+PRESSES = rs_presses.PRESS_OFF
+#: The engine's ability buttons per side (B) and hand size; _setup reads them from royalesim.
+BUTTONS = rs_presses.FALLBACK_BUTTONS
+HAND_SIZE = rs_presses.FALLBACK_HAND_SIZE
+#: The row columns --presses on adds to FIELDS, and every column it adds to a shard (the press
+#: label act_press first), as vocab.json "extra_columns" lists them.
+PRESS_FIELDS = ("ability_card", "ability_state")
+PRESS_COLUMNS = ("act_press",) + PRESS_FIELDS
+
+
+def press_vocab(presses) -> dict:
+    """vocab_record keywords for --presses: none for off (the vocab.json of the rows before
+    E10), else {"presses": rs_presses.vocab_entry(BUTTONS, HAND_SIZE)}."""
+    if rs_presses.press_mode(presses) == rs_presses.PRESS_OFF:
+        return {}
+    return {"presses": rs_presses.vocab_entry(BUTTONS, HAND_SIZE)}
 
 
 class VisibilityError(ValueError):
@@ -288,6 +328,9 @@ TOWER_KEYS = ("king", "princess_left", "princess_right")
 CUT_CROWNS, CUT_HAND, CUT_REFUSED = "crowns", "hand", "refused"
 CUT_TOWER_LOST, CUT_TOWER_HP, CUT_GAME_OVER = "tower_lost", "tower_hp", "game_over"
 CUT_NONE = "none"
+#: --presses on (E10): a refused press, or one rs_presses.button_of could not place, cuts
+#: `trusted` (and so trusted_v2) with this reason.
+CUT_PRESS = "press"
 #: princess_vote's answers, and the seat names manifest.json counts them under.
 VOTES = ("slot1", "slot2")
 SEAT_NAMES = ("blue", "red")
@@ -477,7 +520,9 @@ def trust_stats(rows, infos, rule=None) -> dict:
     """One shard's counts for manifest.json, from its rows and the rows_for `info` of each of
     its matches: rows, play_rows, trusted, hog_rows, hog_trusted, matches, and "cuts" (matches
     by why `trusted` was cut, CUT_NONE when it was not). Under --trust v2 also trusted_v2,
-    hog_trusted_v2, "cuts_v2" and princess_votes ({seat name: {vote: matches}})."""
+    hog_trusted_v2, "cuts_v2" and princess_votes ({seat name: {vote: matches}}). When the
+    infos carry "presses" (--presses on), also "presses": press_rows (rows with a press label)
+    and the matches' rs_presses.PressLog counts summed."""
     rule = trust_rule(rule)
     hog = [r for r in rows if r["hog"]]
     st = {"rows": len(rows), "play_rows": sum(1 for r in rows if r["action"][0]),
@@ -491,6 +536,11 @@ def trust_stats(rows, infos, rule=None) -> dict:
         st["princess_votes"] = {
             name: {v: sum(1 for i in infos if i["trust"]["votes"][s] == v) for v in VOTES}
             for s, name in enumerate(SEAT_NAMES)}
+    if any("presses" in i for i in infos):
+        presses = {"press_rows": sum(1 for r in rows if r.get("press", 0))}
+        for i in infos:
+            merge_stats(presses, i.get("presses", {}))
+        st["presses"] = presses
     return st
 
 
@@ -522,7 +572,8 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
     """manifest.json: the run's merged trust_stats `totals` as counts and rates (a share of the
     rows; None with no rows), wait_rows, the skipped matches by reason, the trust rule and the
     shard entries (shard_entry, in shard order). Under --trust v2 also trusted_v2 and its
-    rates, cuts_v2 and princess_votes."""
+    rates, cuts_v2 and princess_votes; with press counts in `totals` (--presses on) also
+    "presses"."""
     rule = trust_rule(rule)
     n, hog, plays = totals.get("rows", 0), totals.get("hog_rows", 0), totals.get("play_rows", 0)
     out = {"rows": n, "play_rows": plays, "wait_rows": n - plays,
@@ -538,6 +589,8 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
         out["cuts_v2"] = dict(totals.get("cuts_v2", {}))
         out["princess_votes"] = {name: {v: totals.get("princess_votes", {}).get(name, {})
                                         .get(v, 0) for v in VOTES} for name in SEAT_NAMES}
+    if "presses" in totals:
+        out["presses"] = totals["presses"]
     out["shards"] = sorted(shards, key=lambda s: s["shard"])
     return out
 
@@ -551,6 +604,9 @@ def describe_manifest(man: dict) -> str:
     if "trusted_v2" in man:
         text += (f", trusted_v2 {man['trusted_v2']:,} ({pct(man['trusted_v2_rate'])}; "
                  f"Hog 2.6 {pct(man['hog_trusted_v2_rate'])})")
+    if "presses" in man:
+        text += (f"; {rs_presses.describe_log(man['presses'])}, "
+                 f"{man['presses'].get('press_rows', 0):,} press rows")
     return text
 
 
@@ -640,11 +696,13 @@ def _setup(engine=None):
     The card map is rs_cards.load(). Also sets F, after checking royalesim.ENTITY_FIELDS
     (rs_engine.field_index), and under --units vision (UNITS) VCT, the class table, and VC,
     its lookup of this Battle's unit_types_json(). Under --visibility public (VISIBILITY) it
-    first checks royalesim.STATUS_BITS (check_status_bits)."""
-    global F, VC, VCT
+    first checks royalesim.STATUS_BITS (check_status_bits). BUTTONS and HAND_SIZE come from
+    royalesim.ABILITY_BUTTONS / HAND_SIZE (rs_presses.button_count / hand_size)."""
+    global F, VC, VCT, BUTTONS, HAND_SIZE
     import royalesim
     if VISIBILITY == VIS_PUBLIC:
         check_status_bits(royalesim)
+    BUTTONS, HAND_SIZE = rs_presses.button_count(royalesim), rs_presses.hand_size(royalesim)
     names = rs_cards.load()
     b = rs_engine.make_battle(rs_engine.resolve(engine).undelayed(), royalesim)
     cat = json.loads(b.catalogue_json())
@@ -677,16 +735,22 @@ def towers_vec(state, team):
     return np.asarray(out, dtype=np.float32)
 
 
-def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None):
+def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None, presses=None,
+            buttons=None):
     """One row of `team`'s view. `mem` is the opponent memory, {"seen", "last"} as
-    rs_memory.PublicMemory.view() gives it. `live` / `units` / `visibility` default to LIVE /
-    UNITS / VISIBILITY; with units "vision" (and not live) the row also has "unit_form", and VC
-    must be set (_setup). With visibility "public" (E12) the enemy units `team`'s screen does not
-    show (seen_by) are left out and the row also has "unit_burrow", 1.0 for a unit tunnelling
-    now (burrowing); VisibilityError when the engine reports no status_flags."""
+    rs_memory.PublicMemory.view() gives it. `live` / `units` / `visibility` / `presses` default
+    to LIVE / UNITS / VISIBILITY / PRESSES; with units "vision" (and not live) the row also has
+    "unit_form", and VC must be set (_setup). With visibility "public" (E12) the enemy units
+    `team`'s screen does not show (seen_by) are left out and the row also has "unit_burrow", 1.0
+    for a unit tunnelling now (burrowing); VisibilityError when the engine reports no
+    status_flags. With presses "on" (E10) the row also has "ability_card" (BUTTONS int16) and
+    "ability_state" (BUTTONS x rs_presses.ABILITY_FEATS float16) from players[team]
+    ["abilities"] (rs_presses.ability_features; `buttons`, the side's button cards, names a
+    button the engine's rows do not)."""
     live = LIVE if live is None else live
     units = unit_mode(UNITS if units is None else units)
     public = visibility_mode(VISIBILITY if visibility is None else visibility) == VIS_PUBLIC
+    press = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
     vision = not live and units == UNITS_VISION
     if vision and VC is None:
         raise RuntimeError("--units vision rows need the class lookup: set UNITS = 'vision' "
@@ -758,20 +822,30 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None)
         row["unit_form"] = forms
     if public:
         row["unit_burrow"] = burrow
+    if press:
+        cards, states = rs_presses.ability_features(p, BUTTONS, buttons)
+        row["ability_card"] = np.asarray(cards, dtype=np.int16)
+        row["ability_state"] = np.asarray(states, dtype=np.float16).reshape(
+            BUTTONS, len(rs_presses.ABILITY_FEATS))
     return row
 
 
-def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=None):
+def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, presses=None,
+             info=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
     since the recorded ticks are the ticks the plays executed. `mem_lag` as --mem-lag
     (None: MEM_LAG): how the opponent memory of a row is dated (module doc). `trust` as
     --trust (trust_rule; None: TRUST): under v2 every row also has "trusted_v2" (module doc,
-    "Trust v2"). A dict `info` gets, for a match that gives rows, info["trust"] = {"cut": the
-    tick `trusted` was cut at or None, "why": its CUT_* reason or CUT_NONE} and under v2 also
-    "cut_v2", "why_v2" and "votes" (princess_vote of blue and red at the end of the run)."""
+    "Trust v2"). `presses` as --presses (None: PRESSES): under "on" the recorded ability
+    presses are replayed, each gets a press row, and every row has "press", "ability_card" and
+    "ability_state" (module doc, "Presses"). A dict `info` gets, for a match that gives rows,
+    info["trust"] = {"cut": the tick `trusted` was cut at or None, "why": its CUT_* reason or
+    CUT_NONE} and under v2 also "cut_v2", "why_v2" and "votes" (princess_vote of blue and red
+    at the end of the run); under presses "on" also info["presses"] (rs_presses.PressLog)."""
     lag = mem_lag_value(MEM_LAG if mem_lag is None else mem_lag)
     legacy = lag == MEM_LEGACY
     rule = trust_rule(trust)
+    press_on = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
     royalesim, names, ids, cat = ctx
     sub = royalesim.SUBTILE_PER_MILLITILE
     battle = payload["battle"]
@@ -828,12 +902,31 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
     won = {rs[0]: won_team, rs[1]: 1.0 - won_team}
     queue = sorted([(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]])
     play_ticks = {0: [q[0] for q in queue if q[1] == 0], 1: [q[0] for q in queue if q[1] == 1]}
+    # E10 (--presses on): the recorded presses as (tick, engine team, rs_presses.Press), each
+    # team's button cards in button order (the dealt deck and forms reset() was given), and
+    # the obs_row keywords of each team's rows. Off: no press, and obs_row is called as before.
+    press_q, btns, pkw, plog = [], {0: [], 1: []}, {0: {}, 1: {}}, None
+    hand_n = rs_presses.hand_size(royalesim)
+    if press_on:
+        champs = rs_presses.champion_ids(cat, getattr(royalesim, "CATALOGUE_FIELDS", None))
+        for t in (0, 1):
+            s = seat_of[t]
+            btns[t] = rs_presses.side_buttons([ids[c] for c in dealt[s]],
+                                              [forms[s][k] for k in perm[s]], champs)
+        press_q = [(p.tick, rs[p.side], p)
+                   for p in rs_presses.parse(payload["events"], names, ids)]
+        plog = rs_presses.PressLog(events=len(press_q))
+        pkw = {t: {"presses": rs_presses.PRESS_ON, "buttons": btns[t]} for t in (0, 1)}
+    # A wait row is not taken in the 10 ticks before a team's play, nor (presses on) a press.
+    soon_ticks = {t: play_ticks[t] + [q[0] for q in press_q if q[1] == t] for t in (0, 1)}
     mem = rs_memory.PublicMemory()
     rows, track = [], []
     cut, cut_why = 10 ** 9, None
     hp_track, max_hp, over = [], None, None     # trust v2: engine tower hp by tick, game over
-    tick, i = 0, 0
-    end = min((queue[-1][0] if queue else 0) + HORIZON, 6000)
+    tick, i, j = 0, 0, 0
+    # The last recorded action: the last play, or (presses on) a later press.
+    last = max([queue[-1][0] if queue else 0] + [q[0] for q in press_q])
+    end = min(last + HORIZON, 6000)
     while tick <= end:
         state = json.loads(b.state_json())
         if rule.v2:
@@ -847,6 +940,12 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
         for t in (0, 1):
             if state["players"][t]["crowns"] > rec_crowns[t] and cut > tick:
                 cut, cut_why = tick, CUT_CROWNS
+        if press_on and tick == 0:
+            # The engine's own button order where its abilities rows name their cards.
+            for t in (0, 1):
+                btns[t], differs = rs_presses.engine_order(state["players"][t], btns[t])
+                plog.order_mismatch += int(differs)
+                pkw[t]["buttons"] = btns[t]
         # E08: one view for every row of this tick, taken before this tick's plays are
         # recorded. Legacy reads the memory at each row instead, after the plays handled so
         # far, which is the dict the rows before E08 read. (Decision-time rows, E11, take
@@ -864,7 +963,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
             hand = state["players"][team]["hand"]
             ex, ey = rs_orient.to_engine(x, y, sub)
             ox, oy = own(ex, ey, team, sub)
-            row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick)
+            row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
+                          **pkw[team])
             row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
             rows.append(row)
             if cid in hand:
@@ -872,25 +972,52 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
             elif cut > tick:
                 cut, cut_why = tick, CUT_HAND
             mem.record(team, cid + 2, tick)        # the recorded tick is the tick it ran
+        # E10: this tick's presses, after its plays: a row each (action (0, 0, 0), press =
+        # button + 1) and the command (team, HAND_SIZE + button, 0, 0). A press no single
+        # button is behind is not sent, and cuts trust.
+        pcmds = []
+        while j < len(press_q) and press_q[j][0] <= tick:
+            _, team, press = press_q[j]
+            j += 1
+            acting.add(team)
+            button, why = rs_presses.button_of(press.cards, btns[team])
+            if button is None:
+                plog.skip(why)
+                if cut > tick:
+                    cut, cut_why = tick, CUT_PRESS
+                continue
+            row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
+                          **pkw[team])
+            row["action"] = (0, 0, 0)
+            row["press"] = button + 1
+            rows.append(row)
+            pcmds.append(rs_presses.command(team, button, hand_n))
+            plog.sent += 1
         if tick % WAIT_EVERY == 0:
             for team in (0, 1):
-                soon = any(tick < t <= tick + 10 for t in play_ticks[team])
+                soon = any(tick < t <= tick + 10 for t in soon_ticks[team])
                 if team not in acting and not soon and tick > 0:
-                    row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick)
+                    row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
+                                  **pkw[team])
                     row["action"] = (0, 0, 0)
                     rows.append(row)
         nxt = queue[i][0] if i < len(queue) else end + 1
+        if j < len(press_q):
+            nxt = min(nxt, press_q[j][0])
         step = max(1, min(nxt, (tick // WAIT_EVERY + 1) * WAIT_EVERY) - tick)
-        res = b.step(cmds, step)
-        for r in res:
-            if royalesim.DEPLOY_REASONS[r[1]] != "OK" and cut > tick:
+        res = b.step(cmds + pcmds if pcmds else cmds, step)
+        for k, r in enumerate(res):
+            reason = royalesim.DEPLOY_REASONS[r[1]]
+            if press_on and k >= len(cmds):          # E10: a press's result
+                if not plog.result(reason) and cut > tick:
+                    cut, cut_why = tick, CUT_PRESS
+            elif reason != "OK" and cut > tick:
                 cut, cut_why = tick, CUT_REFUSED
         tick += step
     if rule.v2:
         # E09: the first divergence is the earliest of the legacy cut, the first tick an engine
-        # tower leaves the recorded final hp, and a game over with a recorded play still to come;
-        # on a tie the reason listed first.
-        last = queue[-1][0] if queue else 0
+        # tower leaves the recorded final hp, and a game over with a recorded action (a play;
+        # presses on, a press too) still to come; on a tie the reason listed first.
         recorded = recorded_towers(battle, rs)
         cuts = [(cut, cut_why)] if cut_why else []
         d_tick, d_why = divergence(hp_track, max_hp, recorded, rule)
@@ -903,6 +1030,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
     tv = np.stack([v for _, v in track])            # blue-frame [own L,R,K, enemy L,R,K]
     blue_total, red_total = tv[:, :3].sum(1), tv[:, 3:].sum(1)
     for row in rows:
+        if press_on:
+            row["press"] = row.get("press", 0)       # 0: no press (play and wait rows)
         team = 0 if row["side"] == 1 else 1
         a = int(np.searchsorted(ticks, row["tick"]))
         z = int(np.searchsorted(ticks, row["tick"] + HORIZON))
@@ -922,6 +1051,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=
                               votes=[princess_vote(hp_track[-1][1][s], recorded.get(s, {}))
                                      for s in (0, 1)])
         info["trust"] = trust_info
+        if press_on:
+            info["presses"] = plog.to_json()
     return rows, "ok"
 
 
@@ -936,7 +1067,7 @@ SCHEMA = "rs_rows/legacy"
 
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
-                 opp_memory=None, classes=None, visibility=None, trust=None):
+                 opp_memory=None, classes=None, visibility=None, trust=None, presses=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -968,6 +1099,10 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
       trust               with `trust` v2 (E09; a mode, TrustRule or its to_json): the rule's
                           to_json(), and TRUST_FIELDS last in extra_columns; legacy (or None)
                           adds nothing
+      presses             with `presses` "on" (E10; or the rs_presses.vocab_entry dict a
+                          checkpoint's meta carries): that entry (B buttons, slot base, the
+                          ability_state columns), and PRESS_COLUMNS last in extra_columns;
+                          "off" (or None) adds nothing
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -979,6 +1114,15 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     public = visibility is not None and visibility_mode(visibility) == VIS_PUBLIC
     rule = None if trust is None else trust_rule(trust)
     v2 = rule is not None and rule.v2
+    if isinstance(presses, dict):
+        press_entry = dict(presses)
+        rs_presses.press_mode(press_entry.get("mode"))
+        if press_entry["mode"] == rs_presses.PRESS_OFF:
+            press_entry = None
+    elif presses is None or rs_presses.press_mode(presses) == rs_presses.PRESS_OFF:
+        press_entry = None
+    else:
+        press_entry = rs_presses.vocab_entry(BUTTONS, HAND_SIZE)
     rec = {
         "n_cards": len(cat) + 2,
         "n_units": ((len(cat) + 2) if live else (len(classes) + 2) if vision
@@ -1006,28 +1150,33 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         rec["visibility_rule"] = visibility_rule()
     if v2:
         rec["trust"] = rule.to_json()
+    if press_entry is not None:
+        rec["presses"] = press_entry
     extra = ((list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
-             + (list(TRUST_FIELDS) if v2 else []))
+             + (list(TRUST_FIELDS) if v2 else [])
+             + (list(PRESS_COLUMNS) if press_entry is not None else []))
     if extra:
         rec["extra_columns"] = extra
     return rec
 
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
-          mem_lag=None, visibility=None, trust=None, stats=False):
+          mem_lag=None, visibility=None, trust=None, presses=None, stats=False):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` / `visibility` / `trust` as --units / --mem-lag / --visibility /
-    --trust (trust_rule), kept as UNITS / MEM_LAG / VISIBILITY / TRUST for this process (None:
-    keep the module's); main passes all four to every worker, as it passes `live`.
-    Returns (batch_id, rows, skipped by reason); with `stats`, also the shard's trust_stats,
-    which main merges into manifest.json."""
-    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST
+    `units` / `mem_lag` / `visibility` / `trust` / `presses` as --units / --mem-lag /
+    --visibility / --trust (trust_rule) / --presses, kept as UNITS / MEM_LAG / VISIBILITY /
+    TRUST / PRESSES for this process (None: keep the module's); main passes all five to every
+    worker, as it passes `live`. Under presses "on" the shard also has act_press (int16, from
+    each row's "press") and PRESS_FIELDS. Returns (batch_id, rows, skipped by reason); with
+    `stats`, also the shard's trust_stats, which main merges into manifest.json."""
+    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
     vis = visibility_mode(VISIBILITY if visibility is None else visibility)
     rule = trust_rule(trust)
-    LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST = live, units, lag, vis, rule
+    press = rs_presses.press_mode(PRESSES if presses is None else presses)
+    LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES = live, units, lag, vis, rule, press
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
@@ -1047,12 +1196,15 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         tags += [tag] * len(r)
         infos.append(info)
     if rows:
+        press_on = PRESSES == rs_presses.PRESS_ON
         fields = (FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
                   + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ())
-                  + (TRUST_FIELDS if TRUST.v2 else ()))
+                  + (TRUST_FIELDS if TRUST.v2 else ()) + (PRESS_FIELDS if press_on else ()))
         data = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in fields}
         act = np.asarray([r["action"] for r in rows], dtype=np.int16)
         data["act_card"], data["act_x"], data["act_y"] = act[:, 0], act[:, 1], act[:, 2]
+        if press_on:
+            data["act_press"] = np.asarray([r["press"] for r in rows], dtype=np.int16)
         data["match"] = np.asarray(tags)
         data["split"] = np.asarray([split_of(t) for t in tags])
         OUT.mkdir(parents=True, exist_ok=True)
@@ -1088,6 +1240,11 @@ def main() -> int:
     ap.add_argument("--trust-hp-margin", type=float, default=TRUST_HP_MARGIN,
                     help="--trust v2: damage beyond the recording's a tower may take, as a share "
                          f"of its max hp (default {TRUST_HP_MARGIN})")
+    ap.add_argument("--presses", choices=rs_presses.PRESS_MODES, default=rs_presses.PRESS_OFF,
+                    help="'off' (default): ability presses are not replayed, as before; 'on': "
+                         "replay activate_ability events as button commands, add press rows "
+                         "(act_press) and ability_card / ability_state columns; a refused or "
+                         "unplaceable press cuts trust")
     ap.add_argument("--out", type=Path, default=None)
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
@@ -1098,9 +1255,10 @@ def main() -> int:
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
-    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST
+    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES
     LIVE = args.live_compat
     UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
+    PRESSES = args.presses
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
@@ -1113,6 +1271,8 @@ def main() -> int:
     print(f"memory: {describe_memory(MEM_LAG)}", flush=True)
     print(f"seen:   {describe_visibility(VISIBILITY)}", flush=True)
     print(f"trust:  {describe_trust(TRUST)}", flush=True)
+    print(f"presses: {rs_presses.describe_presses(PRESSES)}"
+          + (f", {BUTTONS} buttons a side" if PRESSES == rs_presses.PRESS_ON else ""), flush=True)
     if UNITS == UNITS_VISION:
         print(f"units:  vision classes, {VCT.describe()}", flush=True)
         if VC.unknown:
@@ -1153,7 +1313,8 @@ def main() -> int:
         cat, unit_types, cfg, fp, card_map, LIVE,
         version=getattr(royalesim, "__version__", "?"),
         classes=VCT if UNITS == UNITS_VISION else None,
-        **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST))),
+        **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST),
+        **press_vocab(PRESSES))),
         encoding="utf-8")
     batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
     total, skipped, totals, shards = 0, {}, {}, []
@@ -1161,7 +1322,7 @@ def main() -> int:
                              initargs=(cfg.to_json(),)) as pool:
         futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
                             mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
-                            stats=True)
+                            presses=PRESSES, stats=True)
                 for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
             bid, rows, sk, st = f.result()
