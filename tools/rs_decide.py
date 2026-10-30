@@ -2,11 +2,16 @@ r"""One decision function for every seat the token policy plays: rs_eval, the li
 
     import rs_decide as RD                       # tools/ on sys.path, as the tools import
     policy = RD.TokenPolicyAdapter(model)        # model from rs_checkpoint.load_policy(ckpt, cfg)
-    dcfg = RD.DecideConfig.live(RD.wait_bias_for(ckpt), guard_cards=RD.card_ids(cat, RD.GUARD_CARD_NAMES))
+    dcfg = RD.DecideConfig.live(RD.wait_bias_for(ckpt), guard_cards=RD.card_ids(cat, RD.GUARD_CARD_NAMES),
+                                presses=RD.presses_allowed(meta))     # E15: v2 buttons, if trained
     legality = RD.TowersOnlyLegality(engine_cfg, catalogue=cat)
     d = RD.decide(policy, row, state, team, legality, dcfg, rng=rng, pending=pending, tick=now, dt=dt)
-    d.command            # (team, slot, x_sub, y_sub) for Battle.step / the tap, or None (wait)
+    d.command            # (team, slot, x_sub, y_sub) for Battle.step / the tap, or None (wait);
+                         # a press: (team, HAND_SIZE + button, 0, 0)
+    d.value              # the critic's raw [outcome, won logit] (v2 / R01), () without one
     d.suggest_kwargs()   # ControlState.suggest(**...) (scripts/vision/control.py), also in MANUAL
+    # v2 rows: obs_row(..., **RD.v2_row_kwargs(opp_elixir,
+    #                  RD.pending_inputs(pending, now, RD.obs_delay_ticks(meta))))
 
 Why (V06): rs_eval, live_play and rs_selfplay each had their own copy of the gate (RSAgent.act,
 live_play.py:505-586, rs_selfplay.SPAgent), and they had drifted: only live play blocked the
@@ -16,26 +21,30 @@ a pending card in hand and refuses it with CARD_PENDING, so argmax picked it, al
 failed and the decision was lost). One function, three presets.
 
 THE DECISION, in order (decide):
-  1. gate logits [wait, slot 0..3] from the policy; wait += cfg.wait_bias, log(1 / wait_keep)
-     with wait_keep from the run's args.json (wait_bias_for): training kept only that share of
-     the wait rows, so the raw wait logit is low by exactly that much.
+  1. gate logits [wait, slot 0..3] from the policy (a v2 model: [wait, slot 0..3, button
+     0..B-1]); wait += cfg.wait_bias, log(1 / wait_keep) with wait_keep from the run's args.json
+     (wait_bias_for): training kept only that share of the wait rows, so the raw wait logit is
+     low by exactly that much.
   2. masks: a slot is out when it is empty (no card, hand -1), or it costs more than the SPENDABLE
      elixir, elixir_milli - 1000 x the elixir of our plays in flight (pending), or (live) it
      holds a card in flight, or (live) hand_costs says no play resolves (-1, a Mirror with
-     nothing to copy). A missing hand_costs entry costs 99, as before.
+     nothing to copy). A missing hand_costs entry costs 99, as before. A button is out unless
+     cfg.presses and button_mask let it in (V2 CHECKPOINTS below).
   3. p_wait = softmax(gate)[0]; the bot waits with probability p_wait ** (dt / 20): the same wait
      rate per second at any decision cadence dt (rs_eval decides every 10 ticks: exponent 0.5,
      as it always did; live, dt = ticks since the last decision, cadence_dt). One rng.random()
      is drawn per decision, also when it is not needed, so a seeded run replays exactly.
      With the cap rule (live) the bot never waits while spendable >= 9500 and a card is
-     playable. Nothing playable: wait ("no_card").
-  4. slot = argmax over the unmasked slots; its 576 tile logits are tried best first, the first
-     60 at most, each at the tile centre: the first tile legality accepts is the play. The lane
-     guard (live, cards in guard_cards: the Cannon) skips tiles outside the threatened lane but
-     for the centre columns 7-10 (live_play.py:65-90). blocked_tiles (bool[576], e.g.
-     geometry.ability_button_mask(n, "model").reshape(-1)) are skipped too.
-  5. (live) no legal tile: the next slot by gate logit, and so on ("fallback"); none: wait
-     ("no_tile").
+     playable. Nothing playable and no button pressable: wait ("no_card").
+  4. the argmax over the unmasked slots and buttons. A slot: its 576 tile logits are tried best
+     first, the first 60 at most, each at the tile centre: the first tile legality accepts is
+     the play. The lane guard (live, cards in guard_cards: the Cannon) skips tiles outside the
+     threatened lane but for the centre columns 7-10 (live_play.py:65-90). blocked_tiles
+     (bool[576], e.g. geometry.ability_button_mask(n, "model").reshape(-1)) are skipped too.
+     A button: a PRESS, command (team, HAND_SIZE + button, 0, 0) (royalegym protocol: x and y
+     are not read), no tile and no legality call.
+  5. (live) no legal tile: the next slot or button by gate logit, and so on ("fallback");
+     none: wait ("no_tile").
 
 PRESETS (DecideConfig):
   legacy()    exactly RSAgent.act before V06: pending_cost from the state, no pending-slot mask,
@@ -51,13 +60,16 @@ PRESETS (DecideConfig):
               carries gate_q, gate_a, logq_gate, tile_cands, tile_a, logq_tile and the mask.
               A fallback play (the sampled slot had no legal tile) is flagged "fallback"; the RL
               learner decides what to do with it. No cap rule, no lane guard.
+  Every preset takes presses= (default False: every button masked, as before E15).
 
 PENDING (plays we sent that have not run): pending=None reads them from the state, as RoyaleSim
 reports them under a command delay (players[team]["pending"] rows [kind, what, x, y, ticks_left,
 cost] and "pending_cost", the elixir they speak for): that is rs_eval. The live runner passes
 its own list of Pending(card, cost, slot, tick), one per tap, pruned each frame with
 prune_pending (live_play's rule: drop a tap once its card has left the slot it was tapped
-from, the client's hand changing when the play runs, or after 60 ticks).
+from, the client's hand changing when the play runs, or after 60 ticks). A press tap is
+Pending(-1, cost, tick=, button=k): it blocks button k and holds its cost until it is 60 ticks
+old or (prune_pending's abilities=) the button no longer reads available.
 
 LEGALITY (anything with bind(state, team) -> check(slot, card, x_sub, y_sub) -> bool):
   BattleLegality(battle)   check_deploy on the battle itself (rs_eval: the match battle).
@@ -78,10 +90,32 @@ LEGALITY (anything with bind(state, team) -> check(slot, card, x_sub, y_sub) -> 
                            the river rows and tower bodies are never offered.
   TowersOnlyLegality falls back to PureLegality when given a catalogue (or fallback=).
 
-E15 (ability buttons): a gate wider than 1 + HAND_SIZE carries ability-button logits after the
-four slots. Until E15 lands every button is masked (button_mask), so a v2 model never presses;
-E15 fills button_mask from players[team]["abilities"] and adds the press branch (Decision.kind
-PRESS, command (team, HAND_SIZE + button, 0, 0)) where decide marks it.
+V2 CHECKPOINTS (E15; sim/model_tokens.py, tools/rs_schema.py). A checkpoint whose meta "schema"
+is rs_rows/v2 has a TokenPolicy(schema="v2"); a legacy one (no "schema", or rs_rows/legacy) is
+decided on exactly as before, call for call and draw for draw (tests/pipeline/test_rs_decide.py).
+  batch    TokenPolicyAdapter's own batch is the model's: every rs_schema.V2.model_inputs column
+           for a v2 model (row_batch(row, torch, schema), the batch model_tokens.row_batch
+           builds), the legacy keys otherwise.
+  buttons  the gate entries after the four slots, one per ability button (B from the row's
+           ability_card). The model already puts an unavailable button at -1e4. decide lets a
+           button in only with cfg.presses (default False, every preset) and when button_mask
+           does: players[team]["abilities"] (royalegym AbilityRow: available, spent, cost, ...)
+           says it is available and not spent, its cost fits the spendable elixir, and (with
+           the pending mask) no press of it is in flight (the engine refuses that CARD_PENDING:
+           the state's pending rows of kind 1, or a Pending with button >= 0). Callers set
+           cfg.presses from presses_allowed(meta): only a v2 model trained on press-labelled
+           rows (meta train_rows.press_rows "trained", sim/train_tokens.py) has trained button
+           logits; one trained on rows built with --presses off has not. The bot's own deck has
+           no hero or champion, so live every button stays masked; RL and other decks press.
+  pending  obs_row's `pending` (own_pending, own_pending_land): pending_inputs(pending, now,
+           delay) from the live runner's taps, delay = obs_delay_ticks(meta), the tap-to-run
+           delay the decision-time rows were built with (rs_rows --obs-delay; 0: landing-time
+           rows, which never show a pending play, so nothing is given); engine_pending_inputs
+           (state, team, lead) from the state's pending rows (rs_eval.RSAgent.own_pending's
+           rule). v2_row_kwargs gives obs_row's v2 keywords as RSAgent.v2_kw does.
+  critic   a model with a critic (value2, R01 / R02) puts its raw output [10 s outcome, won
+           logit] into Decision.value (win_p: the sigmoid of the second), from the same
+           forward pass as the gate (TokenPolicyAdapter.heads); () without a critic.
 
 Pure Python and numpy; royalesim only inside TowersOnlyLegality, torch only inside
 TokenPolicyAdapter. Never imports scripts/gamestate.
@@ -105,6 +139,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "tools") not in sys.path:      # also when imported as tools.rs_decide
     sys.path.insert(0, str(ROOT / "tools"))
 import rs_engine  # noqa: E402
+import rs_schema  # noqa: E402  (pure Python: the v2 batch columns)
 
 # ---------------------------------------------------------------------------
 # constants
@@ -144,6 +179,18 @@ MODES = (MODE_LEGACY, MODE_LIVE, MODE_SAMPLE)
 
 PLAY, WAIT, PRESS = "play", "wait", "press"
 R_WAIT, R_NO_CARD, R_NO_TILE = "wait", "no_card", "no_tile"
+
+#: An abilities row's columns by position (royalegym protocol.AbilityRow / ability_row, and
+#: tools/rs_presses._row): a column the engine does not send reads its default.
+ABILITY_COLUMNS = ("available", "spent", "cost", "card_id", "cooldown_ticks")
+ABILITY_DEFAULTS = (0, 0, 0, -1, -1)
+#: Pending row kinds (players[team]["pending"]): a play, and a button press (what = HAND_SIZE + k).
+PENDING_PLAY, PENDING_PRESS = 0, 1
+#: The checkpoint meta of a model whose ability buttons trained (sim/train_tokens.py
+#: TRAIN_ROWS_KEY, "press_rows" == PRESS_TRAINED); a test checks the names against it.
+TRAIN_ROWS_KEY, PRESS_ROWS_KEY, PRESS_TRAINED = "train_rows", "press_rows", "trained"
+#: A row's card token is the catalogue id + this (rs_rows: 0 pads, 1 unknown).
+TOKEN_OFFSET = 2
 
 #: Entity field name -> column (the layout rs_engine checks royalesim against; no engine needed).
 F: dict[str, int] = {name: i for i, name in enumerate(rs_engine.ENTITY_FIELDS_EXPECTED)}
@@ -202,6 +249,38 @@ def wait_bias_for(ckpt: Any, default_keep: float = DEFAULT_WAIT_KEEP) -> float:
     return math.log(1 / wait_keep_for(ckpt, default_keep))
 
 
+def is_v2_meta(meta: Mapping[str, Any] | None) -> bool:
+    """Whether a checkpoint meta is a v2 model's: its "schema" is rs_rows/v2 (or "v2"), as
+    sim/model_tokens.model_schema and rs_eval.checkpoint_v2 read it; absent: legacy."""
+    name = (meta or {}).get("schema")
+    return isinstance(name, str) and name.strip() in (rs_schema.SCHEMA_V2, "v2")
+
+
+def presses_allowed(meta: Mapping[str, Any] | None) -> bool:
+    """Whether decide may press for the checkpoint `meta` describes (DecideConfig.presses): a v2
+    model whose rows were press-labelled, meta "train_rows" "press_rows" == "trained"
+    (sim/train_tokens.py). A v2 model trained on rows built with --presses off has untrained
+    button logits, and a legacy model has no buttons."""
+    meta = meta or {}
+    rows = meta.get(TRAIN_ROWS_KEY)
+    return (is_v2_meta(meta) and isinstance(rows, Mapping)
+            and rows.get(PRESS_ROWS_KEY) == PRESS_TRAINED)
+
+
+def obs_delay_ticks(meta: Mapping[str, Any] | None) -> int:
+    """The tap-to-run delay the checkpoint's rows were built with (vocab.json "obs_delay"
+    "ticks", tools/rs_rows.py --obs-delay; copied into the meta): what pending_inputs takes.
+    0 when absent, unreadable or negative (landing-time rows)."""
+    entry = (meta or {}).get("obs_delay")
+    if not isinstance(entry, Mapping):
+        return 0
+    try:
+        ticks = int(entry.get("ticks") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, ticks)
+
+
 def card_ids(catalogue: Sequence[Sequence[Any]], names: Iterable[str]) -> frozenset[int]:
     """Catalogue ids (catalogue_json rows, [0] = name) of the cards called `names`."""
     want = set(names)
@@ -231,42 +310,45 @@ class DecideConfig:
     explore: float = SAMPLE_EXPLORE
     tile_temp: float = SAMPLE_TEMP
     name: str = MODE_LEGACY
+    presses: bool = False            # E15: ability buttons may be pressed (presses_allowed)
 
     @classmethod
-    def legacy(cls, wait_bias: float = math.log(1 / DEFAULT_WAIT_KEEP), *, dt: int = DECIDE
-               ) -> "DecideConfig":
-        """RSAgent.act before V06, exactly."""
-        return cls(wait_bias=float(wait_bias), dt=int(dt), name=MODE_LEGACY)
+    def legacy(cls, wait_bias: float = math.log(1 / DEFAULT_WAIT_KEEP), *, dt: int = DECIDE,
+               presses: bool = False) -> "DecideConfig":
+        """RSAgent.act before V06, exactly (with presses=True, also the v2 buttons)."""
+        return cls(wait_bias=float(wait_bias), dt=int(dt), name=MODE_LEGACY,
+                   presses=bool(presses))
 
     @classmethod
     def live(cls, wait_bias: float = math.log(1 / DEFAULT_WAIT_KEEP), *,
              guard_cards: Iterable[int] = (), cap_milli: int | None = CAP_ELIXIR,
-             dt: int = DECIDE) -> "DecideConfig":
+             dt: int = DECIDE, presses: bool = False) -> "DecideConfig":
         """The live runner: pending-slot mask, fallback, unplayable mask, cap rule, lane guard
         on `guard_cards` (card_ids(catalogue, GUARD_CARD_NAMES); empty turns it off)."""
         return cls(wait_bias=float(wait_bias), dt=int(dt), mask_pending=True, fallback=True,
                    mask_unplayable=True, cap_milli=cap_milli,
-                   guard_cards=frozenset(int(c) for c in guard_cards), name=MODE_LIVE)
+                   guard_cards=frozenset(int(c) for c in guard_cards), name=MODE_LIVE,
+                   presses=bool(presses))
 
     @classmethod
     def sampling(cls, wait_bias: float = math.log(1 / DEFAULT_WAIT_KEEP), *, dt: int = DECIDE,
                  **changes: Any) -> "DecideConfig":
         """RL rollouts: sampled slot and tile, with the live masks and fallback, no cap rule
-        and no lane guard (unless `changes` say otherwise)."""
+        and no lane guard (unless `changes` say otherwise; presses=True lets the buttons in)."""
         base = cls(wait_bias=float(wait_bias), dt=int(dt), mask_pending=True, fallback=True,
                    mask_unplayable=True, sample=True, name=MODE_SAMPLE)
         return base.replace(**changes) if changes else base
 
     @classmethod
     def for_mode(cls, mode: str, wait_bias: float, *, guard_cards: Iterable[int] = (),
-                 dt: int = DECIDE) -> "DecideConfig":
+                 dt: int = DECIDE, presses: bool = False) -> "DecideConfig":
         """The preset called `mode` (one of MODES)."""
         if mode == MODE_LEGACY:
-            return cls.legacy(wait_bias, dt=dt)
+            return cls.legacy(wait_bias, dt=dt, presses=presses)
         if mode == MODE_LIVE:
-            return cls.live(wait_bias, guard_cards=guard_cards, dt=dt)
+            return cls.live(wait_bias, guard_cards=guard_cards, dt=dt, presses=presses)
         if mode == MODE_SAMPLE:
-            return cls.sampling(wait_bias, dt=dt)
+            return cls.sampling(wait_bias, dt=dt, presses=bool(presses))
         raise ValueError(f"decide mode: one of {', '.join(MODES)}, got {mode!r}")
 
     def replace(self, **changes: Any) -> "DecideConfig":
@@ -282,12 +364,18 @@ class DecideConfig:
 @dataclasses.dataclass(frozen=True)
 class Pending:
     """One of our plays sent and not run yet: its card, its elixir, the hand slot it was
-    tapped from (-1: any slot holding the card) and the tick of the tap (None: unknown)."""
+    tapped from (-1: any slot holding the card) and the tick of the tap (None: unknown). A
+    button press (E15) is Pending(-1, cost, tick=..., button=k)."""
 
     card: int
     cost: int = 0
     slot: int = -1
     tick: int | None = None
+    button: int = -1
+
+    @property
+    def is_press(self) -> bool:
+        return self.button >= 0
 
 
 def engine_pending(state: Mapping[str, Any], team: int) -> list[Pending]:
@@ -302,16 +390,34 @@ def engine_pending(state: Mapping[str, Any], team: int) -> list[Pending]:
     return out
 
 
+def engine_pressing(state: Mapping[str, Any], team: int) -> frozenset[int]:
+    """The buttons with a press of `team` accepted and not run (the state's pending rows of kind
+    1, what = HAND_SIZE + button): the engine refuses another press of them CARD_PENDING."""
+    out = set()
+    for r in state["players"][team].get("pending") or ():
+        if len(r) > 1 and int(r[0]) == PENDING_PRESS and int(r[1]) >= HAND_SIZE:
+            out.add(int(r[1]) - HAND_SIZE)
+    return frozenset(out)
+
+
 def prune_pending(pending: Iterable[Pending], hand: Sequence[int], now: int,
-                  max_age: int = PENDING_TICKS) -> list[Pending]:
+                  max_age: int = PENDING_TICKS, *,
+                  abilities: Sequence[Sequence[int]] | None = None) -> list[Pending]:
     """The live runner's taps still in flight (live_play): a tap stays while its card is still in
     the slot it was tapped from (any slot, for slot -1) and it is younger than `max_age` ticks.
     The client's hand and elixir change when the play runs, so a tap whose card has left was
-    paid for and is no longer pending."""
+    paid for and is no longer pending. A press (Pending.button >= 0) stays while it is younger
+    than `max_age` and, given the side's `abilities` rows, its button still reads available
+    (a press that ran starts the ability or spends the hero's charge)."""
     hand = list(hand)
     keep = []
     for p in pending:
         if p.tick is not None and now - p.tick >= max_age:
+            continue
+        if getattr(p, "button", -1) >= 0:
+            if abilities is None or (p.button < len(abilities)
+                                     and ability_row(abilities[p.button])[0]):
+                keep.append(p)
             continue
         if p.slot >= 0:
             if p.slot < len(hand) and hand[p.slot] == p.card:
@@ -346,15 +452,109 @@ def _pending_slots(held: Iterable[Pending], hand: Sequence[int]) -> set[int]:
     return out
 
 
-def button_mask(state: Mapping[str, Any], team: int, n_buttons: int,
-                spendable_milli: int) -> list[bool]:
-    """E15 EXTENSION POINT: which ability-button gate entries may be pressed now.
+def _pending_buttons(state: Mapping[str, Any], team: int, pending: Iterable[Pending] | None,
+                     held: Iterable[Pending]) -> frozenset[int]:
+    """The buttons with a press in flight: the state's (pending None) or the explicit list's."""
+    if pending is None:
+        return engine_pressing(state, team)
+    return frozenset(int(x.button) for x in held if getattr(x, "button", -1) >= 0)
 
-    TokenPolicy v2 (E15) appends one gate logit per button after the four hand slots. Until it
-    lands no button is pressed: every entry is masked. E15 fills this from
-    players[team]["abilities"] (royalegym ability_row: available, spent, cost) and the
-    spendable elixir, and decide's argmax / sampling then reach the press branch."""
-    return [False] * int(n_buttons)
+
+def ability_row(row: Sequence[Any]) -> tuple[int, int, int, int, int]:
+    """(available, spent, cost, card_id, cooldown_ticks) of an abilities row, by position
+    (royalegym protocol.ability_row): the first five columns, a missing one ABILITY_DEFAULTS."""
+    vals = [int(v) for v in list(row)[:len(ABILITY_COLUMNS)]]
+    return tuple(vals + list(ABILITY_DEFAULTS[len(vals):]))  # type: ignore[return-value]
+
+
+def abilities_of(state: Mapping[str, Any], team: int) -> list:
+    """players[team]["abilities"] (one row per button, button order; [] without any)."""
+    return list(state["players"][team].get("abilities") or ())
+
+
+def press_cost(state: Mapping[str, Any], team: int, button: int) -> int:
+    """The elixir `team`'s `button` costs (its abilities row's cost; 0 with no row), as
+    tools/rs_rows.press_cost reads it."""
+    rows = abilities_of(state, team)
+    return max(0, ability_row(rows[button])[2]) if 0 <= button < len(rows) else 0
+
+
+def button_card(state: Mapping[str, Any], team: int, button: int) -> int:
+    """The catalogue id behind `team`'s `button` (its abilities row's card_id), -1 unknown."""
+    rows = abilities_of(state, team)
+    return ability_row(rows[button])[3] if 0 <= button < len(rows) else -1
+
+
+def button_mask(state: Mapping[str, Any], team: int, n_buttons: int,
+                spendable_milli: int, *, pressing: Iterable[int] = ()) -> list[bool]:
+    """Which of the `n_buttons` ability-button gate entries may be pressed now (E15):
+    players[team]["abilities"] has a row for the button (button order: heroes, then the
+    champion), it reads available (a living unit behind it, off cooldown, not mid-ability:
+    the engine would take the press but for the elixir) and not spent (a hero's one charge),
+    its cost x 1000 fits `spendable_milli`, and it is not in `pressing` (a press of it in
+    flight). decide asks only with cfg.presses; without it every button is masked."""
+    rows = abilities_of(state, team)
+    pressing = frozenset(int(k) for k in pressing)
+    out = []
+    for k in range(int(n_buttons)):
+        if k >= len(rows) or k in pressing:
+            out.append(False)
+            continue
+        available, spent, cost, _, _ = ability_row(rows[k])
+        out.append(bool(available) and not spent
+                   and int(spendable_milli) >= max(0, cost) * 1000)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# v2 row inputs: our plays in flight
+# ---------------------------------------------------------------------------
+
+def pending_inputs(pending: Iterable[Pending], now: int, delay: int) -> list[tuple[int, int]]:
+    """obs_row's `pending` from the live runner's taps: (card token, ticks to land) of each play
+    tapped before `now` (not a press; a tap at `now` is the decision's own), soonest first (ties
+    in list order). Ticks to land: max(0, tap + delay - now), the decision-time rows' exec - t
+    with `delay` = obs_delay_ticks(meta); `delay` for a tap of unknown tick (just tapped).
+    delay <= 0: [] (landing-time rows never show a pending play)."""
+    delay = int(delay)
+    if delay <= 0:
+        return []
+    out = []
+    for p in pending:
+        if p.card is None or int(p.card) < 0 or getattr(p, "button", -1) >= 0:
+            continue
+        if p.tick is not None and int(p.tick) >= int(now):
+            continue
+        land = delay if p.tick is None else max(0, int(p.tick) + delay - int(now))
+        out.append((int(p.card) + TOKEN_OFFSET, land))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def engine_pending_inputs(state: Mapping[str, Any], team: int, lead: int = 0
+                          ) -> list[tuple[int, int]]:
+    """obs_row's `pending` from the state's pending rows (RoyaleSim under a command delay;
+    rs_eval.RSAgent.own_pending's rule): (card + 2, ticks_left - lead) of each play row (kind
+    0, a card) with ticks_left >= lead, soonest first. Presses are not pending tokens."""
+    lead = int(lead or 0)
+    out = []
+    for r in state["players"][team].get("pending") or ():
+        if len(r) > 4 and int(r[0]) == PENDING_PLAY and int(r[1]) >= 0 and int(r[4]) >= lead:
+            out.append((int(r[1]) + TOKEN_OFFSET, int(r[4]) - lead))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def v2_row_kwargs(opp_elixir: Any, pending: Iterable[tuple[int, int]] = (),
+                  buttons: Sequence[int] | None = None) -> dict:
+    """tools/rs_rows.obs_row's keywords for a v2 row, as rs_eval.RSAgent.v2_kw gives them:
+    schema rs_rows/v2, `opp_elixir` ((milli, exact): rs_rows.SeenElixir.view, lag 0 live),
+    `pending` (pending_inputs / engine_pending_inputs) and, when known, `buttons` (the side's
+    button cards, rs_presses.side_buttons)."""
+    kw = {"schema": rs_schema.SCHEMA_V2, "opp_elixir": opp_elixir, "pending": list(pending)}
+    if buttons is not None:
+        kw["buttons"] = [int(c) for c in buttons]
+    return kw
 
 
 # ---------------------------------------------------------------------------
@@ -365,24 +565,58 @@ BATCH_KEYS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "opp_seen",
               "opp_last_age")
 
 
-def row_batch(row: Mapping[str, Any], torch: Any) -> dict:
-    """One obs_row (tools/rs_rows.py, schema rs_rows/legacy) as a batch of one for TokenPolicy,
-    as rs_eval.RSAgent.batch builds it. E14 (schema v2) adds its columns here."""
+def _schema(value: Any) -> Any:
+    """rs_schema.get(value), also for a Schema of another import of rs_schema (by its name, as
+    sim/model_tokens._as_schema reads it); None stays None (legacy)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) and hasattr(value, "name"):
+        value = value.name
+    return rs_schema.get(value)
+
+
+def model_schema_of(model: Any) -> Any:
+    """The rs_schema Schema of a v2 TokenPolicy (model.schema.v2), else None (legacy)."""
+    spec = getattr(model, "schema", None)
+    return spec if getattr(spec, "v2", False) else None
+
+
+def row_batch(row: Mapping[str, Any], torch: Any, schema: Any = None) -> dict:
+    """One obs_row (tools/rs_rows.py) as a batch of one for TokenPolicy. schema None or legacy:
+    as rs_eval.RSAgent.batch builds it, exactly. v2 (E14): every column of
+    rs_schema.V2.model_inputs in its order, int columns long and float columns float, the
+    scalar `next` as [1]: what sim/model_tokens.row_batch(row, "v2") builds (a test checks),
+    without importing the model."""
+    spec = _schema(schema)
     t = torch
-    b = {k: t.as_tensor(np.asarray(row[k])[None]) for k in BATCH_KEYS}
-    for k in ("unit_ids", "hand", "opp_seen", "opp_last"):
-        b[k] = b[k].long()
-    b["unit_feats"] = b["unit_feats"].float()
-    b["opp_last_age"] = b["opp_last_age"].float()
-    b["next"] = t.as_tensor([int(row["next"])]).long()
-    return b
+    if spec is None or not spec.v2:
+        b = {k: t.as_tensor(np.asarray(row[k])[None]) for k in BATCH_KEYS}
+        for k in ("unit_ids", "hand", "opp_seen", "opp_last"):
+            b[k] = b[k].long()
+        b["unit_feats"] = b["unit_feats"].float()
+        b["opp_last_age"] = b["opp_last_age"].float()
+        b["next"] = t.as_tensor([int(row["next"])]).long()
+        return b
+    out = {}
+    for name in spec.model_inputs:
+        col = spec.column(name)
+        if not col.shape:
+            arr = np.asarray([int(row[name])], dtype=np.int64)
+        else:
+            arr = np.asarray(row[name])[None]
+        x = t.as_tensor(arr)
+        out[name] = x.long() if col.dtype.startswith(("int", "bool")) else x.float()
+    return out
 
 
 class TokenPolicyAdapter:
     """decide()'s view of a TokenPolicy (sim/model_tokens.py): batch(row), gate(batch) -> the
     gate logits of the row (numpy float32, [wait, slot 0..3, buttons...]), tiles(batch, slot)
-    -> the 576 tile logits for the card in that slot. The calls are RSAgent.act's: the gate with
-    card_ids = hand slot 0 (clamped), the tiles with card_ids = the slot's card."""
+    -> the 576 tile logits for the card in that slot, heads(batch) -> (gate, the critic's value
+    or None). The calls are RSAgent.act's: the gate with card_ids = hand slot 0 (clamped), the
+    tiles with card_ids = the slot's card. A model with a critic (has_critic, outputs()) gives
+    the gate and value2 from one outputs() call; any other the gate from forward(), as always.
+    The batch is the model's (row_batch with model_schema_of(model)) unless `batch` is given."""
 
     def __init__(self, model: Any, torch: Any = None, *,
                  batch: Callable[[Mapping[str, Any]], dict] | None = None):
@@ -392,13 +626,37 @@ class TokenPolicyAdapter:
         self.torch = torch
         self._batch = batch
 
+    @property
+    def schema(self) -> Any:
+        """The model's v2 Schema, or None for a legacy model."""
+        return model_schema_of(self.model)
+
+    @property
+    def has_critic(self) -> bool:
+        return bool(getattr(self.model, "has_critic", False)) and hasattr(self.model, "outputs")
+
     def batch(self, row: Mapping[str, Any]) -> dict:
-        return self._batch(row) if self._batch is not None else row_batch(row, self.torch)
+        if self._batch is not None:
+            return self._batch(row)
+        return row_batch(row, self.torch, self.schema)
+
+    def heads(self, b: Mapping[str, Any]) -> tuple[np.ndarray, tuple[float, ...] | None]:
+        """(the gate logits, the critic's raw [outcome, won logit] or None), one forward pass."""
+        card_ids = b["hand"][:, 0].clamp(min=0)
+        value = None
+        with self.torch.no_grad():
+            if self.has_critic:
+                out = self.model.outputs(b, card_ids=card_ids)
+                gate = out["gate"]
+                if out.get("value2") is not None:
+                    value = tuple(float(v) for v in
+                                  np.asarray(out["value2"][0].float().numpy()).reshape(-1))
+            else:
+                gate, _, _ = self.model(b, card_ids=card_ids)
+        return gate[0].float().numpy(), value
 
     def gate(self, b: Mapping[str, Any]) -> np.ndarray:
-        with self.torch.no_grad():
-            gate, _, _ = self.model(b, card_ids=b["hand"][:, 0].clamp(min=0))
-        return gate[0].float().numpy()
+        return self.heads(b)[0]
 
     def tiles(self, b: Mapping[str, Any], slot: int) -> np.ndarray:
         with self.torch.no_grad():
@@ -791,8 +1049,10 @@ def _guarded(lane: int | None, tx: int) -> bool:
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """What decide() chose. kind PLAY (command set) or WAIT (reason: R_WAIT drawn, R_NO_CARD
-    nothing playable, R_NO_TILE no legal tile); PRESS is E15's. Tiles: `tile` = ty * 18 + tx,
-    the model's own frame; x_sub / y_sub the engine-frame tap of its centre."""
+    nothing playable, R_NO_TILE no legal tile) or PRESS (E15: `button`, its card in `card` when
+    the abilities row names it, its elixir in `cost`; command (team, HAND_SIZE + button, 0, 0)).
+    Tiles: `tile` = ty * 18 + tx, the model's own frame; x_sub / y_sub the engine-frame tap of
+    its centre. `value`: the critic's raw [outcome, won logit] (module doc, V2 CHECKPOINTS)."""
 
     team: int
     tick: int | None
@@ -823,17 +1083,36 @@ class Decision:
     tile_cands: tuple[int, ...] = ()         # sampling: the legal tiles the tile was drawn from
     tile_a: int = -1                         # sampling: index into tile_cands
     logq_tile: float = 0.0
+    value: tuple[float, ...] = ()            # E15: the critic (value2), raw; () without one
 
     @property
     def is_play(self) -> bool:
         return self.kind == PLAY
 
     @property
+    def is_press(self) -> bool:
+        return self.kind == PRESS
+
+    @property
     def command(self) -> tuple[int, int, int, int] | None:
-        """(team, slot, x_sub, y_sub) for Battle.step, or None."""
+        """(team, slot, x_sub, y_sub) for Battle.step; a press (team, HAND_SIZE + button, 0, 0);
+        None for a wait."""
+        if self.is_press:
+            return (self.team, HAND_SIZE + self.button, 0, 0)
         if not self.is_play:
             return None
         return (self.team, self.slot, self.x_sub, self.y_sub)
+
+    @property
+    def win_p(self) -> float | None:
+        """The critic's win probability (sigmoid of value[1]), None without a critic."""
+        if len(self.value) < 2:
+            return None
+        z = float(self.value[1])
+        if z >= 0:
+            return 1.0 / (1.0 + math.exp(-z))
+        e = math.exp(z)
+        return e / (1.0 + e)
 
     @property
     def model_tile(self) -> tuple[int, int] | None:
@@ -853,13 +1132,17 @@ class Decision:
 
     def suggest_kwargs(self, name: str = "") -> dict[str, Any]:
         """Keyword arguments for scripts/vision/control.ControlState.suggest(**...): the
-        suggestion shown and logged in MANUAL and AUTO alike (the tile is world_tile)."""
+        suggestion shown and logged in MANUAL and AUTO alike (the tile is world_tile). A press
+        is suggested as card -1 with reason "press" and its button: the control state never
+        taps it (the live runner has no press tap; our deck has no ability button)."""
         kw: dict[str, Any] = {"tick": self.tick, "p_wait": self.p_wait}
         if name:
             kw["name"] = name
         if self.is_play:
             kw.update(card=self.card, slot=self.slot, tile=self.world_tile,
                       model_tile=[self.tx, self.ty], capped=self.capped, fallback=self.fallback)
+        elif self.is_press:
+            kw.update(card=-1, reason=PRESS, button=self.button, button_card=self.card)
         else:
             kw.update(card=-1, reason=self.reason)
         return kw
@@ -880,12 +1163,14 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
            dt: int | None = None, sub: int = SUBTILE_PER_MILLITILE,
            aim: Callable[[np.ndarray, int, int], np.ndarray] | None = None,
            blocked_tiles: np.ndarray | None = None) -> Decision:
-    """Wait or play for `team` (module doc, THE DECISION).
+    """Wait, play or (cfg.presses, a v2 gate) press for `team` (module doc, THE DECISION).
 
     policy    a TokenPolicyAdapter (or a TokenPolicy, wrapped), or anything with batch(row),
-              gate(batch) and tiles(batch, slot)
+              gate(batch) and tiles(batch, slot); heads(batch) -> (gate, value or None), when
+              it has one, is called in place of gate (the critic's value for the record)
     row       the obs_row of the board the policy decides on (rs_rows.obs_row)
-    state     the present state: hand, hand_costs, elixir, pending, towers, entities
+    state     the present state: hand, hand_costs, elixir, pending, towers, entities, and
+              abilities (the buttons' rows)
     legality  BattleLegality / TowersOnlyLegality / PureLegality, a Battle, or a callable
               check(slot, card, x_sub, y_sub) -> bool
     cfg       a DecideConfig (None: legacy)
@@ -908,7 +1193,12 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
     hand = list(p.get("hand") or [])
     costs = list(p.get("hand_costs") or [])
     b = policy.batch(row)
-    raw = np.asarray(policy.gate(b))
+    heads = getattr(policy, "heads", None)
+    if callable(heads):                     # TokenPolicyAdapter: the gate and the critic
+        raw, value = heads(b)
+        raw = np.asarray(raw)
+    else:
+        raw, value = np.asarray(policy.gate(b)), None
     if cfg.sample:
         g = raw.astype(np.float64)
     else:
@@ -929,9 +1219,16 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
         mask[1 + slot] = ok
         if not ok:
             g[1 + slot] = MASKED
-    if len(g) > GATE_PLAYS:
-        # E15: ability buttons. button_mask is all False until E15, so no press is chosen.
-        for k, ok in enumerate(button_mask(state, team, len(g) - GATE_PLAYS, spendable)):
+    n_buttons = len(g) - GATE_PLAYS
+    if n_buttons > 0:
+        # E15: ability buttons, only with cfg.presses (button_mask); else all masked.
+        if cfg.presses:
+            pressing = (_pending_buttons(state, team, pending, held) if cfg.mask_pending
+                        else frozenset())
+            allowed = button_mask(state, team, n_buttons, spendable, pressing=pressing)
+        else:
+            allowed = [False] * n_buttons
+        for k, ok in enumerate(allowed):
             mask[GATE_PLAYS + k] = bool(ok)
             if not ok:
                 g[GATE_PLAYS + k] = MASKED
@@ -939,10 +1236,12 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
     pr /= pr.sum()
     p_wait = float(pr[0])
     q_wait = p_wait ** (dt / WAIT_REF_TICKS)
-    playable = not g[1:GATE_PLAYS].max() < UNPLAYABLE
-    capped = bool(cfg.cap_milli is not None and playable and spendable >= cfg.cap_milli)
+    cards_ok = not g[1:GATE_PLAYS].max() < UNPLAYABLE
+    playable = cards_ok or bool(mask[GATE_PLAYS:].any())
+    capped = bool(cfg.cap_milli is not None and cards_ok and spendable >= cfg.cap_milli)
     base = dict(team=team, tick=tick, p_wait=p_wait, q_wait=q_wait, capped=capped,
-                mask=tuple(bool(m) for m in mask), spendable_milli=int(spendable), mode=cfg.name)
+                mask=tuple(bool(m) for m in mask), spendable_milli=int(spendable), mode=cfg.name,
+                value=() if value is None else tuple(float(v) for v in value))
 
     def play(slot: int, t: int, wx: int, wy: int, lane: int | None, tried: list[int],
              check: Bound, **extra: Any) -> Decision:
@@ -952,23 +1251,35 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
                         x_sub=int(wx * sub), y_sub=int(wy * sub), fallback=len(tried) > 1,
                         tried=tuple(tried), lane=lane, legality=check.name, **base, **extra)
 
+    def press(button: int, tried: list[int], check: Bound | None, **extra: Any) -> Decision:
+        return Decision(kind=PRESS, button=int(button), card=button_card(state, team, button),
+                        cost=press_cost(state, team, button), fallback=bool(tried),
+                        tried=tuple(tried), legality="" if check is None else check.name,
+                        **base, **extra)
+
     if cfg.sample:
         return _decide_sampled(policy, b, state, team, legality, cfg, rng, g, mask, hand, dt,
-                               sub, aim, blocked_tiles, playable, capped, base, play)
+                               sub, aim, blocked_tiles, playable, capped, base, play, press)
     u = float(rng.random())                 # always drawn: a seeded run replays exactly
     if not playable:
         return Decision(kind=WAIT, reason=R_NO_CARD, **base)
     if not capped and u < q_wait:
         return Decision(kind=WAIT, reason=R_WAIT, **base)
-    # E15: an argmax over g[1:] that lands on a button becomes a PRESS here.
-    first = int(np.argmax(g[1:GATE_PLAYS]))
-    slots = [first]
+    # The argmax over the slots and buttons (g[1:]: slot s is entry s, button k is
+    # HAND_SIZE + k); the fallback goes on in gate order. A masked entry is -1e9, so with every
+    # button masked this is the slots' argmax and order, exactly as before E15.
+    first = int(np.argmax(g[1:]))
+    entries = [first]
     if cfg.fallback:
-        slots += [int(s) for s in np.argsort(-g[1:GATE_PLAYS], kind="stable")
-                  if mask[1 + int(s)] and int(s) != first]
-    check = _bind(legality, state, team)
+        entries += [int(s) for s in np.argsort(-g[1:], kind="stable")
+                    if mask[1 + int(s)] and int(s) != first]
+    check: Bound | None = None
     tried: list[int] = []
-    for slot in slots:
+    for slot in entries:
+        if slot >= HAND_SIZE:
+            return press(slot - HAND_SIZE, tried, check)
+        if check is None:
+            check = _bind(legality, state, team)
         tried.append(slot)
         card = int(hand[slot])
         order = np.argsort(-np.asarray(policy.tiles(b, slot)))
@@ -985,7 +1296,8 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
             wx, wy = to_world(tx * 1000 + 500, ty * 1000 + 500, team)
             if check(slot, card, wx * sub, wy * sub):
                 return play(slot, t, wx, wy, lane, tried, check)
-    return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried), legality=check.name, **base)
+    return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried),
+                    legality="" if check is None else check.name, **base)
 
 
 def tile_probs(logits: np.ndarray, explore: float = SAMPLE_EXPLORE,
@@ -1014,8 +1326,10 @@ def gate_probs(g: np.ndarray, mask: np.ndarray, dt: int = DECIDE, capped: bool =
 
 
 def _decide_sampled(policy, b, state, team, legality, cfg, rng, g, mask, hand, dt, sub, aim,
-                    blocked_tiles, playable, capped, base, play) -> Decision:
-    """decide() with cfg.sample: the gate and the tile are drawn (module doc, PRESETS)."""
+                    blocked_tiles, playable, capped, base, play, press) -> Decision:
+    """decide() with cfg.sample: the gate and the tile are drawn (module doc, PRESETS). A drawn
+    button (a >= GATE_PLAYS; q is 0 there unless button_mask let it in) is a PRESS with no tile
+    draw; the fallback goes on in q order over the slots and buttons."""
     if not playable:
         return Decision(kind=WAIT, reason=R_NO_CARD, **base)
     q = gate_probs(g, mask, dt, capped)
@@ -1023,15 +1337,18 @@ def _decide_sampled(policy, b, state, team, legality, cfg, rng, g, mask, hand, d
     drawn = dict(gate_q=tuple(float(v) for v in q), gate_a=a, logq_gate=float(math.log(q[a])))
     if a == 0:
         return Decision(kind=WAIT, reason=R_WAIT, **base, **drawn)
-    # E15: a >= GATE_PLAYS would be a button press (q is 0 there until button_mask allows it).
     first = a - 1
-    slots = [first]
+    entries = [first]
     if cfg.fallback:
-        slots += [int(s) for s in np.argsort(-q[1:GATE_PLAYS], kind="stable")
-                  if mask[1 + int(s)] and int(s) != first]
-    check = _bind(legality, state, team)
+        entries += [int(s) for s in np.argsort(-q[1:], kind="stable")
+                    if mask[1 + int(s)] and int(s) != first]
+    check = None
     tried: list[int] = []
-    for slot in slots:
+    for slot in entries:
+        if slot >= HAND_SIZE:
+            return press(slot - HAND_SIZE, tried, check, **drawn)
+        if check is None:
+            check = _bind(legality, state, team)
         tried.append(slot)
         card = int(hand[slot])
         logits = np.asarray(policy.tiles(b, slot), dtype=np.float64)
@@ -1075,5 +1392,5 @@ def _decide_sampled(policy, b, state, team, legality, cfg, rng, g, mask, hand, d
         return play(slot, t, wx, wy, lane, tried, check, **drawn,
                     tile_cands=tuple(c for c, _, _ in legal), tile_a=k,
                     logq_tile=float(math.log(pt[k])))
-    return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried), legality=check.name,
-                    **base, **drawn)
+    return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried),
+                    legality="" if check is None else check.name, **base, **drawn)
