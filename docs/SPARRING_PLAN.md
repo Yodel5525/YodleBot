@@ -52,6 +52,8 @@ This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run 
 | Live perception | **Screen vision** (YOLO plus screen readers), feeding exactly the same observation used in training | It survives game updates and needs no root access. The memory reader in `scripts/gamestate/` only works on one exact game build and is not used. |
 | Live mode | **Friendly battles only, started by a human.** The bot never presses Battle, and there is no ladder option. | Fair to other players, and our use case is sparring. |
 | Not built | Anti-detection or ban evasion; reading hidden opponent information | Out of scope by design. |
+| Takeover | **F8 hands the whole match** to the owner and back. There are no split modes, such as the bot defending while the owner attacks. | The owner's choice (2026-10-30): a single toggle is enough for practice. |
+| Opponent cards | **Covering the newer cards is a priority.** The clanmates play many different decks, and most include at least one card released since 2024. | The KataCR dataset (2024) lacks about 10 newer troop cards, plus the evolved or hero forms of 38 units. `scripts/vision/events.py` names an opponent's play from the detector's class for the unit, so a missing class means a misread play. |
 
 ## How it fits together
 
