@@ -21,6 +21,9 @@ stand-in that writes the report rs_league_eval would. Checked:
   - the opponents' mix (MixDraw, also through rollout.plan_battles), the bench end to end and its
     recommendation, durations, the JSON line a step prints, run_logged on a real subprocess and
     the subprocess steps' command lines
+  - the collect process's watch on the driver's stdin pipe; in-process step errors are
+    StepErrors; a resumed run plays its own noise.json and engine.json (a changed noise source
+    or default engine config leaves it as it was; a named other engine is refused)
 No engine, no GPU, no data, no emulator.
 """
 from __future__ import annotations
@@ -28,7 +31,9 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import os
 import sys
+import threading
 import types
 from collections import Counter
 from pathlib import Path
@@ -499,8 +504,8 @@ def test_the_subprocess_steps_command_lines(loop, monkeypatch, tmp_path):
     TL = loop.TL
     seen = []
 
-    def fake_run(cmd, log_path, echo, *, poll=None, env=None):
-        seen.append([str(c) for c in cmd])
+    def fake_run(cmd, log_path, echo, *, poll=None, env=None, keep_stdin=False):
+        seen.append(([str(c) for c in cmd], keep_stdin))
         return 0, {"ok": True}
 
     monkeypatch.setattr(TL, "run_logged", fake_run)
@@ -509,11 +514,14 @@ def test_the_subprocess_steps_command_lines(loop, monkeypatch, tmp_path):
     assert steps.collect(tmp_path / "t.json", log, TL.Echo()) == {"ok": True}
     assert steps.update(["--ckpt", "a"], log, TL.Echo()) == {"ok": True}
     assert steps.gate(["run"], log, TL.Echo()) == 0
+    # the collection watches the stdin pipe the driver holds (a killed driver ends it)
     assert seen == [
-        [str(Path("E/python")), str(Path(TL.__file__).resolve()), "collect-task", "--task",
-         str(tmp_path / "t.json")],
-        [str(Path("T/python")), str(TL.ROOT / "tools" / "rl" / "ppo.py"), "--ckpt", "a"],
-        [str(Path("E/python")), str(TL.ROOT / "tools" / "rs_league_eval.py"), "run"]]
+        ([str(Path("E/python")), str(Path(TL.__file__).resolve()), "collect-task", "--task",
+          str(tmp_path / "t.json"), "--watch-stdin"], True),
+        ([str(Path("T/python")), str(TL.ROOT / "tools" / "rl" / "ppo.py"), "--ckpt", "a"], False),
+        ([str(Path("E/python")), str(TL.ROOT / "tools" / "rs_league_eval.py"), "run"], False)]
+    assert TL.build_parser().parse_args(["collect-task", "--task", "t.json",
+                                         "--watch-stdin"]).watch_stdin is True
     monkeypatch.setattr(TL, "run_logged", lambda *a, **k: (2, None))
     with pytest.raises(TL.StepError, match="exit 2"):
         steps.collect(tmp_path / "t.json", log, TL.Echo())
@@ -521,3 +529,88 @@ def test_the_subprocess_steps_command_lines(loop, monkeypatch, tmp_path):
         steps.update([], log, TL.Echo())
     assert steps.gate([], log, TL.Echo()) == 2
     assert isinstance(TL.make_steps(types.SimpleNamespace(inline=True)), TL.InlineSteps)
+
+
+def test_the_collect_process_stops_when_the_driver_is_gone(loop):
+    """watch_parent: end of file on the pipe the driver holds (the driver died, also when killed
+    outright) calls on_gone; data before it does not."""
+    TL = loop.TL
+    r, w = os.pipe()
+    gone = threading.Event()
+    try:
+        thread = TL.watch_parent(r, on_gone=gone.set)
+        assert thread is not None and thread.daemon
+        os.write(w, b"not the end")
+        assert not gone.wait(0.2)                   # data is not the end: still watching
+        os.close(w)
+        w = None
+        assert gone.wait(5.0)                       # end of file: the driver is gone
+        thread.join(5.0)
+        assert not thread.is_alive()
+    finally:
+        if w is not None:
+            os.close(w)
+        os.close(r)
+
+
+def test_inline_steps_turn_errors_into_step_errors(loop, monkeypatch, tmp_path):
+    """An exception inside an in-process collection or update is a StepError (the run stays at
+    its step and resumes there), with the traceback in the step's log."""
+    TL = loop.TL
+
+    def boom(task):
+        raise RuntimeError("worker 0: 11 battles failed")
+
+    monkeypatch.setattr(TL, "collect_from_task", boom)
+    task = tmp_path / "collect.json"
+    task.write_text("{}", encoding="utf-8")
+    log = tmp_path / "logs" / "it0000-collect.log"
+    with pytest.raises(TL.StepError, match="the collection failed .*11 battles failed"):
+        TL.InlineSteps().collect(task, log, TL.Echo())
+    assert "Traceback" in log.read_text(encoding="utf-8")
+
+    def oom(argv):
+        raise MemoryError("out of memory")
+
+    monkeypatch.setattr(TL.P, "main", oom)
+    with pytest.raises(TL.StepError, match="the PPO update failed .*MemoryError"):
+        TL.InlineSteps().update(["--data", "x"], tmp_path / "logs" / "u.log", TL.Echo())
+
+
+def test_a_resumed_run_keeps_its_own_noise_and_engine(loop, monkeypatch):
+    """The run plays its own noise.json and engine.json on resume: a changed noise source (the
+    repo's prior after a git pull, a new fit) or another default engine config does not stop
+    it, and does not change what it plays. An engine named on the command line still must
+    match."""
+    TL, PN = loop.TL, loop.TL.PN
+    paths = TL.RunPaths(loop.runs, "r1")
+    src = loop.tmp / "noise" / "profile.json"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(json.dumps(TR.NOISE), encoding="utf-8")
+    run = ("--noise", str(src), "--gate-every", "0")
+    assert TL.main(argv(loop, *run, "--iterations", "1"), steps=recording(TL)) == TL.EXIT_OK
+    doc = json.loads(paths.args_json.read_text(encoding="utf-8"))
+    digest = doc["frozen"]["noise_digest"]
+    assert doc["flags"]["noise"] == str(src) and doc["frozen"]["deck_stats_sha256"] is None
+    assert digest == PN.as_profile(str(src)).digest() == PN.as_profile(str(paths.noise_json)).digest()
+    engine = json.loads(paths.engine_json.read_text(encoding="utf-8"))
+    # the source profile changes, and the default engine config is now another file
+    src.write_text(json.dumps({"opponent_plays": {"late_ticks": 8}}), encoding="utf-8")
+    assert PN.as_profile(str(src)).digest() != digest
+    other = loop.tmp / "other_engine.json"
+    other.write_text(json.dumps({**engine, "card_table": "client15535"}), encoding="utf-8")
+    monkeypatch.setenv(loop.tools.engine.CONFIG_ENV, str(other))
+    steps = recording(TL)
+    assert TL.main(argv(loop, *run, "--resume", "--iterations", "2"), steps=steps) == TL.EXIT_OK
+    assert steps.calls == [("collect", "it0001"), ("update", str(paths.ckpt(2)))]
+    task = json.loads((paths.data(1) / "collect.json").read_text(encoding="utf-8"))
+    assert task["settings"]["engine"] == engine
+    for p in task["plans"]:
+        spec = p["spec"]
+        assert PN.as_profile(spec["agents"][spec["seat"]]["noise"]).digest() == digest
+    launch = json.loads(paths.args_json.read_text(encoding="utf-8"))["launches"][-1]
+    assert launch["settings"]["engine_config"] == str(paths.engine_json)
+    # naming the other engine is refused (exit 1: another engine)
+    assert TL.main(argv(loop, *run, "--resume", "--engine-config", str(other)),
+                   steps=recording(TL)) == TL.EXIT_FAILED
+    assert json.loads(paths.state_json.read_text(encoding="utf-8"))["iteration"] == 2

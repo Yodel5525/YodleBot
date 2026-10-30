@@ -959,14 +959,14 @@ Disk: each iteration keeps one checkpoint, about as big as `runs\tokens\v2_hog\b
   ```
 
   The step that is running (a collection, an update, or a gate, which can take an hour) finishes, then the run stops. `C:\hcr\STOP`, the live runner's stop file, stops it too. **Delete the file before you resume:** `Remove-Item C:\hcr\runs\rl\hog_rl1\STOP`. The script refuses to start while either file exists.
-- **Stop now:** Ctrl+C. The interrupted step runs again on resume.
+- **Stop now:** Ctrl+C. The interrupted step runs again on resume. Use Ctrl+C or the STOP file, not Task Manager: a collection notices that the driver is gone and stops by itself, but a gate that was running would play on. If you did end it from Task Manager, end any `python.exe` that is left before you resume.
 - **Resume:**
 
   ```powershell
   powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -From resume -Workers 8 -Hours 24
   ```
 
-  The run keeps the settings it started with: start model, anchors, delay, noise, decks, mix and gate. If `data\engine.json`, the card table or a checkpoint file changed, the resume is refused (exit 1 or 2). Start a new `-Name` instead. `-Workers`, `-Matches`, `-Hours`, `-Iterations` and `-GateEvery` can change on every launch.
+  The run keeps the settings it started with: start model, anchors, delay, noise, decks, mix and gate. It also keeps its own copies of the engine settings and the noise profile (`engine.json` and `noise.json` in the run folder), so a `git pull` that changes `data\engine.json` or the noise prior does not change the run. The resume is refused (exit 1 or 2) if royalesim, a checkpoint file (`v2_hog` or an anchor) or `data\deck_stats.json` changed since the start. Then start a new `-Name` instead; so do not retrain `v2_hog` or rebuild the deck stats while a run still needs them. `-Workers`, `-Matches`, `-Hours`, `-Iterations` and `-GateEvery` can change on every launch.
 - **Go back:** `-From 40` resumes from iteration 40. Later checkpoints move to `runs\rl\hog_rl1\rollback-<time>\`, and the league and champion return to their state at iteration 40. Use it when a run went wrong after some iteration.
 - **See where it is**, also while it runs:
 

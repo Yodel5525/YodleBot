@@ -73,7 +73,11 @@ THE RUN FOLDER, runs/rl/<name>/ (<runs> from src/hastycr/machine.py):
 
 RESUME AND ROLLBACK. --resume continues a run from state.json; the frozen settings come from
 args.json, and a launch that names one with another value (or whose engine, start, reference,
-anchors or noise file changed) is refused: start a new --name. --resume --rollback N goes back
+anchors or deck stats file changed) is refused: start a new --name. A resumed run plays its
+own engine.json (unless --engine-config or --card-table names another) and its own
+noise.json, so a git pull that edits data/engine.json or the noise prior does not touch it;
+the HASTYCR_* variables still apply, and args.json's engine id and noise digest check both.
+--resume --rollback N goes back
 to iteration N: the later checkpoints, states, rollouts, Adam moments and gate reports move to
 rollback-<time>/, and the league, champion and gates are those of it<N>.json. A new run on an
 existing one is refused without --resume. One driver per run (a lock on runs/rl/<name>/.lock).
@@ -99,7 +103,10 @@ checkpoints, unless the update runs in this process).
 WINDOWS. Every step is a subprocess with a list argv (no shell), UTF-8 output, streamed to the
 console and its log. The collection's workers are rollout.py's spawn pool; the task is plain
 JSON, and this module imports nothing heavy at the top, so the spawned children (which import
-the main module) start fast.
+the main module) start fast. Windows ends no child with its parent: the driver kills a step's
+process when it is interrupted, and the collect process also watches a stdin pipe the driver
+holds (watch_parent), so a driver killed outright (Task Manager) takes its collection and,
+through rollout's parent check, the workers with it.
 
 Exit codes: 0 done (or stopped, or the bench); 1 a step failed, or the engine or a checkpoint's
 vocabulary does not match; 2 bad arguments, files or settings (refused before anything ran); 3
@@ -120,6 +127,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import types
 from collections import Counter, defaultdict, deque
@@ -145,7 +153,7 @@ __all__ = [
     "EXIT_ARGS", "EXIT_FAILED", "EXIT_GATE", "EXIT_INTERRUPTED", "EXIT_OK", "FROZEN",
     "InlineSteps", "MixDraw", "Refusal", "RunPaths", "StepError", "Steps", "SubprocessSteps",
     "Trainer", "build_parser", "collect_from_task", "last_json", "main", "parse_duration",
-    "parse_mix", "recommend", "run_logged",
+    "parse_mix", "recommend", "run_logged", "watch_parent",
 ]
 
 TOOL = "tools/rl/train_loop.py"
@@ -189,7 +197,7 @@ FROZEN = ("start", "ref", "anchor", "delay", "level", "noise", "opponent_noise",
           "seed", "gate_champion_games", "gate_anchor_games", "gate_decide", "gate_seed")
 #: What is derived from the frozen settings and checked again at every launch.
 COMPARED = ("start_name", "schema", "wait_keep", "start_sha256", "ref_sha256", "anchor_sha256",
-            "noise_digest", "opponent_noise_digest", "engine", "engine_id")
+            "noise_digest", "opponent_noise_digest", "deck_stats_sha256", "engine", "engine_id")
 ENGINE_KEYS = ("engine", "engine_id")
 
 
@@ -549,10 +557,14 @@ class MixDraw:
 
 def run_logged(cmd: Sequence[Any], log_path: Any, echo: Any, *,
                poll: Callable[[], Any] | None = None,
-               env: Mapping[str, str] | None = None) -> tuple[int, dict | None]:
+               env: Mapping[str, str] | None = None,
+               keep_stdin: bool = False) -> tuple[int, dict | None]:
     """Run `cmd` (a list argv, no shell) from the repo root with its stdout and stderr streamed
     to the console (echo.child) and appended to `log_path`; `poll` runs after every line.
-    Returns (exit code, the last JSON object line of its output)."""
+    `keep_stdin`: the child's stdin is a pipe this process holds open, and never writes to,
+    until the child ends; it reaches end of file only when this process is gone, however it
+    went (collect-task --watch-stdin stops then: watch_parent). Returns (exit code, the last
+    JSON object line of its output)."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     run_env = dict(os.environ if env is None else env)
@@ -565,7 +577,8 @@ def run_logged(cmd: Sequence[Any], log_path: Any, echo: Any, *,
         fh.flush()
         proc = subprocess.Popen(argv, cwd=str(ROOT), env=run_env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                                errors="replace", bufsize=1)
+                                errors="replace", bufsize=1,
+                                stdin=subprocess.PIPE if keep_stdin else None)
         try:
             assert proc.stdout is not None
             for raw in proc.stdout:
@@ -582,7 +595,47 @@ def run_logged(cmd: Sequence[Any], log_path: Any, echo: Any, *,
             if proc.poll() is None:            # interrupted: the child goes too
                 proc.kill()
                 proc.wait()
+            if proc.stdin is not None:
+                with contextlib.suppress(OSError):
+                    proc.stdin.close()
     return int(code), last_json(tail)
+
+
+def _parent_gone() -> None:
+    with contextlib.suppress(Exception):
+        print("error: the driver is gone (its stdin pipe closed): this collection stops; its "
+              "workers stop within a round", file=sys.stderr, flush=True)
+    os._exit(EXIT_INTERRUPTED)
+
+
+def watch_parent(fd: int | None = None, *,
+                 on_gone: Callable[[], Any] | None = None) -> threading.Thread | None:
+    """A daemon thread that reads `fd` (default this process's stdin) until end of file, then
+    calls `on_gone` (default: exit at once, EXIT_INTERRUPTED). collect-task --watch-stdin: the
+    driver holds that pipe (run_logged keep_stdin), so it closes when the driver dies, also
+    when it is killed (Task Manager), which on Windows ends no child. The collection then ends
+    too, and its spawn workers see their parent gone (rollout._stop_reason) instead of
+    playing on as orphans next to a resumed run's new ones. os.read on the descriptor, not
+    sys.stdin: a daemon thread blocked inside the buffered reader can abort the interpreter's
+    shutdown. None when there is no stdin to watch."""
+    if fd is None:
+        try:
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            return None
+    gone = on_gone or _parent_gone
+
+    def run() -> None:
+        try:
+            while os.read(fd, 4096):
+                pass
+        except OSError:
+            pass
+        gone()
+
+    thread = threading.Thread(target=run, name="watch-parent", daemon=True)
+    thread.start()
+    return thread
 
 
 def _inline_main(main_fn: Callable[[list[str]], int], argv: Sequence[str], log_path: Any,
@@ -651,8 +704,21 @@ class InlineSteps(Steps):
 
     inline = True
 
+    @staticmethod
+    def _failed(what: str, exc: Exception, log_path: Any) -> StepError:
+        """A step's exception as the StepError SubprocessSteps would give for its exit code
+        (the run stays resumable), its traceback in the step's log."""
+        import traceback
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"== {_now()} (in process) {what} failed\n{traceback.format_exc()}")
+        return StepError(f"{what} failed ({type(exc).__name__}: {exc}); see {log_path}")
+
     def collect(self, task_path, log_path, echo, poll=None):
-        summary = collect_from_task(read_json(task_path))
+        try:
+            summary = collect_from_task(read_json(task_path))
+        except Exception as exc:            # a worker's error, a refused checkpoint
+            raise self._failed("the collection", exc, log_path) from exc
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"== {_now()} (in process) collect {task_path}: {summary['matches']} matches,"
@@ -660,7 +726,10 @@ class InlineSteps(Steps):
         return _printed(summary)
 
     def update(self, argv, log_path, echo, poll=None):
-        code, stats = _inline_main(P.main, argv, log_path, echo)
+        try:
+            code, stats = _inline_main(P.main, argv, log_path, echo)
+        except Exception as exc:            # out of memory mid-update, say
+            raise self._failed("the PPO update", exc, log_path) from exc
         if code != 0 or stats is None:
             raise StepError(f"the PPO update failed (exit {code}); see {log_path}")
         return stats
@@ -684,8 +753,9 @@ class SubprocessSteps(Steps):
         self.ppo_inline = bool(ppo_inline)
 
     def collect(self, task_path, log_path, echo, poll=None):
-        cmd = [self.py_engine, Path(__file__).resolve(), "collect-task", "--task", task_path]
-        code, last = run_logged(cmd, log_path, echo, poll=poll)
+        cmd = [self.py_engine, Path(__file__).resolve(), "collect-task", "--task", task_path,
+               "--watch-stdin"]
+        code, last = run_logged(cmd, log_path, echo, poll=poll, keep_stdin=True)
         if code != 0 or last is None:
             raise StepError(f"the collection failed (exit {code}); see {log_path}")
         return last
@@ -898,9 +968,12 @@ def engine_record(cfg: Any) -> dict:
 
 
 def derive(flags: Mapping[str, Any], cfg: Any, allow: bool | None,
-           record: Mapping[str, Any]) -> dict:
+           record: Mapping[str, Any], *, noise_file: Any = None) -> dict:
     """What the frozen flags give, checked: the start and reference metas (v2, the engine's
-    vocabulary, one schema), the anchors, the noise profiles, the digests and the engine."""
+    vocabulary, one schema), the anchors, the noise profiles, the digests and the engine.
+    `noise_file` (a resumed run's noise.json): the learner's noise is read from it when it
+    exists, not from the --noise source again, so an edited source (the repo's prior after a
+    git pull, a new measured.json) leaves the run as it was; noise_digest still checks it."""
     start, ref = Path(flags["start"]), Path(flags["ref"])
     for what, p in (("--start", start), ("--ref", ref)):
         if not p.is_file():
@@ -929,8 +1002,11 @@ def derive(flags: Mapping[str, Any], cfg: Any, allow: bool | None,
             raise Refusal(f"--anchor {name}={path}: no such checkpoint")
         check_vocab(load_meta(path), path, cfg, allow)
         anchor_sha[name] = file_digest(path)
+    source = flags["noise"]
+    if source != "none" and noise_file is not None and Path(noise_file).is_file():
+        source = str(noise_file)
     try:
-        noise = R.noise_entry(None if flags["noise"] == "none" else flags["noise"])
+        noise = R.noise_entry(None if source == "none" else source)
         if flags["opponent_noise"] == R.SAME:
             opp = noise
         else:
@@ -938,12 +1014,16 @@ def derive(flags: Mapping[str, Any], cfg: Any, allow: bool | None,
                                 else flags["opponent_noise"])
     except (OSError, ValueError) as exc:
         raise Refusal(f"noise: {exc}") from None
+    decks = flags.get("deck_stats")
     return {"start_name": start_name, "schema": str(meta.get("schema")),
             "wait_keep": float(RD.wait_keep_for(str(start))),
             "start_sha256": file_digest(start), "ref_sha256": file_digest(ref),
             "anchor_sha256": anchor_sha,
             "noise_digest": None if noise is None else PN.as_profile(noise).digest(),
             "opponent_noise_digest": None if opp is None else PN.as_profile(opp).digest(),
+            # the opponents' deck field: a rebuilt deck_stats.json is another run's field
+            "deck_stats_sha256": (file_digest(decks) if decks and Path(decks).is_file()
+                                  else None),
             "engine": record["engine"], "engine_id": record["engine_id"],
             "presses_trained": bool(RD.presses_allowed(meta)), "noise": noise,
             "opponent_noise": opp}
@@ -1108,13 +1188,20 @@ class Trainer:
         why = self.stop_reason()
         if why:
             raise Refusal(f"refusing to start: {why} exists. Delete it to run: Remove-Item {why}")
+        has_state = paths.state_json.is_file()
+        resuming = bool(a.resume and has_state)
+        if (resuming and paths.engine_json.is_file()
+                and getattr(a, "engine_config", None) is None
+                and getattr(a, "engine_card_table", None) is None):
+            # A resumed run plays its own frozen engine.json, not data/engine.json (which a git
+            # pull may change). The HASTYCR_* variables still apply; COMPARED checks the result.
+            a.engine_config = str(paths.engine_json)
         try:
             self.cfg = rs_engine.config_from_args(a)
         except (ValueError, FileNotFoundError) as exc:
             raise Refusal(f"engine config: {exc}") from None
         rs_engine.set_active(self.cfg)
         self.allow = True if a.allow_vocab_drift else None
-        has_state = paths.state_json.is_file()
         if not bench:
             if a.resume and not has_state:
                 raise Refusal(f"no run to resume at {paths.run} (no state.json): start it "
@@ -1122,10 +1209,10 @@ class Trainer:
             if not a.resume and has_state:
                 raise Refusal(f"run {paths.name!r} already exists at {paths.run}: pass --resume to "
                               "continue it (rl_train.ps1 -From resume), or choose another --name")
-        if a.resume and has_state and not paths.args_json.is_file():
+        if resuming and not paths.args_json.is_file():
             raise Refusal(f"{paths.args_json} is missing: the run's settings are gone; start a new "
                           "--name")
-        stored = read_json(paths.args_json) if (a.resume and has_state) else None
+        stored = read_json(paths.args_json) if resuming else None
         try:
             flags, changed = resolve_flags(a, None if stored is None else stored.get("flags"),
                                            self.cfg)
@@ -1137,20 +1224,6 @@ class Trainer:
             raise Refusal(f"run {paths.name!r} was started with other settings: {shown}. Leave "
                           "these flags out to keep the run's, or start a new --name.")
         self.flags = flags
-        self.record = engine_record(self.cfg)
-        derived = derive(flags, self.cfg, self.allow, self.record)
-        if stored is not None:
-            was = stored.get("frozen") or {}
-            diff = [k for k in COMPARED if derived.get(k) != was.get(k)]
-            if diff:
-                code = EXIT_FAILED if any(k in ENGINE_KEYS for k in diff) else EXIT_ARGS
-                raise Refusal(f"run {paths.name!r} cannot resume: {', '.join(diff)} differ from "
-                              f"when it started (engine id {was.get('engine_id')} then, "
-                              f"{derived.get('engine_id')} now). Restore them (the same "
-                              "--card-table / --engine-config, HASTYCR_* settings and checkpoint "
-                              "files) or start a new --name.", code)
-        self.frozen = derived
-        self.noise, self.opp_noise = derived["noise"], derived["opponent_noise"]
         ns = types.SimpleNamespace(opponent_deck=flags["opponent_deck"],
                                    deck_stats=flags["deck_stats"],
                                    exclude_hog=flags["exclude_hog"], deck_top=flags["deck_top"],
@@ -1162,6 +1235,21 @@ class Trainer:
                           "deck_stats.py --top 2000 --workers 4)") from None
         except ValueError as exc:
             raise Refusal(f"deck field: {exc}") from None
+        self.record = engine_record(self.cfg)
+        derived = derive(flags, self.cfg, self.allow, self.record,
+                         noise_file=paths.noise_json if resuming else None)
+        if stored is not None:
+            was = stored.get("frozen") or {}
+            diff = [k for k in COMPARED if derived.get(k) != was.get(k)]
+            if diff:
+                code = EXIT_FAILED if any(k in ENGINE_KEYS for k in diff) else EXIT_ARGS
+                raise Refusal(f"run {paths.name!r} cannot resume: {', '.join(diff)} differ from "
+                              f"when it started (engine id {was.get('engine_id')} then, "
+                              f"{derived.get('engine_id')} now). Restore them (the same "
+                              "royalesim, --card-table / --engine-config, HASTYCR_* settings, "
+                              "checkpoint and deck stats files) or start a new --name.", code)
+        self.frozen = derived
+        self.noise, self.opp_noise = derived["noise"], derived["opponent_noise"]
         try:
             self.league_config = LG.LeagueConfig(admit_every=flags["admit_every"],
                                                  max_snapshots=flags["max_snapshots"],
@@ -1174,10 +1262,23 @@ class Trainer:
             self.state = read_json(paths.state_json)
             stored.setdefault("launches", []).append(self.launch_record())
             write_json(paths.args_json, stored)
+            self.write_run_files(missing_only=True)
             if a.rollback is not None:
                 self.rollback(int(a.rollback))
         else:
             self.create()
+
+    def write_run_files(self, *, missing_only: bool = False) -> None:
+        """engine.json and noise.json, the frozen engine and noise the gate reads (and a resumed
+        run plays): written at creation, and again on resume when one is gone (both were checked
+        against args.json's digests by then)."""
+        paths = self.paths
+        if not (missing_only and paths.engine_json.is_file()):
+            write_json(paths.engine_json, self.cfg.to_json())
+        if self.noise is not None and not (missing_only and paths.noise_json.is_file()):
+            tmp = paths.noise_json.with_name(paths.noise_json.name + ".tmp")
+            tmp.write_text(PN.as_profile(self.noise).dumps(), encoding="utf-8")
+            replace_file(tmp, paths.noise_json)
 
     def launch_record(self) -> dict:
         a = self.args
@@ -1208,9 +1309,7 @@ class Trainer:
                "frozen": {k: v for k, v in fr.items() if k not in ("noise", "opponent_noise")},
                "noise_profile": fr["noise"], "launches": [self.launch_record()]}
         write_json(paths.args_json, doc)
-        write_json(paths.engine_json, self.cfg.to_json())
-        if self.noise is not None:
-            paths.noise_json.write_text(PN.as_profile(self.noise).dumps(), encoding="utf-8")
+        self.write_run_files()
         stamp_start(fl["start"], paths.ckpt(0), stamp)
         champion = {"id": ANCHOR_PREFIX + fr["start_name"], "name": fr["start_name"],
                     "path": fl["start"], "iteration": 0}
@@ -1243,6 +1342,13 @@ class Trainer:
         if not (paths.sidecar(k).is_file() and paths.ckpt(k).is_file()):
             raise Refusal(f"--rollback {k}: {paths.sidecar(k).name} or {paths.ckpt(k).name} is "
                           "missing")
+        # The state first: a crash among the moves below then leaves a run at iteration k with
+        # some later files still in place, which the steps overwrite (or clear) as they come.
+        state = read_json(paths.sidecar(k))
+        state.pop("record", None)
+        state["pending"] = None
+        self.state = state
+        self.save_state()
         archive = paths.run / f"rollback-{_stamp()}"
         moved = []
         for p in sorted(paths.run.iterdir()):
@@ -1259,11 +1365,6 @@ class Trainer:
                     (archive / folder.name).mkdir(parents=True, exist_ok=True)
                     shutil.move(str(p), str(archive / folder.name / p.name))
                     moved.append(f"{folder.name}/{p.name}")
-        state = read_json(paths.sidecar(k))
-        state.pop("record", None)
-        state["pending"] = None
-        self.state = state
-        self.save_state()
         champ = state["champion"]
         if not (paths.champion.is_file()
                 and file_digest(paths.champion) == file_digest(champ["path"])):
@@ -1271,7 +1372,10 @@ class Trainer:
         append_jsonl(paths.log_jsonl, {"kind": "rollback", "iteration": k, "time": _now(),
                                        "archive": archive.name, "moved": moved})
         self.echo(f"rollback to iteration {k}: moved {len(moved)} file(s) to {archive.name}; "
-                  f"champion {champ['name']}")
+                  f"champion {champ['name']}"
+                  + ("" if k == 0 or paths.adam(k).is_file() else
+                     f"; the Adam moments of iteration {k} are gone (only the last two are kept): "
+                     "its update starts them over"))
 
     # ------------------------------------------------------------ pieces
     def iter_seed(self, n: int) -> int:
@@ -1462,12 +1566,14 @@ class Trainer:
         self.save_state()
         append_jsonl(paths.log_jsonl, rec)
         self.echo(describe_iteration(rec))
-        keep = int(a.keep_rollouts)
-        old = n - keep
-        if old >= 0:
-            for f in paths.data(old).glob("*.npz"):
-                f.unlink()
-            shutil.rmtree(paths.data(old) / R.TMP_DIR, ignore_errors=True)
+        # The rollouts of iteration n - keep, and of the one before it: a crash after the last
+        # commit's state write left those behind.
+        old = n - int(a.keep_rollouts)
+        for j in (old - 1, old):
+            if j >= 0:
+                for f in paths.data(j).glob("*.npz"):
+                    f.unlink()
+                shutil.rmtree(paths.data(j) / R.TMP_DIR, ignore_errors=True)
         return rec
 
     def iterate(self, n: int) -> None:
@@ -1599,6 +1705,10 @@ class Trainer:
         if not fl["opponent_deck"] and len(self.field) < MIN_DECKS:
             self.echo(f"warning: {len(self.field)} opponent decks, the plan asks for at least "
                       f"{MIN_DECKS}: rebuild with tools\\deck_stats.py --top 2000 (a new run)")
+        if fl["level"] != R.FRIENDLY_LEVEL or fl["opponent_noise"] != R.SAME:
+            self.echo(f"note: the gate plays every card at level {R.FRIENDLY_LEVEL} with the "
+                      "learner's noise on every seat (tools/rs_league_eval.py), not this run's "
+                      "--level / --opponent-noise")
 
     def loop(self) -> int:
         a, st = self.args, self.state
@@ -1888,6 +1998,8 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--runs-dir", type=Path, default=None)
     ct = sub.add_parser("collect-task", help="(internal) one collection from a task file")
     ct.add_argument("--task", type=Path, required=True)
+    ct.add_argument("--watch-stdin", action="store_true",
+                    help="stop at once when stdin closes: the driver holds it (watch_parent)")
     return ap
 
 
@@ -2016,6 +2128,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_collect_task(args: argparse.Namespace) -> int:
     """`collect-task --task FILE`: the collection subprocess (the engine venv)."""
     import rs_checkpoint
+    if getattr(args, "watch_stdin", False):
+        watch_parent()
     try:
         summary = collect_from_task(read_json(args.task))
     except (rs_checkpoint.VocabMismatch, rs_engine.EngineError) as exc:

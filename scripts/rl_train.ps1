@@ -40,8 +40,9 @@
 .PARAMETER Iterations
     Stop once the run has done this many iterations in all (default 0: no limit).
 
-.PARAMETER Matches
-    Battles per iteration (default 400).
+.PARAMETER MatchCount
+    Battles per iteration (default 400); -Matches works too. (Not a parameter named Matches:
+    $Matches is PowerShell's own variable, which every successful -match overwrites.)
 
 .PARAMETER From
     new (default): start the run (refused if it exists). resume: continue it from where it
@@ -70,7 +71,7 @@ param(
     [ValidateRange(0, 64)][int]$Workers = 0,
     [ValidateRange(0, 10000)][double]$Hours = 0,
     [ValidateRange(0, 1000000)][int]$Iterations = 0,
-    [ValidateRange(1, 100000)][int]$Matches = 400,
+    [Alias('Matches')][ValidateRange(1, 100000)][int]$MatchCount = 400,
     [ValidateNotNullOrEmpty()][string]$From = 'new',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')][string]$Name = 'hog_rl1',
     [string]$Start = '',
@@ -148,7 +149,7 @@ $runsRoot = Get-MachinePath 'runs' 'runs'
 $runDir = Join-Path $runsRoot ("rl\{0}" -f $Name)
 $stateFile = Join-Path $runDir 'state.json'
 $mode = $(if ($Bench) { 'bench' } else { $fromKey })
-Write-Both ("rl_train.ps1: run {0} ({1}), workers {2}, matches {3}, hours {4}, iterations {5}, gate every {6}. Run folder: {7}. Log: {8}" -f $Name, $mode, $(if ($Workers -gt 0) { $Workers } else { 'default' }), $Matches, $(if ($Hours -gt 0) { $Hours } else { 'no limit' }), $(if ($Iterations -gt 0) { $Iterations } else { 'no limit' }), $GateEvery, $runDir, $log) 'Cyan'
+Write-Both ("rl_train.ps1: run {0} ({1}), workers {2}, matches {3}, hours {4}, iterations {5}, gate every {6}. Run folder: {7}. Log: {8}" -f $Name, $mode, $(if ($Workers -gt 0) { $Workers } else { 'default' }), $MatchCount, $(if ($Hours -gt 0) { $Hours } else { 'no limit' }), $(if ($Iterations -gt 0) { $Iterations } else { 'no limit' }), $GateEvery, $runDir, $log) 'Cyan'
 
 # Read-only checks of what else holds memory. Nothing here starts, stops or touches MuMu.
 $mumu = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(MuMuPlayer|MuMuNxDevice|MuMuVMMHeadless)' })
@@ -182,7 +183,7 @@ if (Test-Path (Join-Path $root 'STOP')) {
     Stop-Run ("ERROR: {0} exists (the live runner's stop file; it stops this run too). Delete it to run: Remove-Item {0}" -f (Join-Path $root 'STOP'))
 }
 
-$argList = @('tools\rl\train_loop.py', 'run', '--name', $Name, '--matches', "$Matches",
+$argList = @('tools\rl\train_loop.py', 'run', '--name', $Name, '--matches', "$MatchCount",
              '--gate-every', "$GateEvery")
 if ($Workers -gt 0) { $argList += @('--workers', "$Workers") }
 if ($Hours -gt 0) { $argList += @('--hours', $Hours.ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
@@ -227,8 +228,8 @@ if ($newRun -and $fromKey -eq 'new') {
 } else {
     $argList += @('--resume', '--rollback', "$rollback")
 }
-if ($Start -and -not $newRun) {
-    Write-Both "note: -Start is only for a new run; a resumed run keeps its start." 'Yellow'
+if (-not $newRun -and ($Start -or $Noise -or $NoAnchors)) {
+    Write-Both "note: -Start, -Noise and -NoAnchors are only for a new run; a resumed run keeps its start, noise and anchors." 'Yellow'
 }
 if ($Bench) {
     $argList += @('--bench', ("{0}m" -f $BenchMinutes))
@@ -255,6 +256,8 @@ if ($code -eq 0) {
     Write-Both ("== done ({0}), but a gate could not run: see runs\rl\{1}\logs\gate-*.log. Send back the log: {2}" -f (Get-Date -Format 'HH:mm:ss'), $Name, $log) 'Yellow'
 } elseif ($code -eq 130) {
     Write-Both ("== interrupted. Resume with -From resume. Log: {0}" -f $log) 'Yellow'
+} elseif ($code -eq 2) {
+    Write-Both ("ERROR: train_loop.py refused to start (exit code 2): the 'error:' line above says why. Nothing ran. Log: {0}" -f $log) 'Red'
 } else {
     Write-Both ("ERROR: train_loop.py failed with exit code {0}. Fix the cause (send this log back: {1}), then resume with -From resume." -f $code, $log) 'Red'
 }
