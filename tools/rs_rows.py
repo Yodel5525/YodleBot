@@ -63,6 +63,21 @@ UF = 7 features, and the v2 schema (E14) moves the form into unit_feats. vocab.j
 the classes as "units" (n_units = classes + 2) and adds "units_mode": "vision",
 "vision_classes_digest" and "extra_columns". --live-compat is a third kind of unit token and
 does not combine with --units vision.
+
+Visibility (E12): `--visibility legacy` (the default) shows every living unit, as before, so
+the rows and vocab.json are byte-identical to the rows before E12. `--visibility public` shows
+the acting player what their screen shows: an ENEMY unit with STATUS_INVISIBLE (a Royal Ghost,
+a cloaked Archer Queen) or STATUS_HIDDEN (a Tesla in the ground) is left out before the sort
+and the MAX_UNITS cut, so the units shown take its place; a unit tunnelling now
+(STATUS_UNDERGROUND: a Miner, a Goblin Drill on its way) stays where the engine has it, the
+head of its dirt trail, with 1 in one more column, "unit_burrow" (MAX_UNITS float16); own units
+are always shown. The bits (royalegym protocol.py:579-583) are read from status_flags through
+the field index (rs_engine.field_index), and an engine's -1, "not reported", is refused
+(VisibilityError), never masked (masked, -1 would be every bit at once). When royalesim exports
+STATUS_BITS, its first three names must be underground, invisible, hidden (check_status_bits).
+sim/train_tokens.py does not read unit_burrow yet (E14 moves it into unit_feats). vocab.json
+then adds "visibility": "public", "visibility_rule" and "unit_burrow" in "extra_columns"
+(visibility_vocab); tools/rs_eval.py reads "visibility" back from a checkpoint's meta.
 """
 from __future__ import annotations
 
@@ -121,6 +136,105 @@ MEM_LEGACY = "legacy"
 MEM_LAG = rs_memory.BOARD_LAG
 #: vocab.json "opp_memory" of rows whose memory is dated at execution (absent: legacy).
 OPP_MEMORY_EXEC = "exec"
+
+#: --visibility (module doc): which units a row shows. VIS_LEGACY every living one (the rows
+#: before E12), VIS_PUBLIC what the acting player's screen shows.
+VIS_LEGACY, VIS_PUBLIC = "legacy", "public"
+VISIBILITY_MODES = (VIS_LEGACY, VIS_PUBLIC)
+VISIBILITY = VIS_LEGACY
+#: EntityState.status_flags bits (royalegym protocol.py:579-583). royalesim.STATUS_BITS names
+#: bit k (1 << k); STATUS_NAMES are its first three names (check_status_bits).
+STATUS_UNDERGROUND, STATUS_INVISIBLE, STATUS_HIDDEN = 1, 2, 4
+STATUS_NAMES = ("underground", "invisible", "hidden")
+#: --visibility public: an enemy unit with one of these bits is not on the acting player's
+#: screen. A tunnelling one (STATUS_UNDERGROUND) is: its dirt trail.
+UNSEEN_STATUS = STATUS_INVISIBLE | STATUS_HIDDEN
+#: The columns --visibility public adds to FIELDS: 1.0 for a unit tunnelling now.
+VISIBILITY_FIELDS = ("unit_burrow",)
+
+
+class VisibilityError(ValueError):
+    """--visibility public on a unit whose status_flags the engine did not report (-1)."""
+
+
+def visibility_mode(value) -> str:
+    """--visibility as obs_row, build and tools/rs_eval.py take it: one of VISIBILITY_MODES.
+    ValueError otherwise."""
+    if not isinstance(value, str) or value not in VISIBILITY_MODES:
+        raise ValueError(f"--visibility: one of {', '.join(VISIBILITY_MODES)}, got {value!r}")
+    return value
+
+
+def describe_visibility(visibility) -> str:
+    """One line for the console."""
+    if visibility_mode(visibility) == VIS_LEGACY:
+        return "legacy (every living unit, an invisible or hidden enemy too)"
+    return ("public (no enemy with STATUS_INVISIBLE or STATUS_HIDDEN; a tunnelling unit stays "
+            "where it is, unit_burrow 1)")
+
+
+def visibility_rule() -> dict:
+    """vocab.json "visibility_rule" of --visibility public rows: what obs_row leaves out and
+    flags, by royalesim.STATUS_BITS name, and the bits."""
+    return {"drop_enemy": ["invisible", "hidden"], "unit_burrow": "underground",
+            "bits": dict(zip(STATUS_NAMES, (STATUS_UNDERGROUND, STATUS_INVISIBLE,
+                                            STATUS_HIDDEN)))}
+
+
+def visibility_vocab(visibility) -> dict:
+    """vocab_record keywords for --visibility: none for legacy (the vocab.json of the rows
+    before E12), else {"visibility": visibility}."""
+    if visibility_mode(visibility) == VIS_LEGACY:
+        return {}
+    return {"visibility": visibility}
+
+
+def visibility_of(meta) -> str:
+    """The --visibility of the rows a checkpoint trained on: its meta's (vocab.json's)
+    "visibility"; VIS_LEGACY when absent (every checkpoint before E12) or with no meta."""
+    return visibility_mode((meta or {}).get("visibility", VIS_LEGACY))
+
+
+def check_status_bits(royalesim) -> None:
+    """When the engine exports royalesim.STATUS_BITS (0.1.20 on), its first three names must
+    be STATUS_NAMES, the bits --visibility public reads; rs_engine.EngineError otherwise. An
+    engine that does not export them passes (the bits are protocol.py's)."""
+    names = getattr(royalesim, "STATUS_BITS", None)
+    if names is None:
+        return
+    got = tuple(str(n) for n in list(names)[:len(STATUS_NAMES)])
+    if got != STATUS_NAMES:
+        raise rs_engine.EngineError(
+            f"royalesim.STATUS_BITS starts {list(got)}; --visibility public reads bits 0-2 as "
+            f"{list(STATUS_NAMES)}")
+
+
+def unit_status(e, fields=None) -> int:
+    """status_flags of entity row `e` (`fields`: name -> index, default F). The engine's -1,
+    "not reported", raises VisibilityError: read as a mask it would be every bit at once
+    (royalegym protocol.status_of)."""
+    fields = F if fields is None else fields
+    status = e[fields["status_flags"]]
+    if status is None or isinstance(status, bool) or status < 0:
+        raise VisibilityError(
+            f"--visibility public: the unit uid {e[fields['uid']]} has no status_flags "
+            f"({status!r}); this engine does not report them")
+    return int(status)
+
+
+def seen_by(e, team, fields=None) -> bool:
+    """Whether `team`'s screen shows entity row `e` (--visibility public): its own units always
+    (their status is not read here); an enemy unit unless it has an UNSEEN_STATUS bit. A
+    tunnelling enemy is shown: its dirt trail is on the screen."""
+    fields = F if fields is None else fields
+    if e[fields["team"]] == team:
+        return True
+    return not unit_status(e, fields) & UNSEEN_STATUS
+
+
+def burrowing(e, fields=None) -> bool:
+    """Whether entity row `e` is tunnelling now (STATUS_UNDERGROUND): unit_burrow."""
+    return bool(unit_status(e, fields) & STATUS_UNDERGROUND)
 
 
 def unit_mode(value, live=False) -> str:
@@ -208,9 +322,12 @@ def _setup(engine=None):
     `engine` (an rs_engine.EngineConfig or its to_json(); None = rs_engine.active()).
     The card map is rs_cards.load(). Also sets F, after checking royalesim.ENTITY_FIELDS
     (rs_engine.field_index), and under --units vision (UNITS) VCT, the class table, and VC,
-    its lookup of this Battle's unit_types_json()."""
+    its lookup of this Battle's unit_types_json(). Under --visibility public (VISIBILITY) it
+    first checks royalesim.STATUS_BITS (check_status_bits)."""
     global F, VC, VCT
     import royalesim
+    if VISIBILITY == VIS_PUBLIC:
+        check_status_bits(royalesim)
     names = rs_cards.load()
     b = rs_engine.make_battle(rs_engine.resolve(engine).undelayed(), royalesim)
     cat = json.loads(b.catalogue_json())
@@ -243,18 +360,27 @@ def towers_vec(state, team):
     return np.asarray(out, dtype=np.float32)
 
 
-def obs_row(state, team, sub, mem, tick, live=None, units=None):
+def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None):
     """One row of `team`'s view. `mem` is the opponent memory, {"seen", "last"} as
-    rs_memory.PublicMemory.view() gives it. `live` / `units` default to LIVE / UNITS; with
-    units "vision" (and not live) the row also has "unit_form", and VC must be set (_setup)."""
+    rs_memory.PublicMemory.view() gives it. `live` / `units` / `visibility` default to LIVE /
+    UNITS / VISIBILITY; with units "vision" (and not live) the row also has "unit_form", and VC
+    must be set (_setup). With visibility "public" (E12) the enemy units `team`'s screen does not
+    show (seen_by) are left out and the row also has "unit_burrow", 1.0 for a unit tunnelling
+    now (burrowing); VisibilityError when the engine reports no status_flags."""
     live = LIVE if live is None else live
     units = unit_mode(UNITS if units is None else units)
+    public = visibility_mode(VISIBILITY if visibility is None else visibility) == VIS_PUBLIC
     vision = not live and units == UNITS_VISION
     if vision and VC is None:
         raise RuntimeError("--units vision rows need the class lookup: set UNITS = 'vision' "
                            "before _setup(), which fills VC")
     forms = np.zeros(MAX_UNITS, dtype=np.float16) if vision else None
+    burrow = np.zeros(MAX_UNITS, dtype=np.float16) if public else None
     ents = [e for e in state["entities"] if e[F["tower_slot"]] < 0 and e[F["hp"]] > 0]
+    if public:
+        # E12: only what `team`'s screen shows, before the sort and the MAX_UNITS cut, so the
+        # units shown take the places of the units left out.
+        ents = [e for e in ents if seen_by(e, team)]
     king = next((e for e in state["entities"]
                  if e[F["team"]] == team and e[F["tower_slot"]] == 0), None)
     # A destroyed king (a lookahead copy can end the battle) has no entity;
@@ -290,6 +416,8 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None):
                         e[F["hp"]] / max(1, e[F["max_hp"]]), 1.0 if e[F["flying"]] else 0.0,
                         1.0 if e[F["kind"]] == 1 else 0.0,
                         1.0 if e[F["deploy_ticks"]] > 0 else 0.0)
+        if public:
+            burrow[k] = 1.0 if burrowing(e) else 0.0
     p = state["players"][team]
     hand = [c + 2 for c in p["hand"][:4]] + [0] * (4 - len(p["hand"][:4]))
     opp = 1 - team
@@ -311,6 +439,8 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None):
     }
     if vision:
         row["unit_form"] = forms
+    if public:
+        row["unit_burrow"] = burrow
     return row
 
 
@@ -457,7 +587,7 @@ SCHEMA = "rs_rows/legacy"
 
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
-                 opp_memory=None, classes=None):
+                 opp_memory=None, classes=None, visibility=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -482,6 +612,10 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           with `classes` (a vision_classes.ClassTable, --units vision):
                           "vision", the table's digest, VISION_FIELDS; n_units and units
                           then count and list the classes (class name -> id + 2)
+      visibility, visibility_rule
+                          with `visibility` "public" (E12): "public" and visibility_rule(),
+                          and VISIBILITY_FIELDS in extra_columns (after VISION_FIELDS);
+                          "legacy" (or None) adds nothing
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -490,6 +624,7 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     vision = classes is not None
     if vision:
         unit_mode(UNITS_VISION, live)
+    public = visibility is not None and visibility_mode(visibility) == VIS_PUBLIC
     rec = {
         "n_cards": len(cat) + 2,
         "n_units": ((len(cat) + 2) if live else (len(classes) + 2) if vision
@@ -512,20 +647,27 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     if vision:
         rec["units_mode"] = UNITS_VISION
         rec["vision_classes_digest"] = classes.digest
-        rec["extra_columns"] = list(VISION_FIELDS)
+    if public:
+        rec["visibility"] = VIS_PUBLIC
+        rec["visibility_rule"] = visibility_rule()
+    extra = (list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
+    if extra:
+        rec["extra_columns"] = extra
     return rec
 
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
-          mem_lag=None):
+          mem_lag=None, visibility=None):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` as --units / --mem-lag, kept as UNITS / MEM_LAG for this process
-    (None: keep the module's); main passes both to every worker, as it passes `live`."""
-    global LIVE, OUT, UNITS, MEM_LAG
+    `units` / `mem_lag` / `visibility` as --units / --mem-lag / --visibility, kept as UNITS /
+    MEM_LAG / VISIBILITY for this process (None: keep the module's); main passes all three to
+    every worker, as it passes `live`."""
+    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
-    LIVE, UNITS, MEM_LAG = live, units, lag
+    vis = visibility_mode(VISIBILITY if visibility is None else visibility)
+    LIVE, UNITS, MEM_LAG, VISIBILITY = live, units, lag, vis
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
@@ -543,7 +685,8 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         rows += r
         tags += [tag] * len(r)
     if rows:
-        fields = FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
+        fields = (FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
+                  + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ()))
         data = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in fields}
         act = np.asarray([r["action"] for r in rows], dtype=np.int16)
         data["act_card"], data["act_x"], data["act_y"] = act[:, 0], act[:, 1], act[:, 2]
@@ -566,6 +709,10 @@ def main() -> int:
                     help="unit tokens: RoyaleSim unit types (default, as before) or the vision "
                          "classes of data/vision/classes.json, plus a unit_form column")
     add_mem_lag_arg(ap)
+    ap.add_argument("--visibility", choices=VISIBILITY_MODES, default=VIS_LEGACY,
+                    help="which units a row shows: 'legacy' (default) every living unit, as "
+                         "before; 'public' what the acting player's screen shows (no invisible "
+                         "or hidden enemy; a tunnelling unit kept, with a unit_burrow column)")
     ap.add_argument("--out", type=Path, default=None)
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
@@ -575,9 +722,9 @@ def main() -> int:
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
-    global OUT, LIVE, UNITS, MEM_LAG
+    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY
     LIVE = args.live_compat
-    UNITS, MEM_LAG = args.units, args.mem_lag
+    UNITS, MEM_LAG, VISIBILITY = args.units, args.mem_lag, args.visibility
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
@@ -588,6 +735,7 @@ def main() -> int:
     card_map = rs_cards.describe(names)
     print(f"cards:  {rs_cards.summary(names)}", flush=True)
     print(f"memory: {describe_memory(MEM_LAG)}", flush=True)
+    print(f"seen:   {describe_visibility(VISIBILITY)}", flush=True)
     if UNITS == UNITS_VISION:
         print(f"units:  vision classes, {VCT.describe()}", flush=True)
         if VC.unknown:
@@ -628,13 +776,13 @@ def main() -> int:
         cat, unit_types, cfg, fp, card_map, LIVE,
         version=getattr(royalesim, "__version__", "?"),
         classes=VCT if UNITS == UNITS_VISION else None,
-        **memory_vocab(MEM_LAG))), encoding="utf-8")
+        **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY))), encoding="utf-8")
     batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
     total, skipped = 0, {}
     with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
         futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
-                            mem_lag=MEM_LAG)
+                            mem_lag=MEM_LAG, visibility=VISIBILITY)
                 for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
             bid, rows, sk = f.result()

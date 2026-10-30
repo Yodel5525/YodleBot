@@ -48,6 +48,16 @@ blocked (RoyaleSim refuses them CARD_PENDING), a card with no legal tile hands o
 one, no wait at 9.5 elixir, and the Cannon's lane guard. A run that is not legacy says so in its
 name; reports/rs_ghost.jsonl then records "decide".
 
+Visibility (E12, tools/rs_rows.py --visibility): each checkpoint seat sees what its rows showed,
+the "visibility" of its meta (vocab.json; absent, as in every checkpoint before E12: legacy,
+every living unit). `--visibility legacy|public` overrides that for every checkpoint seat.
+Under public the seat's rows (RSAgent.act, RSSearchAgent), RSAgent.rebuilt (the live look-ahead:
+an enemy the screen does not show is not spawned) and aim_spell leave out the enemy units with
+STATUS_INVISIBLE or STATUS_HIDDEN (rs_rows.seen_by), and the rows carry unit_burrow. The match
+battle, the ghost and the engine's own look-ahead copy are not filtered: they are the battle,
+not a view of it. A run given --visibility says so in its name; reports/rs_ghost.jsonl then
+records "visibility".
+
 The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
 """
 from __future__ import annotations
@@ -83,6 +93,14 @@ def to_world(ox, oy, team):
     return (ox, 32_000 - oy) if team == 0 else (18_000 - ox, oy)
 
 
+def seat_visibility(agent) -> str:
+    """The --visibility a seat sees with (module doc): its `visibility` (RSAgent: its
+    checkpoint's, or the --visibility override), else rs_rows.VISIBILITY. Read with getattr,
+    so a plain namespace standing in for an agent (RSAgent.rebuilt(ns, ...)) works too."""
+    vis = getattr(agent, "visibility", None)
+    return RR.visibility_mode(RR.VISIBILITY if vis is None else vis)
+
+
 class RSAgent:
     lead = 0      # ticks to look ahead before deciding (delay compensation)
     # The engine config of the battles this agent builds itself (rebuilt look-aheads, the
@@ -92,6 +110,9 @@ class RSAgent:
     # MODE_LIVE, the live runner's. last_decision is the rs_decide.Decision of the last act.
     decide_mode = rs_decide.MODE_LEGACY
     last_decision = None
+    # What this seat's rows show (rs_rows.VISIBILITY_MODES): __init__ reads the checkpoint's
+    # (rs_rows.visibility_of), play() sets --visibility over it; None: rs_rows.VISIBILITY.
+    visibility = None
 
     _CAT = None
 
@@ -109,11 +130,15 @@ class RSAgent:
     def aim_spell(self, order, state, team, card, sub, top=5):
         """Among the model's top tiles for a spell, the one whose radius holds
         the most enemy hit points on the visible board. The model picks the
-        spell and the neighbourhood; this only corrects the aim. Public only."""
+        spell and the neighbourhood; this only corrects the aim. Public only: under
+        --visibility public an enemy the screen does not show (rs_rows.seen_by) counts no
+        hit points."""
         F = RR.F
         radius = (RSAgent._CAT[card][4] or 2500) / 1000          # tiles
+        public = seat_visibility(self) == RR.VIS_PUBLIC
         enemies = [(e[F["x"]] / sub / 1000, e[F["y"]] / sub / 1000, e[F["hp"]])
-                   for e in state["entities"] if e[F["team"]] != team and e[F["hp"]] > 0]
+                   for e in state["entities"] if e[F["team"]] != team and e[F["hp"]] > 0
+                   and (not public or RR.seen_by(e, team, F))]
         if not enemies:
             return order
         best, best_hp = None, 0.0
@@ -257,8 +282,11 @@ class RSAgent:
         elixir. The opponent's elixir is unknown and set to 0 (it makes no plays
         in the lookahead anyway). Lost: spells and projectiles in flight, attack
         timers, targets, deploy timers - which is exactly what this measures.
+        Under --visibility public (seat_visibility) an enemy unit the screen does
+        not show (rs_rows.seen_by: invisible or hidden) is not spawned either.
         """
         F = RR.F
+        public = seat_visibility(self) == RR.VIS_PUBLIC
         me = state["players"][team]
         deck = list(me["deck"])
         hand = list(me["hand"])
@@ -280,6 +308,8 @@ class RSAgent:
         for e in state["entities"]:
             if e[F["tower_slot"]] >= 0 or e[F["hp"]] <= 0:
                 continue
+            if public and not RR.seen_by(e, team, F):
+                continue        # E12: not on the screen, so not in the live rebuild
             # A unit reports the card that made it, so a Witch's skeleton
             # would be rebuilt as a Witch. Rebuild it as the card whose own
             # unit it is; skip a unit no card produces.
@@ -333,6 +363,8 @@ class RSAgent:
         if units != RR.UNITS_TYPES:
             raise ValueError(f"{ckpt}: a --units {units} checkpoint; rs_eval builds "
                              f"--units {RR.UNITS_TYPES} rows only")
+        # E12: the rows it trained on showed every unit (legacy) or the screen's (public).
+        self.visibility = RR.visibility_of(meta)
         # A live-compatible checkpoint was trained on card-id unit tokens.
         self.live = bool(meta.get("live_compat", False))
         self.rng = np.random.default_rng(seed)
@@ -391,7 +423,8 @@ class RSAgent:
             self.ahead(battle, state)        # keep the velocity memory current
             return None
         view = self.ahead(battle, state)
-        row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live)
+        row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live,
+                         visibility=self.visibility)
         aim = self._spell_aim(view, team, sub) if getattr(self, "spell_aim", False) else None
         # Masks, wait cadence, slot and tile: tools/rs_decide.decide, on the present state
         # (hand, elixir, our pending plays), legality from check_deploy on this battle.
@@ -450,7 +483,7 @@ class RSSearchAgent(RSAgent):
         self.rebuild = rebuild
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
-        row = RR.obs_row(state, team, sub, mem, tick, live=self.live)
+        row = RR.obs_row(state, team, sub, mem, tick, live=self.live, visibility=self.visibility)
         b = self.batch(row)
         with self.torch.no_grad():
             gate, _, _ = self.model(b, card_ids=b["hand"][:, 0].clamp(min=0))
@@ -535,7 +568,8 @@ class RSSearchAgent(RSAgent):
                 after_state = json.loads(sim.state_json())
                 after = RR.towers_vec(after_state, team)
                 swing = float((before[3:] - after[3:]).sum() - (before[:3] - after[:3]).sum())
-                arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live)
+                arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live,
+                                  visibility=self.visibility)
                 with self.torch.no_grad():
                     _, _, v = self.model(self.batch(arow), card_ids=self.batch(arow)["hand"][:, 0].clamp(min=0))
                 score = swing + float(v[0, 0]) + self.prior * logp
@@ -546,7 +580,8 @@ class RSSearchAgent(RSAgent):
             after_state = json.loads(sim.state_json())
             after = RR.towers_vec(after_state, team)
             swing = float((before[3:] - after[3:]).sum() - (before[:3] - after[:3]).sum())
-            arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live)
+            arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live,
+                              visibility=self.visibility)
             with self.torch.no_grad():
                 _, _, v = self.model(self.batch(arow), card_ids=self.batch(arow)["hand"][:, 0].clamp(min=0))
             score = swing + float(v[0, 0]) + self.prior * logp
@@ -578,10 +613,12 @@ def split_results(results):
 
 def play(args):
     """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
-    shadow, spell_aim, engine, mem_lag, decide]); `engine` (an rs_engine config's to_json())
-    becomes this process's rs_engine.active() config, else the active one is used. `mem_lag` as
-    --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc). `decide` as --decide
-    (missing or None: legacy), for both RSAgent seats."""
+    shadow, spell_aim, engine, mem_lag, decide, visibility]); `engine` (an rs_engine config's
+    to_json()) becomes this process's rs_engine.active() config, else the active one is used.
+    `mem_lag` as --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc). `decide` as
+    --decide (missing or None: legacy), for both RSAgent seats. `visibility` as --visibility
+    (missing or None: each RSAgent seat keeps its checkpoint's; module doc); a seat that sees
+    public checks royalesim.STATUS_BITS first (rs_rows.check_status_bits)."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
@@ -589,6 +626,9 @@ def play(args):
     if decide_mode not in (rs_decide.MODE_LEGACY, rs_decide.MODE_LIVE):
         raise ValueError(f"decide: {rs_decide.MODE_LEGACY!r} or {rs_decide.MODE_LIVE!r}, "
                          f"got {decide_mode!r}")
+    visibility = args[13] if len(args) > 13 else None
+    if visibility is not None:
+        RR.visibility_mode(visibility)
     mem_lag = RR.mem_lag_value(args[11] if len(args) > 11 and args[11] is not None
                                else rs_memory.BOARD_LAG)
     legacy = mem_lag == RR.MEM_LEGACY
@@ -677,6 +717,13 @@ def play(args):
     if opponent is not None:
         opponent.engine = cfg
         opponent.decide_mode = decide_mode
+    for seat in (agent, opponent):
+        if seat is None:
+            continue
+        if visibility is not None:
+            seat.visibility = visibility
+        if seat_visibility(seat) == RR.VIS_PUBLIC:
+            RR.check_status_bits(royalesim)
     scripted = [(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]
                 if (mode_ == "pro" or rs[s] == ghost_team) and not
                 (opponent is not None and rs[s] == ghost_team)]
@@ -781,6 +828,11 @@ def main() -> int:
                          "(default) as this tool always decided; 'live' the live runner's "
                          "(pending-slot mask, next card when no tile is legal, cap rule, lane "
                          "guard). --search keeps its own rule")
+    ap.add_argument("--visibility", choices=RR.VISIBILITY_MODES, default=None,
+                    help="which units the checkpoint seats see (tools/rs_rows.py --visibility); "
+                         "default: each checkpoint's own (its vocab 'visibility'; legacy before "
+                         "E12). 'legacy' every living unit; 'public' no invisible or hidden "
+                         "enemy, in the rows, the rebuilt look-ahead and spell aim")
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     try:
@@ -832,7 +884,7 @@ def main() -> int:
         rows, skipped = split_results(list(pool.map(
             play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
                     args.hold_pending, args.shadow, args.spell_aim, cfg.to_json(), args.mem_lag,
-                    args.decide)
+                    args.decide, args.visibility)
                    for k, t in enumerate(picked)])))
     if skipped:
         print(f"  skipped matches: {dict(skipped)} (orient = a side's troop plays are off "
@@ -851,6 +903,7 @@ def main() -> int:
             + (" spell-aim" if args.spell_aim else "")
             + (f" mem-lag {args.mem_lag}" if args.mem_lag != rs_memory.BOARD_LAG else "")
             + (f" decide {args.decide}" if args.decide != rs_decide.MODE_LEGACY else "")
+            + (f" visibility {args.visibility}" if args.visibility is not None else "")
             + (f" vs reactive {Path(args.opponent_ckpt).parent.name}" if args.opponent_ckpt else " vs ghost"))
     real_w = sum(r["real"] == "win" for r in rows)
     print(f"  real result of the Hog player in these matches: {real_w}/{len(rows)} "
@@ -868,6 +921,8 @@ def main() -> int:
         record["skipped"] = dict(skipped)
     if args.decide != rs_decide.MODE_LEGACY:     # likewise: a legacy run writes what it did
         record["decide"] = args.decide
+    if args.visibility is not None:              # likewise: only when given
+        record["visibility"] = args.visibility
     with out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return 0
