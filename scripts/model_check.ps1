@@ -457,7 +457,12 @@ foreach ($m in $need) {
         Stop-Run ("ERROR: {0} is missing. live_big_hog and live_big come from scripts\first_model.ps1 (runbook section 14), dt_big_hog_np from scripts\dt_diagnose.ps1 (section 19), v2_hog_20k and v2_hog from scripts\third_model.ps1 (section 20)." -f $m.Full)
     }
 }
-foreach ($m in @($models) + @($championModel)) {
+# The checkpoints and the champion as one plain array. Not '@($models) + @($championModel)':
+# with $models a List[object], Windows PowerShell 5.1 throws 'Argument types do not match'
+# there (seen on the owner's PC, 2026-10-30) and skips the loop.
+$checkModels = @($models | ForEach-Object { $_ })
+$checkModels += $championModel
+foreach ($m in $checkModels) {
     if (-not [regex]::IsMatch($m.Name, '^[A-Za-z0-9_.-]+$')) {
         Stop-Run ("ERROR: {0}: the name '{1}' made from its path is not letters, digits, '.', '_' and '-' only; move the checkpoint into a folder with such a name." -f $m.Full, $m.Name)
     }
@@ -465,7 +470,7 @@ foreach ($m in @($models) + @($championModel)) {
 # One name, one checkpoint: the labels and the wait_keep copies (runs\tokens\<name>_wkNNN) are
 # named after it, so two files with one name would share a copy folder.
 $byName = @{}
-foreach ($m in @($models) + @($championModel)) {
+foreach ($m in $checkModels) {
     $nameKey = $m.Name.ToLowerInvariant()
     if ($byName.ContainsKey($nameKey) -and $byName[$nameKey].Full -ine $m.Full) {
         Stop-Run ("ERROR: {0} and {1} both have the name '{2}' (made from their paths): their labels and wait_keep copies (runs\tokens\{2}_wkNNN) would mix. Check them in separate runs, or move one into a folder with another name." -f $byName[$nameKey].Rel, $m.Rel, $m.Name)

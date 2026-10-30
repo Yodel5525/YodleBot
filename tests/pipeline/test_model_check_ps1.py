@@ -186,6 +186,22 @@ def test_no_pipeline_chain_operators():
     assert "&&" not in text and "||" not in text
 
 
+def test_no_addition_onto_a_generic_list():
+    # On the owner's PC (Windows PowerShell 5.1, 2026-10-30)
+    # 'foreach ($m in @($models) + @($championModel))', with $models a List[object], threw
+    # 'Argument types do not match' and skipped the loop: the name checks never ran. The script
+    # adds onto plain arrays only (@($list | ForEach-Object { $_ }) first, then +=).
+    code = _strip(_text())
+    lists = set(re.findall(r"\$(\w+)\s*=\s*New-Object\s+System\.Collections\.Generic\.List", code))
+    assert lists >= {"models", "keepSpecs", "plan"}
+    for name in lists:
+        bad = re.compile(r"(@\(\s*)?\$" + name + r"\b\s*\)?\s*\+(?![+=])")
+        hits = [m.group(0) for m in bad.finditer(code)]
+        assert not hits, (name, hits)
+    assert "$checkModels = @($models | ForEach-Object { $_ })" in code
+    assert code.count("foreach ($m in $checkModels)") == 2
+
+
 def test_writes_files_without_a_bom():
     text = _text()
     assert "New-Object System.Text.UTF8Encoding($false)" in text
