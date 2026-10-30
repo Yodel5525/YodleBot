@@ -182,7 +182,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence  # noqa:
 
 import numpy as np  # noqa: E402
 
-from .detector import BAR_CLASSES, DetectorConfig, box_iou, crop_rect_for  # noqa: E402
+from .detector import BAR_CLASSES, DetectorConfig, box_iou, crop_rect_for, precision_kwargs  # noqa: E402
 from .geometry import (ArenaGeometry, HEIGHT_MT, RIVER_Y_MT, WIDTH_MT, check_frame_size, in_arena,  # noqa: E402
                        on_water)
 from .labels import (ENEMY_SIDE, TYPE_OBJECT, TYPE_PAD, TYPE_SPELL, TYPE_TOWER, TYPE_UI, TYPE_UNIT,  # noqa: E402
@@ -587,7 +587,8 @@ class LowConfPass:
     live detector sees (crop_rect_for), each with the side its own class name carries.
 
     model: anything with `.names` and ultralytics' `.predict(source=bgr, imgsz=, conf=, iou=,
-    max_det=, device=, half=, verbose=)` (a YOLO, or a fake in tests). config: the live
+    max_det=, device=, quantize=, verbose=)` (`half=` before ultralytics 8.4.80, as the live
+    detector: detector.precision_kwargs; a YOLO, or a fake in tests). config: the live
     DetectorConfig whose crop, imgsz, NMS IoU and board margins are kept (conf, max_det and
     cross_class_iou are replaced). from_detector(det) shares a loaded Detector's model.
     ultralytics updates a cached predictor's arguments on every call, so the live pass and
@@ -608,6 +609,7 @@ class LowConfPass:
         if half is None:
             half = (self.device != "cpu") if self.config.half is None else bool(self.config.half)
         self.half = bool(half)
+        self.precision = precision_kwargs(self.half)   # predict()'s quantize= (half= before 8.4.80)
         self._names: dict[int, tuple[str, int | None, Any]] = {}
         for idx, name in sorted(_model_names(model).items()):
             base_name, side = split_side(name)
@@ -645,7 +647,7 @@ class LowConfPass:
         crop = np.ascontiguousarray(img[y0:y1, x0:x1, 2::-1])         # RGB -> BGR, as the live detector
         cfg = self.config
         out = self.model.predict(source=crop, imgsz=cfg.imgsz, conf=cfg.conf, iou=cfg.iou, max_det=cfg.max_det,
-                                 device=self.device, half=self.half, verbose=False)
+                                 device=self.device, verbose=False, **self.precision)
         res = out[0] if isinstance(out, (list, tuple)) else out
         boxes = getattr(res, "boxes", None) if res is not None else None
         xyxy = _as_array(getattr(boxes, "xyxy", None), (4,))

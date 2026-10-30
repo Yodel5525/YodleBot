@@ -45,6 +45,8 @@ root; scripts/train_detector.py writes it), logs the path and its SHA-256, and
 refuses a file whose SHA-256 differs from the pinned or expected one. The
 device comes from torch.cuda (first GPU, half precision) unless given.
 ultralytics and torch are imported lazily, inside Detector.load / pick_device.
+Half precision reaches predict() as `quantize=16` on ultralytics 8.4.80 and
+later (the pinned 8.4.192), `half=True` before (precision_kwargs).
 
     from scripts.vision.detector import Detector
     det = Detector.load()                                  # pinned weights
@@ -311,6 +313,35 @@ def _yolo_factory(path: str):
     return YOLO(path)
 
 
+def _ultralytics_cfg_defaults() -> Mapping[str, Any]:
+    """ultralytics' DEFAULT_CFG_DICT when ultralytics is imported, else {}. It is never
+    imported here: a loaded YOLO has imported it (`import ultralytics` imports
+    ultralytics.utils, which defines DEFAULT_CFG_DICT, first); a fake model in tests has not."""
+    defaults = getattr(sys.modules.get("ultralytics.utils"), "DEFAULT_CFG_DICT", None)
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def precision_kwargs(half: bool, defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """predict()'s precision keyword for FP16 (`half`) or FP32 inference, in this ultralytics' terms.
+
+    ultralytics 8.4.80 replaced the bool `half` with `quantize` (16 = FP16, None = FP32). It
+    still takes `half`, but cfg._handle_deprecation turns it into `quantize` first (True -> 16,
+    False -> None) and logs "'half' is deprecated and will be removed in the future. Use
+    'quantize' instead." on every predict() call: once per frame in the live loop. Passing
+    `quantize` itself is the same inference (the predictor builds AutoBackend(fp16=quantize ==
+    16): FP16 weights and inputs on CUDA, FP32 on the CPU either way) without the warning.
+    Before 8.4.80 the config has `half` and no `quantize` (which predict() would refuse as
+    not a valid argument): {"half": half}, as always.
+
+    defaults: ultralytics' DEFAULT_CFG_DICT; None reads the imported ultralytics' one
+    (_ultralytics_cfg_defaults); with none (fakes in tests) the pinned 8.4.192's keyword."""
+    if defaults is None:
+        defaults = _ultralytics_cfg_defaults()
+    if "half" in defaults and "quantize" not in defaults:
+        return {"half": bool(half)}
+    return {"quantize": 16 if half else None}
+
+
 # ---------------------------------------------------------------------------
 # results
 # ---------------------------------------------------------------------------
@@ -464,7 +495,8 @@ class Detector:
     """A YOLO model on the arena crop, read through the vision class list.
 
     model: anything with `.names` ({index: name}) and
-    `.predict(source=bgr, imgsz=, conf=, iou=, max_det=, device=, half=, verbose=)`
+    `.predict(source=bgr, imgsz=, conf=, iou=, max_det=, device=, quantize=, verbose=)`
+    (`half=` in place of `quantize=` before ultralytics 8.4.80: precision_kwargs)
     returning a list whose first item has `.boxes` with `.xyxy`, `.conf` and
     `.cls` (an ultralytics YOLO, or a fake in tests).
     """
@@ -480,6 +512,7 @@ class Detector:
         self.device = str(device)
         self.device_desc = device_desc or self.device
         self.half = (self.device != "cpu") if self.config.half is None else bool(self.config.half)
+        self.precision = precision_kwargs(self.half)   # predict()'s quantize= (half= before 8.4.80)
         self.weights = None if weights is None else Path(weights)
         self.sha256 = sha256
         self.unresolved: Counter = Counter()    # unknown detector name -> boxes seen
@@ -517,8 +550,9 @@ class Detector:
         model = (model_factory or _yolo_factory)(str(path))
         det = cls(model, geometry=geometry, table=table, config=config, device=dev,
                   device_desc=desc, weights=path, sha256=digest)
-        log.info("detector weights %s sha256 %s device %s (%d model classes, side %s, half %s)",
-                 path, digest, desc, len(det._names), det.side_mode, det.half)
+        log.info("detector weights %s sha256 %s device %s (%d model classes, side %s, half %s: predict %s)",
+                 path, digest, desc, len(det._names), det.side_mode, det.half,
+                 ", ".join(f"{k}={v}" for k, v in det.precision.items()))
         return det
 
     def info(self) -> dict[str, Any]:
@@ -564,8 +598,8 @@ class Detector:
         cfg = self.config
         try:
             out = self.model.predict(source=crop_bgr, imgsz=cfg.imgsz, conf=cfg.conf, iou=cfg.iou,
-                                     max_det=cfg.max_det, device=self.device, half=self.half,
-                                     verbose=False)
+                                     max_det=cfg.max_det, device=self.device, verbose=False,
+                                     **self.precision)
         except Exception as exc:
             raise DetectorError(f"predict failed: {type(exc).__name__}: {exc}") from exc
         res = out[0] if isinstance(out, (list, tuple)) else out

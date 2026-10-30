@@ -164,6 +164,23 @@ def detector(model, **cfg) -> D.Detector:
     return D.Detector(model, geometry=GEOM, table=TABLE, config=D.DetectorConfig(**cfg))
 
 
+#: The precision keys of ultralytics' DEFAULT_CFG_DICT: 8.4.80 and later (the pinned 8.4.192:
+#: `quantize`; `half` is only a deprecated alias of it) and before 8.4.80 (`half`, no `quantize`).
+UL_QUANTIZE = {"quantize": None}
+UL_HALF = {"half": False, "int8": False}
+
+
+@pytest.fixture
+def ultralytics_cfg(monkeypatch):
+    """The ultralytics config the detector reads its precision keyword from: the pinned
+    8.4.192's unless the test calls the fixture's value with another (UL_HALF). Fixed here so
+    the venv (ultralytics imported or not, which version) cannot change the predict kwargs."""
+    def use(defaults):
+        monkeypatch.setattr(D, "_ultralytics_cfg_defaults", lambda: dict(defaults))
+    use(UL_QUANTIZE)
+    return use
+
+
 def frame(w=1080, h=1920) -> np.ndarray:
     return np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -318,7 +335,7 @@ def test_shipped_class_list_crosswalk_round_trip_for_hog26():
 # the detector on a fake model
 # ---------------------------------------------------------------------------
 
-def test_detector_crops_the_arena_and_feeds_bgr():
+def test_detector_crops_the_arena_and_feeds_bgr(ultralytics_cfg):
     model = FakeModel(joint_names())
     det = detector(model)
     img = frame()
@@ -330,8 +347,55 @@ def test_detector_crops_the_arena_and_feeds_bgr():
     assert tuple(source[100 - 68, 200 - 27]) == (30, 20, 10)   # BGR, offset by the crop
     assert source.flags["C_CONTIGUOUS"]
     assert kwargs == {"imgsz": 640, "conf": 0.35, "iou": 0.6, "max_det": 150, "device": "cpu",
-                      "half": False, "verbose": False}
+                      "quantize": None, "verbose": False}
     assert res.detections == [] and res.raw_boxes == 0
+
+
+def test_fp16_reaches_predict_as_quantize_not_the_deprecated_half(ultralytics_cfg):
+    """ultralytics 8.4.80+ maps predict(half=True) onto quantize=16 and logs "'half' is
+    deprecated ..." on every call (once per live frame); the detector passes quantize itself:
+    16 (FP16) where it used to pass half=True, None (FP32) where half=False. Before 8.4.80
+    (no `quantize` in its config) it still passes half. info() reports half either way."""
+    def kwargs_of(device, **cfg):
+        model = FakeModel(joint_names())
+        det = D.Detector(model, geometry=GEOM, table=TABLE, config=D.DetectorConfig(**cfg), device=device)
+        det.detect(frame())
+        det.detect(frame())
+        assert [kw for _, kw in model.calls] == [model.calls[0][1]] * 2      # the same every frame
+        return det, model.calls[0][1]
+
+    det, kw = kwargs_of("0")                               # CUDA, half by default
+    assert det.half is True and det.info()["half"] is True and det.precision == {"quantize": 16}
+    assert kw["quantize"] == 16 and "half" not in kw
+    assert kw == {"imgsz": 640, "conf": 0.35, "iou": 0.6, "max_det": 150, "device": "0",
+                  "quantize": 16, "verbose": False}
+    det, kw = kwargs_of("0", half=False)                   # CUDA, FP32 asked for
+    assert det.info()["half"] is False and kw["quantize"] is None and "half" not in kw
+    det, kw = kwargs_of("cpu", half=True)                  # ultralytics computes FP32 on the CPU anyway
+    assert det.info()["half"] is True and kw["quantize"] == 16 and "half" not in kw
+
+    ultralytics_cfg(UL_HALF)                               # an ultralytics before 8.4.80
+    det, kw = kwargs_of("0")
+    assert det.info()["half"] is True and kw["half"] is True and "quantize" not in kw
+    det, kw = kwargs_of("cpu")
+    assert det.info()["half"] is False and kw["half"] is False and "quantize" not in kw
+
+
+def test_precision_kwargs_follow_the_ultralytics_config(monkeypatch):
+    assert D.precision_kwargs(True, UL_QUANTIZE) == {"quantize": 16}
+    assert D.precision_kwargs(False, UL_QUANTIZE) == {"quantize": None}
+    assert D.precision_kwargs(True, {"half": False, "quantize": None}) == {"quantize": 16}
+    assert D.precision_kwargs(True, UL_HALF) == {"half": True}
+    assert D.precision_kwargs(False, UL_HALF) == {"half": False}
+    # The config comes from an ultralytics already imported (a loaded YOLO has imported it),
+    # never imported here; with none (a fake model) the pinned version's keyword.
+    monkeypatch.delitem(sys.modules, "ultralytics.utils", raising=False)
+    assert D._ultralytics_cfg_defaults() == {} and D.precision_kwargs(True) == {"quantize": 16}
+    monkeypatch.setitem(sys.modules, "ultralytics.utils", SimpleNamespace(DEFAULT_CFG_DICT=dict(UL_HALF)))
+    assert D._ultralytics_cfg_defaults() == UL_HALF and D.precision_kwargs(True) == {"half": True}
+    monkeypatch.setitem(sys.modules, "ultralytics.utils",
+                        SimpleNamespace(DEFAULT_CFG_DICT={"conf": None, "quantize": None}))
+    assert D.precision_kwargs(True) == {"quantize": 16} and D.precision_kwargs(False) == {"quantize": None}
 
 
 def test_detector_maps_filters_and_places_the_scene():
@@ -516,15 +580,16 @@ def test_pick_device_follows_torch_cuda():
     assert D.pick_device("1", torch_module=fake_torch(True))[0] == "1"
 
 
-def test_load_hashes_logs_and_checks_the_weights(tmp_path, caplog):
+def test_load_hashes_logs_and_checks_the_weights(tmp_path, caplog, ultralytics_cfg):
     weights = tmp_path / "best.pt"
     weights.write_bytes(b"weights v1")
     digest = hashlib.sha256(b"weights v1").hexdigest()
-    made = []
+    made, models = [], []
 
     def factory(path):
         made.append(path)
-        return FakeModel(joint_names())
+        models.append(FakeModel(joint_names()))
+        return models[-1]
 
     caplog.set_level(logging.INFO, logger="hastycr.vision.detector")
     det = D.Detector.load(weights, model_factory=factory, torch_module=fake_torch(True),
@@ -534,7 +599,12 @@ def test_load_hashes_logs_and_checks_the_weights(tmp_path, caplog):
     info = det.info()
     assert info["sha256"] == digest and info["weights"] == str(weights)
     assert info["model_classes"] == 20 and info["side_mode"] == "joint"
+    assert info["half"] is True and info["device"] == "0"
     assert digest in caplog.text and "best.pt" in caplog.text
+    assert "half True: predict quantize=16" in caplog.text
+    det.warmup()
+    _, kw = models[0].calls[0]
+    assert (kw["device"], kw["quantize"], "half" in kw) == ("0", 16, False)
     with pytest.raises(D.DetectorError, match="SHA-256"):
         D.Detector.load(weights, expected_sha256="0" * 64, model_factory=factory, device="cpu",
                         geometry=GEOM, table=TABLE)

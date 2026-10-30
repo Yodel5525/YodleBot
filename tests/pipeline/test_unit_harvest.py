@@ -298,7 +298,9 @@ class ListModel:
         return [SimpleNamespace(boxes=FakeBoxes(keep))]
 
 
-def test_low_conf_pass_keeps_both_sides_and_maps_the_crop():
+def test_low_conf_pass_keeps_both_sides_and_maps_the_crop(monkeypatch):
+    # the pinned ultralytics 8.4.192's config: precision goes to predict() as quantize, not half
+    monkeypatch.setattr(D, "_ultralytics_cfg_defaults", lambda: {"quantize": None})
     g = ArenaGeometry.builtin()                          # 1080x1920: crop (27, 68, 1047, 1518)
     names = {0: "Knight@ally", 1: "Knight@enemy", 2: "no-such-thing@enemy", 3: "bar@enemy", 4: "Fireball@enemy"}
 
@@ -316,8 +318,13 @@ def test_low_conf_pass_keeps_both_sides_and_maps_the_crop():
     boxes = lp.detect(np.zeros((1920, 1080, 3), np.uint8))
     shape, kw = model.calls[-1]
     assert shape == (1450, 1020, 3)
-    assert (kw["conf"], kw["max_det"], kw["iou"], kw["imgsz"], kw["device"], kw["half"]) == (0.05, 300, 0.6, 640,
-                                                                                            "cpu", False)
+    assert (kw["conf"], kw["max_det"], kw["iou"], kw["imgsz"], kw["device"], kw["quantize"]) == (
+        0.05, 300, 0.6, 640, "cpu", None)
+    assert "half" not in kw and lp.half is False
+    assert UH.LowConfPass(model, geometry=g, table=TABLE, device="0").precision == {"quantize": 16}
+    monkeypatch.setattr(D, "_ultralytics_cfg_defaults", lambda: {"half": False})     # before 8.4.80
+    assert UH.LowConfPass(model, geometry=g, table=TABLE, device="0").precision == {"half": True}
+    monkeypatch.setattr(D, "_ultralytics_cfg_defaults", lambda: {"quantize": None})
     got = [(b.cls, b.side, b.conf, b.type) for b in boxes]
     assert got == [("Knight", 1, 0.8, "unit"), ("Fireball", 1, 0.55, "spell"), ("bar", 1, 0.3, "ui"),
                    ("no-such-thing", 1, 0.2, "unknown"), ("Knight", 0, 0.1, "unit")]
