@@ -297,13 +297,17 @@ def with_release(w, *, good=True, sdist=None):
 
 
 def with_map_release(w, raw: bytes, *, sdist=True):
+    """PyPI gains royaleimitate 0.2.16: a wheel of `raw` and, unless sdist=False, an sdist.
+    Only the files the release lists are routed, so the check asking for one it does not list
+    fails the test."""
     ri = load("pypi_royaleimitate.json")
     files = {"royaleimitate-0.2.16.tar.gz": map_sdist("0.2.16", raw),
              "royaleimitate-0.2.16-py3-none-any.whl": map_wheel(raw)}
-    _fill(ri, files)
     if not sdist:
         ri["releases"]["0.2.16"] = [e for e in ri["releases"]["0.2.16"]
                                     if e["packagetype"] != "sdist"]
+        del files["royaleimitate-0.2.16.tar.gz"]
+    _fill(ri, files)
     w.web.json(PYPI_MAP, ri)
     for name, data in files.items():
         w.web.raw(_url_of(ri, name), data)

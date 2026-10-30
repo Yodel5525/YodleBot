@@ -183,9 +183,13 @@ def test_the_count_is_exact_only_when_every_play_can_have_been_seen():
     oe = PS.OpponentElixir(CATALOGUE, law=LAW)
     oe.record([play(GIANT, 100), play(GIANT, 120)])
     assert oe.view(120) == (0, False)
-    # no detector, or watching from after the deploy lockout (tick 90): never exact
+    # no detector, or watching from after the deploy lockout (tick 90) and one more displayed
+    # second (LATE_MARGIN_TICKS 20: a first clock reading of 2:55, tick 110, is in time): never
+    # exact
+    assert PS.DEPLOY_LOCKOUT_TICKS + PS.LATE_MARGIN_TICKS == 110
     assert PS.OpponentElixir(CATALOGUE, law=LAW, blind=True).view(100) == (7785, False)
-    assert PS.OpponentElixir(CATALOGUE, law=LAW, start_tick=91).view(100) == (7785, False)
+    assert PS.OpponentElixir(CATALOGUE, law=LAW, start_tick=111).view(100) == (7785, False)
+    assert PS.OpponentElixir(CATALOGUE, law=LAW, start_tick=110).view(100) == (7785, True)
     assert PS.OpponentElixir(CATALOGUE, law=LAW, start_tick=90).view(100) == (7785, True)
     assert PS.OpponentElixir(CATALOGUE, law=LAW, start_tick=None).view(100) == (7785, True)
     # a card the catalogue does not price is skipped, and the count is not exact

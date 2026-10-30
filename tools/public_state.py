@@ -103,7 +103,8 @@ always was) and row_inputs(state) gives obs_row's v2 keywords from it:
                exactness (the row's opp_exact) is the counter's (no unaffordable play, no Mirror
                with nothing to copy), and False for the whole battle when the bot cannot have
                seen every play: no detector (blind), watching from after the deploy lockout
-               (start_tick > 90), or a play of a card the catalogue does not price. An UNKNOWN
+               and one more displayed second (start_tick > 110: DEPLOY_LOCKOUT_TICKS +
+               LATE_MARGIN_TICKS), or a play of a card the catalogue does not price. An UNKNOWN
                play (card -1, N02) is paid its OppPlay.cost (the expected cost) and makes the
                count not exact too.
   own_pending  OwnTaps: the runner's own sent taps (card, slot, tap tick), each until the event
