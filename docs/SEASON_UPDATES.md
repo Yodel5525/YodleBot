@@ -505,7 +505,7 @@ Both export kinds are immutable and digest-named, in formats the existing code r
 
 - Tell the clan that the bot reads members' public decks and battle logs through the official API.
 - The data stays on the PC in gitignored folders. Exports contain decks only.
-- `data/ladder/battles_2p6.csv` is committed and carries 1,467 top players' names and tags (header `player_name,player_tag`). Moving it out of git is an owner decision.
+- `data/ladder/battles_2p6.csv` no longer carries the 1,467 top players' names and tags. The owner decided on 2026-10-30 to keep only the battle time, rating, rank, both decks, the crowns and the result. Older commits, and the original public repository, still hold the names. `tools/ladder_pull.py` output, which has tags, is gitignored.
 
 ## 8. Vision: hand-off to docs/NEW_CARDS_PLAN.md
 
@@ -623,11 +623,11 @@ U07 derives them. A test asserts that the derived sets equal today's sets on the
 
 ## 13. Decisions for the owner
 
-1. **API key.** Create one at developer.clashroyale.com, bound to the PC's IP, and save it as `.secrets\supercell_token`.
+1. **API key.** Decided 2026-10-30: yes. The owner creates one at developer.clashroyale.com, bound to the PC's IP, and saves it as `.secrets\supercell_token`. The key stays on the PC.
    - With a changing home IP, either edit the key when the IP changes, or use the RoyaleAPI proxy.
    - The proxy shows the token to a third party.
-2. **Clan courtesy.** Tell the clan that their public decks and battle logs are read. Decide whether that is fine.
-3. **The committed CSV.** Should `data/ladder/battles_2p6.csv` (1,467 top players' names and tags) move out of git?
+2. **Clan courtesy.** Decided 2026-10-30: yes. The owner tells the clan.
+3. **The committed CSV.** Decided 2026-10-30: names and tags are removed from `data/ladder/battles_2p6.csv`, and the decks stay.
 4. **New client builds.** WARN only, as proposed, or block taps until reviewed?
 5. **Live pointer.** May a carried checkpoint go live by itself after the smoke test? An RL champion always needs the gates.
 6. **Known gaps.** Keep playing while Evo Giant and Evo Mirror are simulated as base forms (from 2026-11-02 until RoyaleSim ships them)?

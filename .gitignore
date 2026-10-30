@@ -76,6 +76,11 @@ tmp/royale_profile/
 # API tokens: never committed.
 .secrets/
 
+# Official-API pulls (tools/ladder_pull.py): they carry player names and tags.
+data/ladder/ladder_battles.csv
+data/ladder/ladder_meta.json
+data/ladder/.scratch/
+
 # Downloaded official scrcpy binary distribution.
 tools/scrcpy/
 
