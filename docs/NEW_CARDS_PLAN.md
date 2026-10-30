@@ -1,6 +1,6 @@
 # New cards: detector and event coverage plan
 
-Status: plan, 2026-10-30. Work items are N01-N18 (section 9). The capture decks of 4.4 and 4.5 were rechosen from the clan's own battles on 2026-10-30 (section 4.8), then fitted to the main account's collection the same day (4.8.7). The forms the main account lacks come from clanmate friendlies (4.8.8).
+Status: plan, 2026-10-30. Work items are N01-N18 (section 9). **Built** (code on `sparring`, not yet run on the PC): N01, N02, N04-N14; N03 and N15-N18 are not. Round 0 (4.3) can now run end to end up to a confirmed gold set and the M0 baseline. The capture decks of 4.4 and 4.5 were rechosen from the clan's own battles on 2026-10-30 (section 4.8), then fitted to the main account's collection the same day (4.8.7). The forms the main account lacks come from clanmate friendlies (4.8.8).
 
 The problem, in the owner's words: the clanmates play a wide variety of decks, and most of them use one or more cards released since 2024. The live detector learns only from KataCR's 2024 frames.
 
@@ -354,10 +354,30 @@ The 2026-10-29 friendly (22,067 frames, about 4,414 images) has the main account
 
 **The 8 cards are known** (open question 1 is answered): boss-bandit, elite-barbarians, executioner, freeze, guards, hog-rider, minion-horde-ev1, zap. Yodle2's spar record in the pull matches all 8, forms included: the Minion Horde evo in slot 1, Boss Bandit in slot 2, and Elite Barbarians as a base card in slot 3.
 
+The commands, in order (PowerShell from `C:\hcr`, `$BB` as in the runbook; MuMu and the browser closed for the scan):
+
 ```powershell
-$R0 = 'reports\vision\gold'      # the copied session folder
-& $BB tools\vision_autolabel.py ingest $R0 --sid 20261029_R0_1 --role gold --capture natural --deck "boss-bandit,elite-barbarians,executioner,freeze,guards,hog-rider,minion-horde-ev1,zap" --client 16.635.1
+$R0  = 'reports\vision\gold\capture_20261029_195831'     # the copied session folder (it holds frames.jsonl)
+$SID = '20261029_R0_1'
+& $BB tools\vision_autolabel.py ingest $R0 --sid $SID --role gold --capture natural --deck "boss-bandit,elite-barbarians,executioner,freeze,guards,hog-rider,minion-horde-ev1,zap" --client 16.635.1
+& $BB tools\vision_autolabel.py scan $SID                  # live chain + harvest pass on the GPU, 10-20 min
+& $BB tools\vision_autolabel.py sheet $SID                 # open the sheet PNG(s) it names; the legend is printed
+& $BB tools\vision_autolabel.py label $SID --sheet 1 --map "0=3,1=3,2=x,5=s"   # every cluster: gold has no auto-accept
+& $BB tools\vision_autolabel.py sheet $SID                 # again while clusters are left or were split (s)
+& $BB tools\vision_autolabel.py label $SID --sheet 2 --map "0=BossBandit,1=o"
+& $BB tools\vision_autolabel.py emit $SID                  # gold: full-frame labels in <store>\$SID\gold, no image
+& $BB tools\vision_autolabel.py review $SID                # every gold track (about 10 page-A images) and page B
+& $BB tools\vision_autolabel.py mark $SID --review 1 --bad-tracks t17 --bad-frames 3,9   # or --review 1 alone
+& $BB tools\vision_autolabel.py label $SID --map "t17=AxeMan" --force   # after a mark: relabel, then emit --force, review
+& $BB tools\vision_autolabel.py plays $SID                 # the derived play list, numbered, with M0's read of each
+& $BB tools\vision_autolabel.py plays $SID --list 1 --bad-plays p12 --add-play "1:52=freeze" --confirm
+& $BB tools\vision_gap_eval.py baseline --gold $SID        # M0's numbers and reads; records M0 for every later gate
 ```
+
+- **Every track is labelled.** A gold emit is refused while a track is unlabelled (`--allow-pending` makes such tracks ignore regions; their plays are then missing, so `plays --confirm` needs `--allow-pending` too) or while a label is auto-accepted.
+- **Edits name the latest list** (`--list K`, printed by `plays`). An edit or `--confirm` is refused when the plays derived now differ from list K's: run `plays $SID` again and check the new list first.
+- `& $BB tools\vision_autolabel.py status` says what is left: an unlabelled track, a stale emit, a review not recorded, plays not confirmed.
+- Keep the gold raws: the gate replays them through the live chain.
 
 - **Its gap items:** Boss Bandit (no class), Zap and Freeze (thin), the Minion Horde evo (base class only). All four are also in capture decks (C; C and G; I; I), so Round 0 is their natural gold.
 - **The 10 GoldenKnight plays** the pinned detector reported. The deck has no Golden Knight, so none of them is one. Label each GoldenKnight cluster after looking at it: Boss Bandit, which has no class yet, is the expected answer. The tracker forces any label outside our deck to the enemy side (1.8), so some may be the main account's Executioner, Elite Barbarians or Guards (label them as those), or Yodle2's own units such as Hog Rider (label them `o`). Golden Knight is in no clanmate's ranked deck.
@@ -741,17 +761,31 @@ Clanmates play their own decks against Yodle2, recorded as training. Letters onl
 
 ## 5. Labelling steps and time
 
-The commands are those planned in N08-N12.
+The commands (N08-N13, built; `tools\vision_autolabel.py --help` and each subcommand's `--help` list the options):
 
 ```powershell
 & $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --deck "skeleton-barrel-ev1,electro-wizard-hero,skeleton-army-ev1,vines,...,rocket" --role auto --client 16.635.1
-& $BB tools\vision_autolabel.py scan $SID            # unattended, a few minutes on the GPU; MuMu closed
-& $BB tools\vision_autolabel.py sheet $SID           # writes the numbered contact sheet PNG and its legend
-& $BB tools\vision_autolabel.py label $SID --map "0=3,1=3,2=x,5=s"
-& $BB tools\vision_autolabel.py review $SID          # spot-check pages
-& $BB tools\vision_autolabel.py mark $SID --bad-tracks 17,40 --bad-frames 3,9
-& $BB tools\vision_autolabel.py plays $SID           # gold battles only: confirm the list of plays
+& $BB tools\vision_autolabel.py scan $SID            # unattended, 10-20 min on the GPU; MuMu closed
+& $BB tools\vision_autolabel.py sheet $SID           # writes the numbered contact sheet PNG(s) and prints the legend
+& $BB tools\vision_autolabel.py label $SID --sheet 1 --map "0=3,1=3,2=x,5=s"
+& $BB tools\vision_autolabel.py emit $SID            # training: images and boxes in <store>\$SID\emit; gold: labels only
+& $BB tools\vision_autolabel.py review $SID          # page A (tracks) and page B (frames)
+& $BB tools\vision_autolabel.py mark $SID --review 1 --bad-tracks t17,t40.1 --bad-frames 3,9
+& $BB tools\vision_autolabel.py emit $SID --force    # after a mark or a relabel (label ... --force)
+& $BB tools\vision_autolabel.py plays $SID           # gold battles only: then --list K [--bad-plays ...] [--add-play ...] --confirm
 ```
+
+Before the first fine-tune (N13, N14):
+
+```powershell
+& $BB tools\vision_autolabel.py labels --base tmp\yolo\detector_labels.json --pin-base   # once; commit data\vision\detector_extra_labels.json
+& $BB tools\vision_autolabel.py mix --name ft1       # KataCR + every fresh training emit (dev as val); gold never
+# then the train command mix prints (scripts\train_detector.py --data tmp\mix\ft1\cr_mix.yaml ... --no-pin), overnight
+& $BB tools\vision_gap_eval.py gate --candidate tmp\yolo\runs\ft1\weights\best.pt     # PASS / FAIL / INSUFFICIENT; never pins
+```
+
+- **Raws.** Keep a training session's raws and scan until review and mark are done: `emit --force` is refused while it would lose emitted images whose raws are gone (`--drop-missing` emits without them). Keep gold raws for good.
+- **Leftovers.** Emit masks what nobody labelled: unvetted live units and spells, and detector proposals of tracks no label holds (one of Yodle2's units the live model missed, a track too short for the sheet). On gold these are ignore regions.
 
 **The sheet.**
 - Each tile shows one cluster of tracks:
@@ -771,7 +805,7 @@ The commands are those planned in N08-N12.
 - Page B shows 24 random emitted frames, half from birth windows.
 - More than 2 bad frames in 24 names the clusters to recheck.
 
-**Gold battles.** Review every track, then confirm the derived play list. Delete wrong plays with `--bad-plays`, and add missed ones with `--add-play "1:52=Vines"`.
+**Gold battles.** Review every track, then confirm the derived play list. Delete wrong plays with `--bad-plays`, and add missed ones with `--add-play "1:52=Vines"`, naming the list the ids come from (`--list K`).
 
 **Owner time per battle (estimates):**
 
@@ -804,7 +838,10 @@ The commands are those planned in N08-N12.
 - **Dev:** used only for early stopping.
 - **Baseline:** tonight's model on the same data.
 
-`tools/vision_gap_eval.py` (N14) scores the baseline and the candidate on the same gold. It writes `report.md` and `gate.json`.
+`tools/vision_gap_eval.py` (N14) scores the baseline and the candidate on the same gold. It writes `report.md` and `gate.json` under `reports\vision\gate\`.
+- The first `baseline` run records tonight's model as M0 (`reports\vision\gate\m0.json`). The play-ID gain is always measured over M0; the regression checks compare with the current pin (`--baseline`, default the pin, its SHA-256 checked).
+- Side accuracy and our labels' recall count only owner-vetted boxes (the owner's labels and our `o` tracks). Our other boxes in gold are tonight's own pseudo-labels, so their agreement is reported as info.
+- The leak check trusts a candidate's `mix.json` only if it is the one the run trained on (`train_detector` records its SHA-1).
 
 ### 6.1 Detection
 
@@ -906,7 +943,7 @@ Tests go in `tests/pipeline`. They use synthetic fixtures and `FakeModel`-style 
 | N17 | Optional compositor for thin classes (KataCR logic port, MIT notice, fixed balancing, ×1.143 for KataCR sprites) | `tools/synth/compose.py` | N09, N11, N14 | same seed gives the same scene; occlusion drop rule on fixtures |
 | N18 | Optional deck prior for look-alike ties, perception-only, off by default | `scripts/vision/deck_prior.py`, `scripts/vision/events.py` | N02 | closure and cycle prior; the prior never reaches `PublicMemory` |
 
-**Order.**
+**Order.** Built: N01, N02 and N04-N14 (2026-10-30; the first PC test run of N11-N14 is pending). Not started: N03, N15-N18.
 - N01, N02, N04, N05 and N06 can start at once.
 - Round 0 needs N04, N05 and N08-N12.
 - The first fine-tune needs N13 and N14 as well.

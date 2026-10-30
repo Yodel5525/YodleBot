@@ -29,7 +29,9 @@ V09 additions:
 * When training ends, the SHA-256 of best.pt (and last.pt) is printed and
   written next to it (best.pt.sha256), with detector_manifest.json in the run
   folder, and best.pt is pinned for scripts/vision/detector.py
-  (<data root>/vision/detector_pin.json; `--no-pin` keeps the old pin).
+  (<data root>/vision/detector_pin.json; `--no-pin` keeps the old pin). The
+  manifest records the data yaml's SHA-1, and for a mix the SHA-1 and creation
+  time of its mix.json as the run started (the gate's leak check, N14).
 
 N06, fine-tunes (docs/NEW_CARDS_PLAN.md 2.3, 8 and risk 9): `--optimizer`,
 `--lr0`, `--cls-pw`, `--freeze` and `--warmup-bias-lr` reach ultralytics'
@@ -74,6 +76,7 @@ about 3.2e-5 for 310 classes (docs/NEW_CARDS_PLAN.md 8); pass --optimizer and --
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -284,6 +287,29 @@ def _label_set_digest(data_yaml: Path) -> Optional[str]:
         return None
 
 
+def _data_identity(data_yaml: Path) -> dict:
+    """What the run trains on, read when it starts: the data yaml's SHA-1 and, for a mix
+    (tools/vision_autolabel.py mix), the SHA-1 and "created" of the mix.json beside it. The gate's
+    leak check (tools/vision_gap_eval.py) compares them with the mix.json it finds later, so a mix
+    rebuilt after training cannot hide what the weights saw."""
+    out: dict = {}
+    try:
+        out["data_sha1"] = hashlib.sha1(Path(data_yaml).read_bytes()).hexdigest()
+    except OSError:
+        return out
+    mix = Path(data_yaml).parent / "mix.json"
+    try:
+        raw = mix.read_bytes()
+    except OSError:
+        return out
+    out["mix_sha1"] = hashlib.sha1(raw).hexdigest()
+    try:
+        out["mix_created"] = json.loads(raw.decode("utf-8-sig")).get("created")
+    except (ValueError, AttributeError):
+        out["mix_created"] = None
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Train the CR unit detector")
     parser.add_argument("--model", default="yolov8s.pt",
@@ -352,6 +378,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.data.exists():
         print(f"missing {args.data}; run scripts/prepare_yolo_dataset.py first")
         return 1
+    data_ids = _data_identity(args.data)
     print(f"device {device_desc}; model {args.model}, imgsz {args.imgsz}, batch {batch}, "
           f"epochs {args.epochs}, workers {args.workers}; data {args.data}")
     if overrides:
@@ -414,7 +441,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     manifest = {
         "weights": best.resolve().as_posix(), "sha256": digest,
         "last": last.resolve().as_posix() if last_digest else None, "last_sha256": last_digest,
-        "data": Path(args.data).resolve().as_posix(), "label_set_digest": _label_set_digest(args.data),
+        "data": Path(args.data).resolve().as_posix(), "label_set_digest": _label_set_digest(args.data), **data_ids,
         "model": args.model, "epochs": args.epochs, "imgsz": args.imgsz, "batch": batch,
         "device": device_desc, "versions": _versions(torch_module),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

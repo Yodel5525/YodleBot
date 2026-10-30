@@ -20,7 +20,8 @@ minutes per battle (HUD reads, 2 YOLO passes and 2 image decodes per image, then
 the harvest tracker in Python), and 150-300 MB of scan files per battle of about 4,400 images
 (scan_frames.jsonl keeps every harvest box at conf 0.05 or more, up to 300 per image;
 pass1.jsonl.tmp is as large again while pass 2 runs), so about 10 GB for the 36 Tier 1 and 2
-battles. The scan folder can be deleted once its labels are emitted (N11). The first line scans
+battles. The scan folder can be deleted once its labels are emitted and reviewed (N11, N12: a
+re-emit after `mark` or a relabel needs it). The first line scans
 a friendly that tools/vision_autolabel.py `ingest` (N08) put in its store
 (<store>/<sid>/recording); vision_autolabel's `scan <sid>` subcommand is meant to call
 scan_session(<store>/<sid>/recording, <store>/<sid>/scan) the same way.
@@ -146,6 +147,34 @@ N10 (analyze_scan; tools/vision_autolabel.py `sheet` and `label` drive it). Per 
 save_analysis / load_analysis keep it in the store, keyed by the scan's identity
 (scan_identity: SHA-1 of scan.json and tracks.json) and the settings.
 
+N11: propagate and emit (tools/vision_autolabel.py `emit` drives it; EmitConfig holds the
+settings). decide_parts reads what tracks.json says of each part of the sheet: a label, ? or
+a bad mark (masked), x (an effect: no box, no mask), o (ours), or nothing yet (pending).
+propagate_parts gives each decided part a box on every image of its harvest track between
+its first and last image: the linked live detection's box (the 0.35 one, nearer KataCR's
+convention), else the proposal's, sized by the median of `smooth_window` images that came
+from a detection (smooth_boxes; the bottom centre stays, or the centre for a spell); up to
+`max_gap` missing images between two of its images filled by interpolation (fill_gaps:
+labels and masks only, never across a battle or over one of our units); an image one of our
+live tracks held is left out (a position-only track can run through one of our units). A
+spell with a radius (DarkMagic 2.5, Vines 2.5, GoblinCurse 3.0 tiles) is its circle's box
+around the median centre on every image (circle_box, through the geometry). plan_frame
+turns one image into the boxes to write (enemy labels; Yodle2's units, towers, UI and
+objects as tonight's pseudo-labels) and the regions to mask (?, pending, bad marks, o parts
+with no Yodle2 read, every live unit or spell no decided part explains, and every leftover:
+a detector proposal at `leftover_conf` or more of a track no decided part holds there, such
+as one of Yodle2's units tonight's model missed or an enemy track too short for the sheet,
+where no box is kept or masked already), or the reason the image is dropped; feather_paste pastes the epoch background into the masks (grown by
+`mask_pad_tiles`, feathered over `feather_px`); crop_image, to_yolo and from_yolo give the
+live crop framing (detector.crop_rect_for); frame_yolo gives gold's full-frame rows. The
+scan folder must stay until emit (and any emit --force after review) is done.
+
+N12: review pages (tools/vision_autolabel.py `review` drives them). Page A is render_sheet over
+one tile per part (sheet_crop of the raw image with the propagated box, outlined in DIM_COLOUR
+for a filled image; text_tile where the raw is gone); page B is render_frames: whole frames
+(emitted crops, or gold's raw frames) scaled to a grid, with their boxes (draw_box, the label
+above each) and their masks or ignore regions outlined.
+
 Hard rules (CLAUDE.md): nothing here taps, captures, starts or touches the emulator, or reads
 game memory; it reads image files. Imports numpy and scripts/vision; tools/vision_replay.py
 (scripts/vision_play.py with it) only when a live chain is built, and the detector's
@@ -169,6 +198,7 @@ if __name__ == "__main__" and not __package__:
     __package__ = "scripts.vision"
 
 import argparse  # noqa: E402
+import bisect  # noqa: E402
 import dataclasses  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
@@ -178,7 +208,7 @@ from collections import Counter  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence  # noqa: E402
+from typing import Any, Callable, Container, Iterable, Iterator, Mapping, Sequence  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -187,7 +217,7 @@ from .geometry import (ArenaGeometry, HEIGHT_MT, RIVER_Y_MT, WIDTH_MT, check_fra
                        on_water)
 from .labels import (ENEMY_SIDE, TYPE_OBJECT, TYPE_PAD, TYPE_SPELL, TYPE_TOWER, TYPE_UI, TYPE_UNIT,  # noqa: E402
                      TYPE_UNKNOWN, load_class_table, resolve_label, split_side)
-from .record import (FRAMES_FILE, IMAGES_DIR, image_codec_available, list_sessions,  # noqa: E402
+from .record import (FRAMES_FILE, IMAGE_FORMATS, IMAGES_DIR, image_codec_available, list_sessions,  # noqa: E402
                      load_image, save_image)
 from .tracker import Observation, Tracker, TrackerConfig, observations_from_detections  # noqa: E402
 from .types import ENEMY_TEAM, FORM_BASE, OWN_TEAM, SCREEN_BATTLE, UNKNOWN_TEAM  # noqa: E402
@@ -582,6 +612,30 @@ def _cls_name(base: str, lab: Any) -> str:
     return str(base)
 
 
+def _form_flies(table: Any, lab: Any) -> bool:
+    """Whether a resolved label's class form flies (classes.json), False when unknown."""
+    try:
+        return bool(table.classes[lab.class_id].form(lab.form).flying)
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def flying_classes(table: Any) -> Callable[[str | None], bool]:
+    """name -> whether its class form flies, cached: harvest_pass places a live-only proposal
+    with it as LowConfPass places the harvest boxes, so one flyer's track is not 0.6 tile apart
+    between its detector and live-only images. (The live tracker places no class as flying.)"""
+    cache: dict[str, bool] = {}
+
+    def fly(name: str | None) -> bool:
+        if not name:
+            return False
+        if name not in cache:
+            lab = resolve_label(table, str(name))
+            cache[name] = lab.type == TYPE_UNIT and lab.class_id is not None and _form_flies(table, lab)
+        return cache[name]
+    return fly
+
+
 class LowConfPass:
     """The detector's weights at a low score (module doc, step 2): every box of the crop the
     live detector sees (crop_rect_for), each with the side its own class name carries.
@@ -631,10 +685,7 @@ class LowConfPass:
         return crop_rect_for(self.geometry, self.config, size)
 
     def _flying(self, lab: Any) -> bool:
-        try:
-            return bool(self.table.classes[lab.class_id].form(lab.form).flying)
-        except (IndexError, KeyError, TypeError, AttributeError):
-            return False
+        return _form_flies(self.table, lab)
 
     def detect(self, rgb: np.ndarray) -> list[RawBox]:
         """Every box of one HxWx3 RGB frame, strongest first, in frame pixels."""
@@ -1519,10 +1570,13 @@ class _LiveTrack:
 def harvest_pass(pass1: Path, frames_out: Path, *, session_dir: Path, epochs: Sequence[Epoch],
                  backgrounds: Mapping[str, np.ndarray], geometry: ArenaGeometry, sizes: SizeCache,
                  config: ScanConfig, load: Callable[[Path], np.ndarray] = load_image,
-                 log: Callable[[str], Any] = print, progress_every: int = 1000
+                 log: Callable[[str], Any] = print, progress_every: int = 1000,
+                 flying: Callable[[str | None], bool] | None = None
                  ) -> tuple[HarvestTracker, dict[str, _LiveTrack], Counter]:
     """Pass 2 (module doc): blobs, proposals and harvest tracks per battle-screen record of
-    `pass1`, written with the pass-1 fields to `frames_out`."""
+    `pass1`, written with the pass-1 fields to `frames_out`. flying(class name): whether a
+    live-only proposal stands under the geometry's flyer offset, as LowConfPass places the
+    harvest boxes (flying_classes; None: no class flies)."""
     cfg = config
     epoch_of = {n: ep.id for ep in epochs for n in ep.members}
     harvest = HarvestTracker(cfg.tracker)
@@ -1571,7 +1625,7 @@ def harvest_pass(pass1: Path, frames_out: Path, *, session_dir: Path, epochs: Se
                 if typ == TYPE_SPELL:
                     x, y = geometry.px_to_world((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0, _size)
                 else:
-                    x, y = geometry.ground_point(box, _size, cls=cls)
+                    x, y = geometry.ground_point(box, _size, cls=cls, flying=bool(flying and flying(cls)))
                 return float(x), float(y)
 
             props = merge_proposals(raw, blobs, live, config=cfg, ground=ground)
@@ -1718,10 +1772,12 @@ def scan_recording(recording: str | Path, out_dir: str | Path | None = None, *, 
         if cfg.blobs else {}
     t_bg = time.time()
     log(f"  background: {len(epochs)} epoch(s), {len(backgrounds)} fitted")
+    table = getattr(low_pass, "table", None) or getattr(live, "table", None)
     harvest, live_tracks, counts = harvest_pass(out / PASS1_TMP, out / SCAN_FRAMES, session_dir=session,
                                                 epochs=epochs, backgrounds=backgrounds, geometry=geometry,
                                                 sizes=sizes, config=cfg, load=load, log=log,
-                                                progress_every=progress_every)
+                                                progress_every=progress_every,
+                                                flying=None if table is None else flying_classes(table))
     (out / PASS1_TMP).unlink()
     tracks = [harvest.tracks[h].to_dict() for h in sorted(harvest.tracks)]
     linked = sum(1 for tr in harvest.tracks.values() if tr.live)
@@ -2668,10 +2724,11 @@ def match_markers(events: Sequence[MarkerEvent], frames: Mapping[int, Sequence[T
 
 
 def sheet_crop(rgb: np.ndarray, box: Sequence[float], cell: int = 72, pad_frac: float = 0.3,
-               outline: bool = True) -> np.ndarray:
+               outline: bool = True, colour: Sequence[int] | None = None) -> np.ndarray:
     """A cell x cell RGB tile of the box on one image: the box grown by pad_frac of its larger
     side, scaled (nearest neighbour, aspect kept) and centred, the box then drawn in yellow
-    (after scaling, so a 1-pixel line is never lost between samples)."""
+    (BOX_COLOUR, or `colour`; after scaling, so a 1-pixel line is never lost between samples)."""
+    line = tuple(int(v) for v in (BOX_COLOUR if colour is None else colour))[:3]
     img = np.asarray(rgb)[..., :3]
     h, w = img.shape[:2]
     bw, bh = float(box[2]) - float(box[0]), float(box[3]) - float(box[1])
@@ -2698,10 +2755,10 @@ def sheet_crop(rgb: np.ndarray, box: Sequence[float], cell: int = 72, pad_frac: 
         bx0, bx1 = max(ox, min(ox + tw - 1, bx0)), max(ox, min(ox + tw - 1, bx1))
         by0, by1 = max(oy, min(oy + th - 1, by0)), max(oy, min(oy + th - 1, by1))
         if bx0 <= bx1 and by0 <= by1:
-            out[by0, bx0:bx1 + 1] = BOX_COLOUR
-            out[by1, bx0:bx1 + 1] = BOX_COLOUR
-            out[by0:by1 + 1, bx0] = BOX_COLOUR
-            out[by0:by1 + 1, bx1] = BOX_COLOUR
+            out[by0, bx0:bx1 + 1] = line
+            out[by1, bx0:bx1 + 1] = line
+            out[by0:by1 + 1, bx0] = line
+            out[by0:by1 + 1, bx1] = line
     return out
 
 
@@ -2985,6 +3042,787 @@ def load_analysis(out_dir: str | Path, identity: Mapping[str, Any] | None = None
                     dict(doc.get("identity") or {}))
 
 
+# -- N11: propagate and emit ----------------------------------------------------------
+#
+# tools/vision_autolabel.py `emit` drives these (module doc, N11). Each part of the sheet, as
+# tracks.json decided it, gets a box on each of its images (propagate_parts); each battle
+# image then gets a plan (plan_frame: the boxes to write, the regions to mask, or why it is
+# dropped); the pixels (feather_paste, crop_image) and the YOLO rows (to_yolo, frame_yolo)
+# follow from the plan.
+
+DECISION_LABEL, DECISION_MASK, DECISION_EFFECT, DECISION_OURS, DECISION_PENDING = (
+    "label", "mask", "effect", "ours", "pending")
+DECISIONS = (DECISION_LABEL, DECISION_MASK, DECISION_EFFECT, DECISION_OURS, DECISION_PENDING)
+#: tracks.json codes (tools/vision_autolabel.py CODES), restated so this needs no tool import.
+CODE_EFFECT, CODE_OURS, CODE_UNSURE = "x", "o", "?"
+#: Where a box's name comes from: the owner's map, an auto-accepted read, a bad mark (masked),
+#: a part nobody decided yet (masked), tonight's live model (pseudo-labels, plan risk 4).
+SRC_OWNER, SRC_AUTO, SRC_BAD, SRC_PENDING, SRC_LIVE = "owner", "auto", "bad", "pending", "live"
+#: How a box was made: a smoothed proposal, a short gap filled, a spell circle, a live box.
+HOW_SMOOTH, HOW_FILL, HOW_CIRCLE, HOW_LIVE = "smooth", "fill", "circle", "live"
+ANCHOR_BOTTOM, ANCHOR_CENTRE = "bottom", "centre"
+#: Proposal box sources whose size smoothing trusts (a blob's box may hold a shadow or a bar).
+SIZE_TAGS = frozenset({"live", "det"})
+DROP_MASKS, DROP_OVERLAP, DROP_NO_BACKGROUND = "masks", "overlap", "no_background"
+#: Live detection types a decided part's box covers by overlap; an object or UI box on a part
+#: is not the part (KataCR's "dirt", a unit's HP bar) and keeps its own pseudo-label.
+COVER_TYPES = frozenset({TYPE_UNIT, TYPE_SPELL, TYPE_UNKNOWN})
+#: Kept box types a mask must not paste over: they move, so the epoch background lacks them.
+#: A tower is in the background, so a mask over it shows the tower again.
+OVERLAP_TYPES = frozenset({TYPE_UNIT, TYPE_SPELL, TYPE_OBJECT, TYPE_UNKNOWN})
+_BIRTH_EPS = 1e-6
+MT_PER_TILE = 1000.0
+Box4 = tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class EmitConfig:
+    """N11 settings (tools/vision_autolabel.py emit). Images are counted by scan record n;
+    tiles are measured at the board's centre."""
+    stride: int = 3                 # images with an enemy label: keep 1 in `stride` (by scan record n)
+    empty_stride: int = 15          # images with none: keep 1 in this many (Yodle2's units, towers, UI)
+    birth_s: float = 1.0            # every image up to this long after a labelled part's birth is kept
+    birth_repeat: int = 2           # copies of a birth-window image in a training mix (dev and gold: 1)
+    smooth_window: int = 5          # box size: median over this many of the part's images (odd)
+    max_gap: int = 3                # fill up to this many missing images between two of a part's images
+    min_box_px: float = 3.0         # a clipped box narrower or shorter than this is dropped
+    live_iou: float = 0.5           # a live detection this close to a decided part's box is that part's
+    mask_pad_tiles: float = 0.15    # a mask grows by this much; the background is pasted inside it
+    feather_px: int = 3             # ... and blends back to the image over this many pixels outside it
+    max_masks: int = 3              # an image with more masks than this is dropped
+    mask_overlap_frac: float = 0.05  # ... so is one whose grown mask covers more of a kept moving box
+    mask_leftovers: bool = True     # mask detector proposals of tracks no decided part holds (plan 2.3 step 5)
+    leftover_conf: float = 0.15     # ... at this score or more (ScanConfig.bg_mask_conf: what the background leaves out)
+    image_format: str = "jpg"       # record.save_image formats; tests pass "npy"
+    quality: int = 95
+    spell_radius_tiles: tuple[tuple[str, float], ...] = (("DarkMagic", 2.5), ("Vines", 2.5), ("GoblinCurse", 3.0))
+
+    def __post_init__(self) -> None:
+        for name in ("stride", "empty_stride", "birth_repeat", "smooth_window"):
+            if int(getattr(self, name)) < 1:
+                raise ValueError(f"EmitConfig.{name} must be at least 1")
+        for name in ("max_gap", "feather_px", "max_masks"):
+            if int(getattr(self, name)) < 0:
+                raise ValueError(f"EmitConfig.{name} must be >= 0")
+        if int(self.smooth_window) % 2 == 0:
+            raise ValueError("EmitConfig.smooth_window must be odd (a centred window)")
+        for name in ("live_iou", "mask_overlap_frac", "leftover_conf"):
+            if not 0.0 <= float(getattr(self, name)) <= 1.0:
+                raise ValueError(f"EmitConfig.{name} must be in [0, 1]")
+        for name in ("birth_s", "min_box_px", "mask_pad_tiles"):
+            if float(getattr(self, name)) < 0.0:
+                raise ValueError(f"EmitConfig.{name} must be >= 0")
+        if self.image_format not in IMAGE_FORMATS:
+            raise ValueError(f"EmitConfig.image_format must be one of {', '.join(IMAGE_FORMATS)}")
+        if not 1 <= int(self.quality) <= 100:
+            raise ValueError("EmitConfig.quality must be in [1, 100]")
+        radii = []
+        for item in self.spell_radius_tiles:
+            name, r = item
+            if not str(name) or float(r) <= 0.0:
+                raise ValueError(f"EmitConfig.spell_radius_tiles: {item!r} is not (spell label, radius > 0)")
+            radii.append((str(name), float(r)))
+        object.__setattr__(self, "spell_radius_tiles", tuple(radii))
+
+
+def live_key(seg: Any, uid: Any) -> str:
+    """"<seg>:<uid>", how tracks.json "live" names a live track."""
+    return f"{int(seg)}:{int(uid)}"
+
+
+def _box(b: Sequence[float]) -> Box4:
+    return (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+
+
+def clip_box(box: Sequence[float], rect: Sequence[float]) -> Box4 | None:
+    """`box` inside `rect` (both x1, y1, x2, y2); None when nothing of it is left."""
+    x1, y1 = max(float(box[0]), float(rect[0])), max(float(box[1]), float(rect[1]))
+    x2, y2 = min(float(box[2]), float(rect[2])), min(float(box[3]), float(rect[3]))
+    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
+def grow_box(box: Sequence[float], pad: float) -> Box4:
+    p = float(pad)
+    return (float(box[0]) - p, float(box[1]) - p, float(box[2]) + p, float(box[3]) + p)
+
+
+def cover_frac(region: Sequence[float], box: Sequence[float]) -> float:
+    """The share of `box`'s area inside `region`."""
+    a = box_area(box)
+    return box_inter(region, box) / a if a > 0 else 0.0
+
+
+@dataclass(slots=True)
+class PropRef:
+    """One proposal of a scan record (Proposal.to_dict, the fields emit needs): its harvest
+    track h, box (frame px), source, type, the live detection that joined it ("seg:uid"),
+    its candidates, its world position and its score."""
+    h: int | None
+    box: Box4
+    src: str
+    type: str
+    live: str | None
+    cands: list[tuple[str, int | None, float]] = field(default_factory=list)
+    x: float = 0.0
+    y: float = 0.0
+    conf: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "PropRef":
+        live = d.get("live")
+        return cls(None if d.get("h") is None else int(d["h"]), _box(d["box"]), str(d.get("src", "")),
+                   str(d.get("type", TYPE_UNIT)), None if live is None else live_key(live[0], live[1]),
+                   [(str(c), None if s is None else int(s), float(v)) for c, s, v in d.get("cands") or ()],
+                   float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("conf") or 0.0))
+
+
+def is_leftover(src: Any, typ: Any, conf: Any, h: Any, min_conf: float) -> bool:
+    """Whether a proposal is one plan_frame masks when no decided part holds its track there
+    (EmitConfig.mask_leftovers): a tracked detector proposal ("det", "det+blob") of a moving
+    type at min_conf or more. Bare blobs and live-only proposals are not (the live layer has
+    those), and neither are objects."""
+    return (h is not None and "det" in str(src).split("+") and str(typ) in COVER_TYPES
+            and float(conf or 0.0) >= float(min_conf))
+
+
+@dataclass(slots=True)
+class FrameRec:
+    """One battle-screen scan record (hk and size set): the live detections and the
+    proposals emit needs (props: proposal k -> PropRef)."""
+    n: int
+    i: int
+    image: str | None
+    t: float
+    hk: int
+    seg: int
+    epoch: str | None
+    size: tuple[int, int]
+    live: list[LiveDet] = field(default_factory=list)
+    props: dict[int, PropRef] = field(default_factory=dict)
+
+    def live_for(self, key: str | None) -> LiveDet | None:
+        """The live detection of live track `key` ("seg:uid") on this image, or None."""
+        if not key:
+            return None
+        seg, _, uid = str(key).partition(":")
+        try:
+            s, u = int(seg), int(uid)
+        except ValueError:
+            return None
+        for d in self.live:
+            if d.uid == u and d.seg == s:
+                return d
+        return None
+
+
+def load_frame_index(records: Iterable[Mapping[str, Any]], wanted: Iterable[int] | None = None, *,
+                     leftover_conf: float | None = None) -> dict[int, FrameRec]:
+    """scan record n -> FrameRec for every battle-screen record, in one streaming pass. wanted:
+    keep only the proposals of these harvest tracks (the decided parts'), so a long scan
+    stays small in memory, plus, with leftover_conf, every other proposal plan_frame may mask
+    as a leftover (is_leftover); the live detections are always kept."""
+    want = None if wanted is None else {int(h) for h in wanted}
+    out: dict[int, FrameRec] = {}
+    for rec in records:
+        if rec.get("hk") is None or not rec.get("size"):
+            continue
+        seg = int(rec.get("seg", 0))
+        props: dict[int, PropRef] = {}
+        for k, p in enumerate(rec.get("props") or ()):
+            h = p.get("h")
+            if want is not None and (h is None or int(h) not in want):
+                if leftover_conf is None or not is_leftover(p.get("src"), p.get("type", TYPE_UNIT), p.get("conf"), h,
+                                                            leftover_conf):
+                    continue
+            props[k] = PropRef.from_dict(p)
+        n = int(rec["n"])
+        out[n] = FrameRec(n, int(rec.get("i", n)), rec.get("image"), float(rec.get("t", 0.0)), int(rec["hk"]), seg,
+                          rec.get("epoch"), (int(rec["size"][0]), int(rec["size"][1])),
+                          [LiveDet.from_row(r, seg) for r in rec.get("live") or ()], props)
+    return out
+
+
+def _part_order(key: str) -> tuple[int, str]:
+    return int(str(key).split(".")[0]), str(key)
+
+
+@dataclass
+class PartPlan:
+    """One part of the sheet as emit writes it: its decision and its box per image (frame
+    pixels, how it was made). side: 1 enemy (every label), 0 ours (o), None for the rest."""
+    key: str
+    h: int
+    part: int
+    decision: str
+    label: str | None
+    side: int | None
+    src: str
+    type: str
+    first_n: int
+    last_n: int
+    first_t: float
+    last_t: float
+    hk: int | None
+    uid: str | None
+    boxes: dict[int, tuple[Box4, str]] = field(default_factory=dict)
+    props: dict[int, PropRef] = field(default_factory=dict)
+    birth_xy: tuple[float, float] | None = None
+    last_xy: tuple[float, float] | None = None
+    skipped: int = 0                         # images left out: held by one of our live tracks
+    card: str | None = None                  # set by vision_autolabel (card_of_label: the deck's card)
+    form: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """A parts.jsonl line (boxes in frame pixels at 1 decimal)."""
+        return {"key": self.key, "h": self.h, "part": self.part, "decision": self.decision, "label": self.label,
+                "side": self.side, "src": self.src, "type": self.type, "card": self.card, "form": self.form,
+                "first_n": self.first_n, "last_n": self.last_n, "first_t": round(self.first_t, 4),
+                "last_t": round(self.last_t, 4), "hk": self.hk, "uid": self.uid,
+                "birth": None if self.birth_xy is None else [int(round(v)) for v in self.birth_xy],
+                "last": None if self.last_xy is None else [int(round(v)) for v in self.last_xy],
+                "skipped": self.skipped,
+                "boxes": [[n, _r1(b[0]), _r1(b[1]), _r1(b[2]), _r1(b[3]), how]
+                          for n, (b, how) in sorted(self.boxes.items())]}
+
+
+def decide_parts(sheet_parts: Mapping[str, Mapping[str, Any]], tracks_doc: Mapping[str, Any] | None,
+                 bad: Iterable[str] = ()) -> dict[str, tuple[str, str | None, str]]:
+    """key -> (decision, label, src) for every part of the sheet (sheet.json "tracks", the
+    analysis' universe): a tracks.json label -> (label, the label, its source); a key in
+    `bad` (marked bad and not relabelled since) or code ? -> mask; x -> effect; o -> ours;
+    on the sheet but not in tracks.json, or in its "split" list -> pending."""
+    bad_keys = {str(k) for k in bad}
+    entries = {str(t.get("key")): t for t in (tracks_doc or {}).get("tracks") or ()
+               if isinstance(t, Mapping) and t.get("key") is not None}
+    split = {str(k) for k in (tracks_doc or {}).get("split") or ()}
+    out: dict[str, tuple[str, str | None, str]] = {}
+    for key in sorted(sheet_parts, key=_part_order):
+        e = entries.get(key)
+        if e is None or key in split:
+            out[key] = (DECISION_PENDING, None, SRC_PENDING)
+        elif key in bad_keys:
+            out[key] = (DECISION_MASK, None, SRC_BAD)
+        elif isinstance(e.get("label"), str) and e["label"]:
+            out[key] = (DECISION_LABEL, str(e["label"]), str(e.get("source") or SRC_OWNER))
+        elif e.get("code") == CODE_UNSURE:
+            out[key] = (DECISION_MASK, None, SRC_OWNER)
+        elif e.get("code") == CODE_EFFECT:
+            out[key] = (DECISION_EFFECT, None, SRC_OWNER)
+        elif e.get("code") == CODE_OURS:
+            out[key] = (DECISION_OURS, None, SRC_OWNER)
+        else:
+            out[key] = (DECISION_PENDING, None, SRC_PENDING)
+    return out
+
+
+def _params(box: Sequence[float], anchor: str) -> tuple[float, float, float, float]:
+    """(centre x, anchor y, width, height): the anchor is the bottom edge (a unit stands on
+    its feet: KataCR's convention) or the centre (a spell)."""
+    x1, y1, x2, y2 = _box(box)
+    ay = y2 if anchor == ANCHOR_BOTTOM else (y1 + y2) / 2.0
+    return (x1 + x2) / 2.0, ay, x2 - x1, y2 - y1
+
+
+def _from_params(cx: float, ay: float, w: float, h: float, anchor: str) -> Box4:
+    if anchor == ANCHOR_BOTTOM:
+        return (cx - w / 2.0, ay - h, cx + w / 2.0, ay)
+    return (cx - w / 2.0, ay - h / 2.0, cx + w / 2.0, ay + h / 2.0)
+
+
+def smooth_boxes(seq: Sequence[tuple[int, Sequence[float], str]], window: int = 5,
+                 anchor: str = ANCHOR_BOTTOM) -> list[tuple[int, Box4]]:
+    """A part's boxes, (n, box, source tag) in image order, with steadier sizes: width and
+    height are the median over the centred `window` of the images whose box came from a live
+    or harvest detection (SIZE_TAGS); with none in the window, over all such images of the
+    part; with none at all, over the window's blob boxes. Each image keeps its own anchor
+    (bottom centre, or the centre for a spell)."""
+    items = [(int(n), _box(b), str(tag)) for n, b, tag in seq]
+    half = max(1, int(window)) // 2
+    trusted = [j for j, it in enumerate(items) if it[2] in SIZE_TAGS]
+    out: list[tuple[int, Box4]] = []
+    for i, (n, b, _tag) in enumerate(items):
+        lo, hi = max(0, i - half), min(len(items), i + half + 1)
+        pick = [j for j in range(lo, hi) if items[j][2] in SIZE_TAGS] or trusted or list(range(lo, hi))
+        w = float(np.median([items[j][1][2] - items[j][1][0] for j in pick]))
+        h = float(np.median([items[j][1][3] - items[j][1][1] for j in pick]))
+        cx, ay, _w, _h = _params(b, anchor)
+        out.append((n, _from_params(cx, ay, w, h, anchor)))
+    return out
+
+
+def fill_gaps(seq: Sequence[tuple[int, Sequence[float]]], record_ns: Sequence[int], max_gap: int = 3, *,
+              anchor: str = ANCHOR_BOTTOM, hk_of: Mapping[int, Any] | None = None,
+              skip: Iterable[int] = ()) -> list[tuple[int, Box4]]:
+    """Boxes for the records missing between two consecutive images n_a < n_b of a part:
+    when 1 to `max_gap` battle records (record_ns) lie strictly between them, their centre x,
+    anchor y, width and height are interpolated linearly by record order. Never across a
+    battle change (hk_of: record -> harvest battle), and never over a record in `skip` (an
+    image of the part's track that one of our units held)."""
+    rs = sorted(int(n) for n in record_ns)
+    banned = {int(n) for n in skip}
+    items = sorted((int(n), _box(b)) for n, b in seq)
+    out: list[tuple[int, Box4]] = []
+    for (na, ba), (nb, bb) in zip(items, items[1:]):
+        between = rs[bisect.bisect_right(rs, na):bisect.bisect_left(rs, nb)]
+        if not between or len(between) > int(max_gap) or banned.intersection(between):
+            continue
+        if hk_of is not None:
+            hk = hk_of.get(na)
+            if hk is None or hk_of.get(nb) != hk or any(hk_of.get(m) != hk for m in between):
+                continue
+        pa, pb = _params(ba, anchor), _params(bb, anchor)
+        k = len(between) + 1
+        for j, m in enumerate(between, 1):
+            f = j / k
+            out.append((m, _from_params(*(a + (b - a) * f for a, b in zip(pa, pb)), anchor)))
+    return out
+
+
+def circle_box(center_mt: Sequence[float], size: Sequence[int], geometry: ArenaGeometry,
+               radius_tiles: float) -> Box4:
+    """The pixel box of a spell's circle of `radius_tiles` around world `center_mt`: the
+    extremes of world_to_px at x -/+ r and y -/+ r (the geometry is a homography: an
+    ellipse on screen, whose box this is for an affine one)."""
+    r = float(radius_tiles) * MT_PER_TILE
+    cx, cy = float(center_mt[0]), float(center_mt[1])
+    xs = np.array([cx - r, cx + r, cx, cx], dtype=np.float64)
+    ys = np.array([cy, cy, cy - r, cy + r], dtype=np.float64)
+    px, py = geometry.world_to_px(xs, ys, size)
+    return (float(np.min(px)), float(np.min(py)), float(np.max(px)), float(np.max(py)))
+
+
+def spell_circle(center_px: Sequence[float], size: Sequence[int], geometry: ArenaGeometry,
+                 radius_tiles: float) -> Box4:
+    """circle_box around the world point under pixel `center_px` of a frame of `size`."""
+    wx, wy = geometry.px_to_world(float(center_px[0]), float(center_px[1]), size)
+    return circle_box((float(wx), float(wy)), size, geometry, radius_tiles)
+
+
+def propagate_parts(decisions: Mapping[str, tuple[str, str | None, str]], sheet_parts: Mapping[str, Mapping[str, Any]],
+                    harvest_tracks: Mapping[int, Mapping[str, Any]], index: Mapping[int, FrameRec],
+                    live_teams: Mapping[str, int | None], *, table: Any, geometry: ArenaGeometry,
+                    config: EmitConfig | None = None) -> dict[str, PartPlan]:
+    """Each decided part (decide_parts) over its images (module doc, N11, propagate): the
+    harvest track's proposals with first_n <= n <= last_n; an image whose proposal one of our
+    live tracks held is left out (except for an o part); the box is the linked live
+    detection's, else the proposal's; sizes smoothed (smooth_boxes); short gaps filled for
+    labels and masks (fill_gaps); a spell with a radius (EmitConfig.spell_radius_tiles) is
+    its circle around the median centre on every image."""
+    cfg = config or EmitConfig()
+    table = load_class_table(table)
+    radii = {str(k): float(v) for k, v in cfg.spell_radius_tiles}
+    by_hk: dict[int, list[int]] = {}
+    for n, rec in index.items():
+        by_hk.setdefault(rec.hk, []).append(int(n))
+    for ns in by_hk.values():
+        ns.sort()
+    hk_of = {int(n): rec.hk for n, rec in index.items()}
+    out: dict[str, PartPlan] = {}
+    for key in sorted(decisions, key=_part_order):
+        decision, label, src = decisions[key]
+        sp = sheet_parts[key]
+        h, lo, hi = int(sp["h"]), int(sp["first_n"]), int(sp["last_n"])
+        typ = TYPE_UNIT
+        if label:
+            typ = TYPE_SPELL if resolve_label(table, label).type == TYPE_SPELL else TYPE_UNIT
+        anchor = ANCHOR_CENTRE if typ == TYPE_SPELL else ANCHOR_BOTTOM
+        seq: list[tuple[int, Box4, str]] = []
+        props: dict[int, PropRef] = {}
+        skipped: set[int] = set()
+        for n, k in (harvest_tracks.get(h) or {}).get("frames") or ():
+            n, k = int(n), int(k)
+            if not lo <= n <= hi or n in props or n in skipped:
+                continue
+            rec = index.get(n)
+            prop = None if rec is None else rec.props.get(k)
+            if prop is None:
+                continue
+            if decision != DECISION_OURS and prop.live and live_teams.get(prop.live) == OWN_TEAM:
+                skipped.add(n)
+                continue
+            d = rec.live_for(prop.live)
+            if d is not None:
+                box, tag = _box(d.box), "live"
+            else:
+                box, tag = prop.box, prop.src.split("+")[0]
+            seq.append((n, box, tag))
+            props[n] = prop
+        seq.sort(key=lambda s: s[0])
+        smooth = smooth_boxes(seq, cfg.smooth_window, anchor)
+        boxes: dict[int, tuple[Box4, str]] = {n: (b, HOW_SMOOTH) for n, b in smooth}
+        if decision in (DECISION_LABEL, DECISION_MASK) and smooth and cfg.max_gap > 0:
+            ns = by_hk.get(index[smooth[0][0]].hk, [])
+            for n, b in fill_gaps(smooth, ns, cfg.max_gap, anchor=anchor, hk_of=hk_of, skip=skipped):
+                boxes.setdefault(n, (b, HOW_FILL))
+        if decision == DECISION_LABEL and label in radii and smooth:
+            pts = [geometry.px_to_world((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0, index[n].size) for n, b in smooth]
+            centre = (float(np.median([float(p[0]) for p in pts])), float(np.median([float(p[1]) for p in pts])))
+            boxes = {n: (circle_box(centre, index[n].size, geometry, radii[label]), HOW_CIRCLE) for n in boxes}
+        first = props[seq[0][0]] if seq else None
+        last = props[seq[-1][0]] if seq else None
+        side = 1 if decision == DECISION_LABEL else 0 if decision == DECISION_OURS else None
+        read = sp.get("read") if isinstance(sp.get("read"), Mapping) else {}
+        out[key] = PartPlan(key, h, int(sp.get("part", 0)), decision, label, side, src, typ, lo, hi,
+                            float(sp.get("first_t", 0.0)), float(sp.get("last_t", 0.0)),
+                            None if sp.get("hk") is None else int(sp["hk"]), read.get("uid"), boxes, props,
+                            None if first is None else (first.x, first.y), None if last is None else (last.x, last.y),
+                            len(skipped))
+    return out
+
+
+def parts_at(plans: Mapping[str, PartPlan]) -> dict[int, list[tuple[PartPlan, PropRef | None, Box4, str]]]:
+    """Scan record n -> the decided parts with a box there: (part, its proposal or None for a
+    filled image, box, how), in part order."""
+    out: dict[int, list[tuple[PartPlan, PropRef | None, Box4, str]]] = {}
+    for p in plans.values():
+        for n, (b, how) in p.boxes.items():
+            out.setdefault(int(n), []).append((p, p.props.get(n), b, how))
+    for v in out.values():
+        v.sort(key=lambda e: _part_order(e[0].key))
+    return out
+
+
+def birth_images(plans: Mapping[str, PartPlan], index: Mapping[int, FrameRec], config: EmitConfig | None = None) -> set[int]:
+    """The images in a birth window: up to birth_s after the birth of a labelled part that is
+    a track's first part (later parts of a split track are look changes, not births), where
+    that part has a box (plan 2.3: the first second decides the card)."""
+    cfg = config or EmitConfig()
+    out: set[int] = set()
+    for p in plans.values():
+        if p.decision != DECISION_LABEL or p.part != 0:
+            continue
+        for n in p.boxes:
+            rec = index.get(n)
+            if rec is not None and -_BIRTH_EPS <= rec.t - p.first_t <= cfg.birth_s + _BIRTH_EPS:
+                out.add(int(n))
+    return out
+
+
+@dataclass(frozen=True)
+class EmitBox:
+    """One box an image is written with: a detector label name, side (1 enemy, 0 ally), frame
+    pixels, the label's type, src (owner, auto, live) and how (smooth, fill, circle, live);
+    key: the part it came from (None for a live pseudo-label)."""
+    label: str
+    side: int
+    box: Box4
+    type: str = TYPE_UNIT
+    src: str = SRC_OWNER
+    how: str = HOW_SMOOTH
+    key: str | None = None
+
+
+@dataclass
+class FramePlan:
+    """What one image becomes: the boxes kept (clipped), the regions masked with the
+    background (frame px, before the pad), the reason it is dropped (training only), and for
+    gold the ignore regions (masks grown by the pad, nothing pasted)."""
+    n: int
+    keep: list[EmitBox] = field(default_factory=list)
+    masks: list[Box4] = field(default_factory=list)
+    drop: str | None = None
+    ignore: list[Box4] = field(default_factory=list)
+    counts: Counter = field(default_factory=Counter)
+
+    @property
+    def enemy_labels(self) -> int:
+        """Boxes of the declared opponent's labels (owner or auto) on this image."""
+        return sum(1 for b in self.keep if b.side == 1 and b.src in (SRC_OWNER, SRC_AUTO))
+
+
+def _spell_name(table: Any, card: str, known: Container[str]) -> str:
+    """tools/vision_autolabel.spell_label, restated: a spell's KataCR name when the label set
+    has it (Fireball -> "fireball"), else the card name (the registry's Vines)."""
+    for name in (table.cards.get(card) or {}).get("katacr") or ():
+        if name in known:
+            return str(name)
+    return str(card)
+
+
+def canonical_name(table: Any, name: str, known: Container[str]) -> str | None:
+    """A class, unit, spell or KataCR name as a label of `known`: units and towers as their
+    detector key (in the name's own form), spells as _spell_name, other names as they are;
+    None when the label set has no such label."""
+    lab = resolve_label(table, str(name))
+    if lab.type in (TYPE_UNIT, TYPE_TOWER) and lab.class_id is not None:
+        out = table.detector_key(lab.class_id, lab.form)
+    elif lab.type == TYPE_SPELL and lab.card:
+        out = _spell_name(table, lab.card, known)
+    elif lab.type in (TYPE_UI, TYPE_OBJECT):
+        out = str(name)
+    else:
+        out = None
+    return out if out is not None and out in known else None
+
+
+def live_label(d: LiveDet, table: Any, known: Container[str]) -> str | None:
+    """The label a live detection is written as: a unit or tower its class's detector key in
+    the detection's form, a spell its card's label, a UI or object box its own name; None
+    when it is none of these or `known` (the label set) lacks it."""
+    if d.type in (TYPE_UNIT, TYPE_TOWER):
+        lab = resolve_label(table, d.cls)
+        if lab.class_id is None or lab.type not in (TYPE_UNIT, TYPE_TOWER):
+            return None
+        name = table.detector_key(lab.class_id, int(d.form))
+    elif d.type == TYPE_SPELL:
+        lab = resolve_label(table, d.cls)
+        name = _spell_name(table, lab.card, known) if lab.type == TYPE_SPELL and lab.card else None
+    elif d.type in (TYPE_UI, TYPE_OBJECT):
+        name = str(d.cls)
+    else:
+        return None
+    return name if name is not None and name in known else None
+
+
+def ours_label(rec: FrameRec, prop: PropRef | None, table: Any, known: Container[str],
+               own_labels: Container[str]) -> str | None:
+    """The ally label of an o part's image: the linked live detection's label when it is one
+    of Yodle2's, else the strongest harvest candidate whose class is; None (masked) else."""
+    if prop is None:
+        return None
+    d = rec.live_for(prop.live)
+    if d is not None:
+        lab = live_label(d, table, known)
+        if lab is not None and lab in own_labels:
+            return lab
+    for cls, _side, _conf in sorted(prop.cands, key=lambda c: -c[2]):
+        if cls not in own_labels:
+            continue
+        lab = canonical_name(table, cls, known)
+        if lab is not None and lab in own_labels:
+            return lab
+    return None
+
+
+def _type_of(table: Any, label: str) -> str:
+    typ = resolve_label(table, label).type
+    return typ if typ in (TYPE_UNIT, TYPE_SPELL, TYPE_TOWER, TYPE_OBJECT, TYPE_UI) else TYPE_UNIT
+
+
+def plan_frame(rec: FrameRec, at_n: Sequence[tuple[PartPlan, PropRef | None, Sequence[float], str]], *, table: Any,
+               known: Container[str], own_labels: Container[str], live_teams: Mapping[str, int | None] | None = None,
+               config: EmitConfig | None = None, gold: bool = False, crop: Sequence[float] | None = None,
+               pad_px: float = 0.0, background: bool = True) -> FramePlan:
+    """One image's plan (module doc, N11, plan_frame), in this order:
+    1. the decided parts with a box here (at_n, parts_at): a label is kept on the enemy side;
+       ? / a bad mark / a pending part is masked; x writes nothing; o is kept on our side as
+       its live read or best candidate when that is one of Yodle2's labels, else masked.
+       Their proposals and boxes are COVERED.
+    2. the live layer: a detection linked to a covered proposal, or a unit, spell or unknown
+       one overlapping a covered box by live_iou, is that part's and skipped (an object or UI
+       box on an x part is kept: "dirt" is no unit). The rest: our side (the live track's
+       team, else P(enemy)) with one of Yodle2's labels is kept as a pseudo-label; any other
+       unit or spell is masked (an unvetted enemy, or a misread that cannot be ours); towers,
+       UI and objects are kept as pseudo-labels (side at P 0.5: the board half).
+    2b. leftovers (mask_leftovers): a proposal of a track no decided part holds on this image
+       (is_leftover: a detector proposal at leftover_conf or more; one of Yodle2's units the
+       live model missed, an enemy track too short for the sheet) is masked unless a kept,
+       covered or masked box already has it (IoU >= live_iou, or half of it inside one).
+    3. kept boxes are clipped to the crop (gold: to the frame); under min_box_px they go.
+    4. training only, a UI box a grown mask covers (its unit's HP bar) is masked with it; the
+       image is dropped for more than max_masks masks ("masks"), for a grown mask (pad +
+       feather) over more than mask_overlap_frac of a kept moving box ("overlap": a tower is
+       in the background), or for masks without a background ("no_background"). Gold drops
+       nothing: its masks, grown by the pad, are ignore regions."""
+    cfg = config or EmitConfig()
+    teams = live_teams or {}
+    width, height = int(rec.size[0]), int(rec.size[1])
+    keep: list[EmitBox] = []
+    masks: list[Box4] = []
+    counts: Counter = Counter()
+    covered_live: dict[str, str] = {}
+    covered: list[Box4] = []
+    for part, prop, box, how in at_n:
+        b = _box(box)
+        dec = part.decision
+        if dec == DECISION_LABEL and part.label:
+            keep.append(EmitBox(str(part.label), 1, b, part.type, part.src, how, part.key))
+        elif dec in (DECISION_MASK, DECISION_PENDING):
+            masks.append(b)
+            counts["part_masks"] += 1
+        elif dec == DECISION_OURS:
+            label = ours_label(rec, prop, table, known, own_labels)
+            if label is None:
+                masks.append(b)
+                counts["ours_masked"] += 1
+            else:
+                keep.append(EmitBox(label, 0, b, _type_of(table, label), SRC_LIVE, how, part.key))
+        if prop is not None and prop.live:
+            covered_live[prop.live] = dec
+        covered.append(b)
+    for d in rec.live:
+        key = None if d.uid is None else live_key(d.seg, d.uid)
+        dec = covered_live.get(key) if key is not None else None
+        if dec is not None and not (dec == DECISION_EFFECT and d.type in (TYPE_OBJECT, TYPE_UI)):
+            counts["live_covered"] += 1
+            continue
+        moving = d.type in COVER_TYPES
+        if moving and any(box_iou(d.box, c) >= cfg.live_iou for c in covered):
+            counts["live_covered"] += 1
+            continue
+        label = live_label(d, table, known)
+        team = teams.get(key) if key is not None else None
+        side = 0 if team == OWN_TEAM else 1 if team == ENEMY_TEAM else side_of(d.p_enemy)
+        if moving:
+            if side == 0 and label is not None and label in own_labels:
+                keep.append(EmitBox(label, 0, _box(d.box), d.type, SRC_LIVE, HOW_LIVE, None))
+            else:
+                masks.append(_box(d.box))
+                counts["live_masks"] += 1
+                if label is None:
+                    counts["no_label"] += 1
+            continue
+        if label is None:
+            counts["no_label"] += 1
+            continue
+        if side is None:
+            side = 1 if (float(d.box[1]) + float(d.box[3])) / 2.0 < height / 2.0 else 0
+        keep.append(EmitBox(label, side, _box(d.box), d.type, SRC_LIVE, HOW_LIVE, None))
+    if cfg.mask_leftovers and rec.props:
+        held = {part.h for part, _prop, _box_, _how in at_n}
+        taken = covered + [b.box for b in keep] + list(masks)
+        for _k, prop in sorted(rec.props.items()):
+            if prop.h in held or not is_leftover(prop.src, prop.type, prop.conf, prop.h, cfg.leftover_conf):
+                continue
+            if any(box_iou(prop.box, c) >= cfg.live_iou or cover_frac(c, prop.box) >= 0.5 for c in taken):
+                continue
+            masks.append(prop.box)
+            taken.append(prop.box)
+            counts["leftover_masks"] += 1
+    lim = (0.0, 0.0, float(width), float(height)) if gold or crop is None else _box(crop)
+    kept: list[EmitBox] = []
+    for b in keep:
+        c = clip_box(b.box, lim)
+        if c is None or c[2] - c[0] < cfg.min_box_px or c[3] - c[1] < cfg.min_box_px:
+            counts["clipped"] += 1
+            continue
+        kept.append(dataclasses.replace(b, box=c))
+    ms = [c for c in (clip_box(m, lim) for m in masks) if c is not None]
+    if gold:
+        ignore = [c for c in (clip_box(grow_box(m, pad_px), lim) for m in ms) if c is not None]
+        return FramePlan(rec.n, kept, ms, None, ignore, counts)
+    reach = float(pad_px) + float(cfg.feather_px)
+    grown = [grow_box(m, reach) for m in ms]
+    absorbed: list[Box4] = []
+    if grown:
+        rest = []
+        for b in kept:
+            if b.type == TYPE_UI and any(cover_frac(g, b.box) > cfg.mask_overlap_frac for g in grown):
+                absorbed.append(b.box)
+                counts["ui_absorbed"] += 1
+            else:
+                rest.append(b)
+        kept = rest
+    paste = ms + absorbed
+    every = grown + [grow_box(a, reach) for a in absorbed]
+    drop = None
+    if len(ms) > cfg.max_masks:
+        drop = DROP_MASKS
+    elif any(b.type in OVERLAP_TYPES and cover_frac(g, b.box) > cfg.mask_overlap_frac for b in kept for g in every):
+        drop = DROP_OVERLAP
+    elif paste and not background:
+        drop = DROP_NO_BACKGROUND
+    return FramePlan(rec.n, kept, paste, drop, [], counts)
+
+
+def keep_frame(n: int, plan: FramePlan, birth: bool, config: EmitConfig | None = None) -> bool:
+    """Whether a training image is written: every birth-window image, 1 in `stride` of the
+    images with an enemy label box, 1 in `empty_stride` of all (by scan record n)."""
+    cfg = config or EmitConfig()
+    n = int(n)
+    return bool(birth) or (plan.enemy_labels > 0 and n % cfg.stride == 0) or n % cfg.empty_stride == 0
+
+
+def emit_framing(geometry: ArenaGeometry, det_config: DetectorConfig | None, size: Sequence[int],
+                 config: EmitConfig | None = None) -> tuple[tuple[int, int, int, int], float]:
+    """(the live crop, the mask pad in pixels) for a frame of `size`: detector.crop_rect_for,
+    so the emitted framing is the one the live model sees."""
+    cfg = config or EmitConfig()
+    crop = crop_rect_for(geometry, det_config, size)
+    tw, th = tile_px(geometry, size)
+    return crop, float(cfg.mask_pad_tiles) * min(tw, th)
+
+
+def feather_paste(rgb: np.ndarray, background: np.ndarray, boxes: Iterable[Sequence[float]], *,
+                  pad_px: float = 0.0, feather_px: int = 3) -> np.ndarray:
+    """A copy of `rgb` with each box grown by pad_px (whole pixels touched, as box_mask) set to
+    the background, and blended back to the image over feather_px pixels outside it (alpha
+    falls by 1/(feather_px+1) a pixel, Chebyshev distance), so a patch has no hard edge (plan
+    risk 5). Boxes may reach past the image."""
+    img = np.asarray(rgb)[..., :3]
+    bg = np.asarray(background)[..., :3]
+    if img.shape != bg.shape:
+        raise ValueError(f"image {img.shape} and background {bg.shape} differ in size")
+    h, w = img.shape[:2]
+    f = max(0, int(feather_px))
+    alpha = np.zeros((h, w), dtype=np.float64)
+    for b in boxes:
+        x0, y0 = int(math.floor(float(b[0]) - pad_px)), int(math.floor(float(b[1]) - pad_px))
+        x1, y1 = int(math.ceil(float(b[2]) + pad_px)), int(math.ceil(float(b[3]) + pad_px))
+        gx0, gy0, gx1, gy1 = max(0, x0 - f), max(0, y0 - f), min(w, x1 + f), min(h, y1 + f)
+        if gx1 <= gx0 or gy1 <= gy0:
+            continue
+        xs, ys = np.arange(gx0, gx1), np.arange(gy0, gy1)
+        dx = np.maximum(np.maximum(x0 - xs, xs - (x1 - 1)), 0)
+        dy = np.maximum(np.maximum(y0 - ys, ys - (y1 - 1)), 0)
+        a = np.clip(1.0 - np.maximum(dy[:, None], dx[None, :]) / (f + 1.0), 0.0, 1.0)
+        alpha[gy0:gy1, gx0:gx1] = np.maximum(alpha[gy0:gy1, gx0:gx1], a)
+    out = img.astype(np.float64)
+    if alpha.any():
+        out = out * (1.0 - alpha[..., None]) + bg.astype(np.float64) * alpha[..., None]
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
+def crop_image(rgb: np.ndarray, crop: Sequence[int]) -> np.ndarray:
+    """rgb[y0:y1, x0:x1] (RGB, contiguous)."""
+    x0, y0, x1, y1 = (int(v) for v in crop)
+    return np.ascontiguousarray(np.asarray(rgb)[y0:y1, x0:x1, :3])
+
+
+def image_size(rgb: np.ndarray) -> tuple[int, int]:
+    """(width, height) of an image array."""
+    a = np.asarray(rgb)
+    return int(a.shape[1]), int(a.shape[0])
+
+
+def to_yolo(box: Sequence[float], crop: Sequence[float], min_px: float = 3.0) -> tuple[float, float, float, float] | None:
+    """A frame-pixel box as a YOLO row of the crop: clipped to the crop, then (cx, cy, w, h)
+    relative to the crop's size; None when less than min_px of it is left either way."""
+    x0, y0, x1, y1 = (float(v) for v in crop)
+    c = clip_box(box, (x0, y0, x1, y1))
+    if c is None or c[2] - c[0] < float(min_px) or c[3] - c[1] < float(min_px):
+        return None
+    cw, ch = x1 - x0, y1 - y0
+    return ((c[0] + c[2]) / 2.0 - x0) / cw, ((c[1] + c[3]) / 2.0 - y0) / ch, (c[2] - c[0]) / cw, (c[3] - c[1]) / ch
+
+
+def from_yolo(row: Sequence[float], crop: Sequence[float]) -> Box4:
+    """to_yolo back: a YOLO row of the crop as a frame-pixel box."""
+    x0, y0, x1, y1 = (float(v) for v in crop)
+    cw, ch = x1 - x0, y1 - y0
+    cx, cy, w, h = (float(v) for v in row[:4])
+    return (x0 + (cx - w / 2.0) * cw, y0 + (cy - h / 2.0) * ch, x0 + (cx + w / 2.0) * cw, y0 + (cy + h / 2.0) * ch)
+
+
+def frame_yolo(box: Sequence[float], size: Sequence[int]) -> tuple[float, float, float, float]:
+    """A frame-pixel box as a YOLO row of the whole frame (gold labels: vision_replay reads
+    them against the full image)."""
+    w, h = float(size[0]), float(size[1])
+    x1, y1, x2, y2 = _box(box)
+    return (x1 + x2) / 2.0 / w, (y1 + y2) / 2.0 / h, (x2 - x1) / w, (y2 - y1) / h
+
+
+def crop_masks(masks: Iterable[Sequence[float]], crop: Sequence[float], pad_px: float = 0.0) -> list[list[float]]:
+    """The masked regions (grown by pad_px, the part pasted fully) in crop pixels, 1 decimal."""
+    x0, y0 = float(crop[0]), float(crop[1])
+    out = []
+    for m in masks:
+        c = clip_box(grow_box(m, pad_px), crop)
+        if c is not None:
+            out.append([_r1(c[0] - x0), _r1(c[1] - y0), _r1(c[2] - x0), _r1(c[3] - y0)])
+    return out
+
+
 # -- the contact sheet -------------------------------------------------------------
 
 SHEET_BG = (32, 32, 32)
@@ -3110,6 +3948,132 @@ def write_sheet_image(path: str | Path, sheet: np.ndarray) -> Path:
             pass
     save_image(p.with_suffix(".npy"), sheet, "npy")
     return p.with_suffix(".npy")
+
+
+# -- N12: review pages ----------------------------------------------------------------
+#
+# tools/vision_autolabel.py `review` draws its page A (one tile per part: render_sheet with
+# sheet_crop tiles, text_tile where the raw image is gone) and page B (whole frames with their
+# boxes: render_frames).
+
+PSEUDO_COLOUR = (120, 200, 255)          # page B: tonight's pseudo-labels (Yodle2's units, towers, UI)
+
+
+def text_tile(text: str, cell: int = 72, colour: Sequence[int] = DIM_COLOUR) -> np.ndarray:
+    """A cell x cell CELL_BG tile with a short text across its middle ("RAW GONE")."""
+    out = np.empty((int(cell), int(cell), 3), dtype=np.uint8)
+    out[:] = CELL_BG
+    scale = 2 if len(str(text)) * 8 <= int(cell) - 4 else 1
+    draw_text(out, 2, max(0, int(cell) // 2 - 5), str(text), colour, scale=scale, max_w=int(cell) - 4)
+    return out
+
+
+def draw_box(img: np.ndarray, box: Sequence[float], colour: Sequence[int], thickness: int = 2) -> None:
+    """Outline `box` (x1, y1, x2, y2 in pixels) on `img` in place, `thickness` pixels inward;
+    the parts of the outline outside the image are left out."""
+    h, w = img.shape[:2]
+    x0, y0 = int(math.floor(float(box[0]))), int(math.floor(float(box[1])))
+    x1, y1 = int(math.ceil(float(box[2]))) - 1, int(math.ceil(float(box[3]))) - 1
+    if x1 < x0 or y1 < y0 or x1 < 0 or y1 < 0 or x0 >= w or y0 >= h:
+        return
+    col = tuple(int(v) for v in colour)[:3]
+    cx0, cy0, cx1, cy1 = max(0, x0), max(0, y0), min(w - 1, x1), min(h - 1, y1)
+    for k in range(max(1, int(thickness))):
+        if 0 <= y0 + k < h:
+            img[y0 + k, cx0:cx1 + 1] = col
+        if 0 <= y1 - k < h:
+            img[y1 - k, cx0:cx1 + 1] = col
+        if 0 <= x0 + k < w:
+            img[cy0:cy1 + 1, x0 + k] = col
+        if 0 <= x1 - k < w:
+            img[cy0:cy1 + 1, x1 - k] = col
+
+
+def resize_nearest(img: np.ndarray, width: int, height: int) -> np.ndarray:
+    """`img` scaled to width x height by nearest neighbour (no image library)."""
+    a = np.asarray(img)
+    h, w = a.shape[:2]
+    width, height = max(1, int(width)), max(1, int(height))
+    ys = np.minimum(h - 1, ((np.arange(height) + 0.5) * h / height).astype(int))
+    xs = np.minimum(w - 1, ((np.arange(width) + 0.5) * w / width).astype(int))
+    return np.ascontiguousarray(a[ys][:, xs])
+
+
+@dataclass
+class FrameTile:
+    """One frame of page B: a title, text lines, the image (None: the raw is gone), its boxes
+    ((x1, y1, x2, y2) in the image's pixels, text, colour) and outlined regions (masks or
+    ignore regions: (box, colour))."""
+    title: str
+    image: np.ndarray | None = None
+    boxes: list[tuple[Sequence[float], str, Sequence[int]]] = field(default_factory=list)
+    regions: list[tuple[Sequence[float], Sequence[int]]] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
+    note: str = ""
+
+
+def render_frames(tiles: Sequence[FrameTile], *, width: int = 1400, cols: int = 4, header: Sequence[str] = (),
+                  scale: int = 2, label_scale: int = 1) -> np.ndarray:
+    """Page B of a review: header lines, then the frames in a grid of `cols`, each scaled to the
+    column width (nearest neighbour) under its title and lines. Boxes and regions are drawn on
+    the scaled frame (crisp lines at any scale), each box with its text above it."""
+    pad = 4
+    line_h = 5 * scale + 3
+    cols = max(1, int(cols))
+    thumb_w = max(32, (int(width) - pad) // cols - pad)
+    W = pad + cols * (thumb_w + pad)
+    thumbs: list[np.ndarray] = []
+    for t in tiles:
+        if t.image is None:
+            th = int(round(thumb_w * 16 / 9))
+            img = np.empty((th, thumb_w, 3), dtype=np.uint8)
+            img[:] = CELL_BG
+            draw_text(img, pad, th // 2, t.note or "raw deleted", DIM_COLOUR, scale=scale, max_w=thumb_w - 2 * pad)
+            thumbs.append(img)
+            continue
+        src = np.asarray(t.image)[..., :3]
+        h, w = src.shape[:2]
+        sx = thumb_w / float(w)
+        th = max(1, int(round(h * sx)))
+        sy = th / float(h)
+        img = resize_nearest(src, thumb_w, th).copy()
+
+        def scaled(b: Sequence[float]) -> Box4:
+            return (float(b[0]) * sx, float(b[1]) * sy, float(b[2]) * sx, float(b[3]) * sy)
+
+        for box, colour in t.regions:
+            draw_box(img, scaled(box), colour, 1)
+        for box, text, colour in t.boxes:
+            sb = scaled(box)
+            draw_box(img, sb, colour, 2)
+            if text:
+                tx = min(max(0, int(sb[0])), thumb_w - 1)
+                ty = max(0, int(sb[1]) - 5 * label_scale - 2)
+                draw_text(img, tx, ty, text, colour, scale=label_scale, max_w=thumb_w - tx)
+        thumbs.append(img)
+    n_lines = 1 + max((len(t.lines) for t in tiles), default=0)
+    rows = [list(range(i, min(i + cols, len(tiles)))) for i in range(0, len(tiles), cols)]
+    row_h = [pad + n_lines * line_h + max(thumbs[j].shape[0] for j in r) + pad for r in rows]
+    top = pad + len(header) * line_h + pad
+    H = top + sum(row_h) + pad
+    page = np.empty((H, W, 3), dtype=np.uint8)
+    page[:] = SHEET_BG
+    y = pad
+    for s in header:
+        draw_text(page, pad, y, s, TEXT_COLOUR, scale=scale, max_w=W - 2 * pad)
+        y += line_h
+    y0 = top
+    for r, hgt in zip(rows, row_h):
+        for c, j in enumerate(r):
+            t, img = tiles[j], thumbs[j]
+            x0 = pad + c * (thumb_w + pad)
+            draw_text(page, x0, y0 + pad, t.title, TEXT_COLOUR, scale=scale, max_w=thumb_w)
+            for k, s in enumerate(t.lines):
+                draw_text(page, x0, y0 + pad + (k + 1) * line_h, s, DIM_COLOUR, scale=scale, max_w=thumb_w)
+            iy = y0 + pad + n_lines * line_h
+            page[iy:iy + img.shape[0], x0:x0 + img.shape[1]] = img
+        y0 += hgt
+    return page
 
 
 # ---------------------------------------------------------------------------
