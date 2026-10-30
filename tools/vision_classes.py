@@ -39,7 +39,10 @@ level 1, primary_card, cards, forms and katacr.
   primary_card  the CREATING card, what an engine entity's card_id says and what
                 --live-compat rows (tools/rs_rows.py) use as the unit id: a card that
                 summons the class directly, the one making the fewest other classes, then
-                the cheapest (Skeleton -> Skeletons, not SkeletonArmy or Witch).
+                the cheapest (Skeleton -> Skeletons, not SkeletonArmy or Witch). The count
+                is of what the card makes plain or evolved: a hero form's own units (the
+                hero Musketeer's turret, the hero Goblins' flag and dummies) do not make
+                its card less primary (Goblin -> Goblins, not Goblin Gang).
   cards         every card that puts the class on the board, [card, "summon" | "spawn"],
                 primary first. card_for(cls, deck) picks the deck's card, so a Witch's
                 skeleton reads Witch when the deck has a Witch and no Skeletons.
@@ -64,7 +67,13 @@ The shipped file was generated from royalesim 0.1.42's 16.402.22 card table
 15.535 so that every table's names resolve. Its unit names are every troop and building
 record, the crown towers and the hero units: a superset of what unit_types_json() lists
 ("every troop and building record of the loaded card table, crown towers included, sorted
-by name"). `--engine` regenerates it from the engine itself, `--check` verifies coverage.
+by name"). A record counts wherever the table keeps it: the characters and buildings
+tables, and the records a hero form or an evolution carries inside its own (the hero
+Musketeer's MusketeerTurret in hero_forms[].tables.units, the evolved Skeleton Barrel's
+dropped barrels in evo_barrel). `--engine` regenerates it from the engine itself: its
+unit_types_json() and catalogue, and the card table it runs (data/engine.json's), read from
+the package's data/derived/ or else from the copy compiled into the extension
+(engine_card_table); `--check` verifies coverage.
 
 Imports only the standard library. The command line loads tools/rs_engine.py for its engine
 arguments, and royalesim only for --engine and --check. Never imports scripts/gamestate.
@@ -250,6 +259,9 @@ _HERO_SUFFIX = re.compile(r"^(?P<base>.+?)_?[Hh][Ee][Rr][Oo]$")
 
 #: Keys of the file written one entry per line.
 _ROW_KEYS = frozenset({"_comment", "classes", "units", "cards", "katacr", "form_bases"})
+#: source.unit_names of a file made from card tables (--card-json): table_unit_names.
+RECORD_NAMES_SOURCE = ("card-table records (troops, buildings, crown towers, hero units, and "
+                       "the records hero forms and evolutions carry)")
 
 
 # ---------------------------------------------------------------------------
@@ -362,24 +374,60 @@ def _tower(name: str) -> bool:
     return name in TOWER_UNITS or bool(_TOWER_NAME.search(name))
 
 
+#: The source tables of a troop or building record (a unit record's "source_table").
+_RECORD_TABLES = ("characters", "buildings")
+
+
+def _is_record(obj: Any) -> bool:
+    """A troop or building record: a mapping with a source_table of _RECORD_TABLES and a name."""
+    return (isinstance(obj, Mapping) and obj.get("source_table") in _RECORD_TABLES
+            and isinstance(obj.get("name"), str) and bool(obj["name"]))
+
+
+def _embedded_records(obj: Any):
+    """Every troop or building record inside `obj` (obj included), depth first: the records a
+    hero form or an evolution carries in its own (hero_forms[].tables.units, evo_barrel.extra,
+    evo_fall.grounded, evo_rage_ghost.ghost_record)."""
+    if isinstance(obj, Mapping):
+        if _is_record(obj):
+            yield obj
+        for v in obj.values():
+            yield from _embedded_records(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _embedded_records(v)
+
+
+def _record_info(name: str, rec: Mapping[str, Any]) -> dict[str, Any]:
+    building = rec.get("source_table") == "buildings"
+    kind = KIND_TOWER if _tower(name) else KIND_BUILDING if building else KIND_TROOP
+    return _info(rec, kind, building)
+
+
 def table_unit_records(table: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Every unit of a card table -> {kind, flying, building, deploy_time_ms, hitpoints}:
-    the crown towers, the characters and buildings tables, and the units hero forms summon
-    (which have no row of their own)."""
+    the crown towers, the characters and buildings tables, the units hero forms summon
+    (which have no row of their own), then every other troop or building record a hero form
+    or an evolution carries inside its own (the hero Musketeer's MusketeerTurret, the hero
+    Balloon's BalloonHero_Bomb, the evolved Skeleton Barrel's dropped barrels): the engine's
+    unit_types_json() lists those too."""
     out: dict[str, dict[str, Any]] = {}
     for rec in table.get("towers") or ():
         out[rec["name"]] = _info(rec, KIND_TOWER, True)
     for name, rec in (table.get("units") or {}).items():
         if name in out:
             continue
-        building = rec.get("source_table") == "buildings"
-        kind = KIND_TOWER if _tower(name) else KIND_BUILDING if building else KIND_TROOP
-        out[name] = _info(rec, kind, building)
+        out[name] = _record_info(name, rec)
     for rec in table.get("hero_forms") or ():
         unit = rec.get("summon_character")
         if unit and unit not in out:
             building = rec.get("kind") == "building"
             out[unit] = _info(rec, KIND_BUILDING if building else KIND_TROOP, building)
+    for group in ("evolutions", "hero_forms"):
+        for form_rec in table.get(group) or ():
+            for rec in _embedded_records(form_rec):
+                if rec["name"] not in out:
+                    out[rec["name"]] = _record_info(rec["name"], rec)
     return out
 
 
@@ -412,7 +460,9 @@ def _summons(rec: Mapping[str, Any]) -> list[str]:
 #: ("CharacterType:X"), morphs and transforms, attached riders, and the evolutions' own
 #: blocks (evo_ghost.left, evo_cage.unit, ...). A record also names units it does NOT make
 #: (raw.Name, ClonedVersion, form_of, an enchant's multipliers, excluded_units, an
-#: earthquake's hidden_split, a parry's attackers), so those keys are left out.
+#: earthquake's hidden_split, a parry's attackers), so those keys are left out. A troop or
+#: building record the record carries inside it (_embedded_records: evo_barrel.extra) is a
+#: unit it makes as well.
 _CREATES = frozenset({
     "summon_character", "character", "character2", "characters", "spawn_character", "spawns",
     "spawn", "SummonCharacter", "SpawnCharacter", "SpawnCharacter2", "DeathSpawnCharacter",
@@ -434,14 +484,18 @@ _OBJECT_KEYS = frozenset({
 })
 
 
-def _refs(obj: Any, keys: frozenset, key: str | None = None, parent: str | None = None):
-    """Name candidates under `keys` (and evo_fall.grounded.name), anywhere in a record."""
+def _refs(obj: Any, keys: frozenset, key: str | None = None, parent: str | None = None, *,
+          records: bool = False):
+    """Name candidates under `keys` (and evo_fall.grounded.name), anywhere in a record; with
+    records=True also the name of every troop or building record found in it (_is_record)."""
     if isinstance(obj, Mapping):
+        if records and _is_record(obj):
+            yield obj["name"]
         for k, v in obj.items():
-            yield from _refs(v, keys, str(k), key)
+            yield from _refs(v, keys, str(k), key, records=records)
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            yield from _refs(v, keys, key, parent)
+            yield from _refs(v, keys, key, parent, records=records)
     elif isinstance(obj, str) and (key in keys or (parent == "grounded" and key == "name")):
         yield obj.rsplit(":", 1)[-1]          # "CharacterType:Graveyard_rework_Skeleton"
 
@@ -454,7 +508,7 @@ def _made_by(rec: Mapping[str, Any], units: Mapping[str, Mapping[str, Any]],
     stack = [rec]
     while stack:
         r = stack.pop()
-        for name in _refs(r, _CREATES):
+        for name in _refs(r, _CREATES, records=True):
             if name in known and name not in made:
                 made.add(name)
                 if name in units:
@@ -486,14 +540,17 @@ def table_form_bases(tables: Sequence[Mapping[str, Any]]) -> dict[str, tuple[str
     return out
 
 
-def creators_of(tables: Sequence[Mapping[str, Any]], unit_names: Iterable[str]
+def creators_of(tables: Sequence[Mapping[str, Any]], unit_names: Iterable[str],
+                forms: dict[tuple[str, str], set[int]] | None = None
                 ) -> dict[str, dict[str, str]]:
     """unit -> {card: "summon" | "spawn"}: the cards that put each unit on the board.
 
     "summon": the card (or its evolution / hero form) deploys it. "spawn": what the card's
     record, or a unit it makes, creates under a _CREATES key (spawner, death spawn, a
-    projectile's or an area effect's spawn, an action graph's CharacterType:..., a morph):
-    Witch -> Skeleton, Golem -> Golemite, Graveyard -> Graveyard_rework_Skeleton."""
+    projectile's or an area effect's spawn, an action graph's CharacterType:..., a morph) or
+    carries as a record of its own: Witch -> Skeleton, Golem -> Golemite, Graveyard ->
+    Graveyard_rework_Skeleton, the hero Musketeer -> MusketeerTurret. `forms`, when given, is
+    filled with (unit, card) -> the forms of the card's records that make the unit."""
     known = frozenset(unit_names)
     records: dict[str, Mapping[str, Any]] = {}
     objects: dict[str, Mapping[str, Any]] = {}
@@ -508,7 +565,7 @@ def creators_of(tables: Sequence[Mapping[str, Any]], unit_names: Iterable[str]
                 objects.setdefault(name, rec)
     out: dict[str, dict[str, str]] = {}
     for table in tables:
-        for card, rec, _form in _card_records(table):
+        for card, rec, form in _card_records(table):
             direct = set(_summons(rec)) & known
             reach = _made_by(rec, records, objects, known) | direct
             for unit in reach:
@@ -516,6 +573,8 @@ def creators_of(tables: Sequence[Mapping[str, Any]], unit_names: Iterable[str]
                 have = out.setdefault(unit, {})
                 if have.get(card) != "summon":
                     have[card] = rel
+                if forms is not None:
+                    forms.setdefault((unit, card), set()).add(form)
     return out
 
 
@@ -582,8 +641,8 @@ def build(unit_names: Iterable[str], tables: Sequence[Mapping[str, Any]] = (), *
 
     tables     card-table JSON documents, preferred first: unit stats, creators, forms.
     fallback_tables  more tables, whose unit stats rank below `previous`'s (--engine with no
-               --card-json reads the wheel's data/derived/cards.json, an older table than the
-               one the shipped file was made from).
+               --card-json: the wheel's data/derived/cards.json, the engine's own 15.535
+               table, when the table the engine runs is another one).
     previous   an earlier classes.json: its ids are kept (new classes are appended, sorted),
                its classes and units stay in, its user merges apply, and its stats fill in
                units the tables lack.
@@ -637,7 +696,8 @@ def build(unit_names: Iterable[str], tables: Sequence[Mapping[str, Any]] = (), *
         unit_class[name] = (cls, form)
         groups.setdefault(cls, {}).setdefault(form, []).append(name)
 
-    creators = creators_of(every_table, names)
+    made_as: dict[tuple[str, str], set[int]] = {}
+    creators = creators_of(every_table, names, made_as)
     allowed = None if catalogue is None else set(catalogue)
     elixir: dict[str, int] = {}
     card_recs: dict[str, Mapping[str, Any]] = {}
@@ -665,6 +725,14 @@ def build(unit_names: Iterable[str], tables: Sequence[Mapping[str, Any]] = (), *
     for cls, cards in class_cards.items():
         for card in cards:
             makes.setdefault(card, set()).add(cls)
+    # The primary card's "fewest other classes" counts what a card makes plain or evolved: a
+    # hero form's own units (a turret, a flag, dummies) do not make its card less primary.
+    plain_makes: dict[str, set[str]] = {}
+    for cls, cards in class_cards.items():
+        units = [u for us in groups[cls].values() for u in us]
+        for card in cards:
+            if any(made_as.get((u, card), set()) & {FORM_BASE, FORM_EVO} for u in units):
+                plain_makes.setdefault(card, set()).add(cls)
 
     prev_by_name = {c["name"]: c for c in prev_classes}
     class_info: dict[str, dict[str, Any]] = {}
@@ -681,7 +749,7 @@ def build(unit_names: Iterable[str], tables: Sequence[Mapping[str, Any]] = (), *
             # but a building on screen. Flying stays per form (evolved Royal Hogs fly in).
             f["building"] = low["building"]
         cards = sorted(class_cards[cls].items(),
-                       key=lambda kv: (kv[1] != "summon", len(makes.get(kv[0], ())),
+                       key=lambda kv: (kv[1] != "summon", len(plain_makes.get(kv[0], ())),
                                        elixir.get(kv[0], 99), kv[0]))
         cards_list = [[card, rel] for card, rel in cards]
         if not cards_list and cls in prev_by_name:
@@ -1234,6 +1302,79 @@ def _engine(args):
     return rs_engine, royalesim, rs_engine.make_battle(cfg, royalesim), cfg
 
 
+#: File suffixes of a compiled Python extension (royalesim.abi3.so, royalesim.pyd).
+_EXTENSION_SUFFIXES = (".so", ".pyd", ".dylib")
+
+
+def _extension_files(royalesim: Any) -> list[Path]:
+    """royalesim's compiled extension: its native module's file, then any other extension
+    file in the package folder."""
+    found: dict[str, Path] = {}
+    for mod in (getattr(royalesim, "_native", None), getattr(royalesim, "royalesim", None)):
+        f = getattr(mod, "__file__", None)
+        if f and Path(f).suffix.lower() in _EXTENSION_SUFFIXES:
+            found.setdefault(str(Path(f).resolve()), Path(f))
+    pkg = getattr(royalesim, "__file__", None)
+    if pkg and Path(pkg).resolve().parent.is_dir():
+        for p in sorted(Path(pkg).resolve().parent.iterdir()):
+            if p.suffix.lower() in _EXTENSION_SUFFIXES:
+                found.setdefault(str(p.resolve()), p)
+    return list(found.values())
+
+
+def embedded_table(data: bytes, version: str) -> dict[str, Any] | None:
+    """The card-table document whose "version" is `version` in `data`, the bytes of
+    royalesim's compiled extension (it carries every table it can run as JSON text, its first
+    key "version"); None when there is none."""
+    key = re.escape(str(version).encode("utf-8"))
+    pattern = re.compile(rb'"version"\s*:\s*"' + key + rb'"')
+    decoder = json.JSONDecoder()
+    for m in pattern.finditer(data):
+        start = data.rfind(b"{", 0, m.start())
+        if start < 0 or data[start + 1:m.start()].strip():
+            continue                    # not the first key of an object
+        try:
+            doc, _end = decoder.raw_decode(data[start:].decode("utf-8", errors="replace"))
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("version") == version:
+            return doc
+    return None
+
+
+def engine_card_table(battle: Any, royalesim: Any) -> tuple[dict[str, Any] | None, str]:
+    """(the card table `battle` runs as a document, where it was read). Battle.card_table()
+    (royalesim 0.1.42+) names it. A data/derived/cards*.json of the package with that version
+    is read first, cards.json before the others (a wheel ships the engine's own 15.535 table
+    and a 2018 one as files), else the copy compiled into the extension (embedded_table).
+    (None, why) when it is in neither."""
+    fn = getattr(battle, "card_table", None)
+    version = fn() if callable(fn) else fn
+    if not version:
+        return None, "the engine names no card table (Battle.card_table(), royalesim 0.1.42+)"
+    version = str(version)
+    data_dir = getattr(royalesim, "data_dir", None)
+    derived = Path(data_dir()) / "derived" if callable(data_dir) else None
+    if derived is not None and derived.is_dir():
+        files = sorted(derived.glob("cards*.json"), key=lambda p: (p.name != "cards.json", p.name))
+        for path in files:
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(doc, dict) and doc.get("version") == version:
+                return doc, f"royalesim data/derived/{path.name}"
+    for path in _extension_files(royalesim):
+        try:
+            doc = embedded_table(path.read_bytes(), version)
+        except OSError:
+            continue
+        if doc is not None:
+            return doc, f"royalesim {path.name} (its compiled-in copy)"
+    return None, (f"card table {version} is neither in royalesim's data/derived/ nor compiled "
+                  "into its extension")
+
+
 def read_katacr_yaml(path: str | Path) -> list[str]:
     """Class names in id order from a dataset yaml (`  id: name` lines under `names:`)."""
     names: dict[int, str] = {}
@@ -1331,17 +1472,30 @@ def main(argv: list[str] | None = None) -> int:
         rs_engine_mod, royalesim, battle, cfg = _engine(args)
         names = json.loads(battle.unit_types_json())
         catalogue = [str(row[0]) for row in json.loads(battle.catalogue_json())]
+        where = None
         if not tables:
+            # The table the engine runs (data/engine.json's), then the wheel's own as fallback.
+            table, where = engine_card_table(battle, royalesim)
+            if table is not None:
+                tables = [table]
+                print(f"card table {table.get('version')}: {where}")
+            else:
+                print(f"warning: {where}; unit stats and creators come from the package's "
+                      "data/derived/cards.json and the old file only")
             derived = Path(royalesim.data_dir()) / "derived" / "cards.json"
             if derived.is_file():
-                fallback = [json.loads(derived.read_text(encoding="utf-8"))]
+                own = json.loads(derived.read_text(encoding="utf-8"))
+                if not tables or own.get("version") != tables[0].get("version"):
+                    fallback = [own]
         fp = rs_engine_mod.fingerprint(battle, royalesim, cfg)
         source = {"unit_names": "engine unit_types_json()",
                   "engine": {k: fp.get(k) for k in ("version", "card_table", "unit_types",
                                                     "unit_types_digest", "catalogue_sha1")}}
+        if where is not None and tables:
+            source["card_table_from"] = where
     else:
         names = sorted({n for t in tables for n in table_unit_names(t)})
-        source = {"unit_names": "card-table records (troops, buildings, crown towers, hero units)"}
+        source = {"unit_names": RECORD_NAMES_SOURCE}
     source["card_tables"] = [str(t.get("version", "?")) for t in tables + fallback]
     if args.note:
         source["note"] = args.note

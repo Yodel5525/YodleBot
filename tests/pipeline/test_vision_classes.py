@@ -12,6 +12,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -37,11 +38,15 @@ vc = _load("vision_classes")
 
 EVO, HERO = vc.FORM_EVO, vc.FORM_HERO
 HOG26 = ("Cannon", "Fireball", "HogRider", "IceGolemite", "IceSpirits", "Musketeer", "Skeletons", "Log")
-#: Hog 2.6's unit classes -> the card that creates them.
+#: Hog 2.6's unit classes -> the card that creates them (the hero Musketeer's ability puts
+#: down a MusketeerTurret, a building of its own: the 16.402 table's hero_forms[].tables.units).
 HOG26_CLASSES = {"Cannon": "Cannon", "HogRider": "HogRider", "IceGolemite": "IceGolemite",
-                 "IceSpirits": "IceSpirits", "Musketeer": "Musketeer", "Skeleton": "Skeletons"}
+                 "IceSpirits": "IceSpirits", "Musketeer": "Musketeer", "Skeleton": "Skeletons",
+                 "MusketeerTurret": "Musketeer"}
 HOG26_FORMS = {"Cannon": {0, 1}, "HogRider": {0}, "IceGolemite": {0, 2}, "IceSpirits": {0, 1},
-               "Musketeer": {0, 1, 2}, "Skeleton": {0, 1}}
+               "Musketeer": {0, 1, 2}, "Skeleton": {0, 1}, "MusketeerTurret": {0}}
+#: Hog 2.6's classes that are buildings.
+HOG26_BUILDINGS = {"Cannon", "MusketeerTurret"}
 #: (class, form) -> KataCR detector class, for every Hog 2.6 form KataCR has.
 HOG26_KATACR = {("Cannon", 0): "cannon", ("HogRider", 0): "hog-rider",
                 ("IceGolemite", 0): "ice-golem", ("IceSpirits", 0): "ice-spirit",
@@ -233,7 +238,8 @@ def test_hog26_classes(table):
         assert c.primary_card == card and table.card_for(cls, HOG26) == card
         assert set(c.forms) == HOG26_FORMS[cls]
         assert not c.flying and c.deploy_time_ms == 1000
-        assert c.building == (cls == "Cannon") and c.kind == ("building" if cls == "Cannon" else "troop")
+        building = cls in HOG26_BUILDINGS
+        assert c.building == building and c.kind == ("building" if building else "troop")
     assert table["Cannon"].form(EVO).building           # the evolved Cannon is a building too
     assert table.unit_name("Musketeer", HERO) == "MusketeerHero"
     assert table.unit_name("HogRider", EVO) == "HogRider"          # no such form: the base
@@ -454,6 +460,75 @@ def test_imports_stay_light():
     assert imported <= {"__future__", "argparse", "hashlib", "importlib", "json", "re", "sys",
                         "collections", "dataclasses", "pathlib", "types", "typing", "royalesim"}
     assert "memread" not in (TOOLS / "vision_classes.py").read_text(encoding="utf-8")
+
+
+def test_records_carried_by_hero_forms_and_evolutions():
+    """A 16.402 table keeps some troop and building records inside a hero form or an evolution
+    (hero_forms[].tables.units, evo_barrel.extra): they are units of the table (the engine's
+    unit_types_json() lists them), made by that card, and a hero form's own units do not make
+    its card less primary. TwinMusketeers (3 elixir) summons a Musketeer and a Bat."""
+    def rec(name, source, hp, **extra):
+        return {"name": name, "source_table": source, "hitpoints": hp, "deploy_time_ms": 1000,
+                **extra}
+    tbl = tiny_table()
+    hero = tbl["hero_forms"][0]
+    hero["ability"] = {"effect": {"unit": "MusketeerTurret"}}
+    hero["tables"] = {"units": {"MusketeerHero": rec("MusketeerHero", "characters", 282),
+                                "MusketeerTurret": rec("MusketeerTurret", "buildings", 600)}}
+    tbl["evolutions"][0]["evo_barrel"] = {"extra": rec(
+        "SkeletonDrop", "buildings", None, deploy_time_ms=600,
+        death_spawn={"character": "Skeleton", "count": 2})}
+    tbl["cards"].append({"name": "TwinMusketeers", "kind": "troop", "elixir": 3,
+                         "summon_character": "Musketeer", "second_summon": {"character": "Bat"}})
+    names = vc.table_unit_names(tbl)
+    assert names == sorted(TINY_UNITS + ["MusketeerTurret", "SkeletonDrop"])
+    doc, report = vc.build(names, [tbl])
+    t = vc.ClassTable(doc)
+    turret, drop = t["MusketeerTurret"], t["SkeletonDrop"]
+    assert (turret.kind, turret.building, turret.form(0).hitpoints) == ("building", True, 600)
+    assert turret.cards == (("Musketeer", "spawn"),) and turret.primary_card == "Musketeer"
+    # The dropped barrel is named by no _CREATES key: the record the evolution carries is all.
+    assert drop.cards == (("Skeletons", "spawn"),) and drop.deploy_time_ms == 600
+    assert (drop.kind, drop.form(0).hitpoints) == ("building", None)
+    assert "SkeletonDrop" not in report["no_creator"]
+    # Musketeer makes Musketeer and (as a hero) the turret, TwinMusketeers Musketeer and Bat:
+    # counted plain, Musketeer makes fewer classes, so the dearer card stays primary.
+    assert t["Musketeer"].cards == (("Musketeer", "summon"), ("TwinMusketeers", "summon"))
+    assert t["Musketeer"].form(HERO).hitpoints == 282
+    assert doc["cards"]["Musketeer"]["classes"] == ["Musketeer", "MusketeerTurret"]
+    assert t.deck_classes(["Musketeer"]) == {"Musketeer", "MusketeerTurret"}
+    assert t["Skeleton"].cards == (("Skeletons", "summon"), ("Tombstone", "spawn"),
+                                   ("Witch", "spawn"))
+
+
+def test_embedded_table_reads_a_compiled_in_card_table():
+    a = {"version": "cards-a.1", "units": {"X": {"name": "X"}}}
+    b = {"version": "cards-b.1", "note": 'not "version": "cards-a.1" (inside a string)'}
+    blob = (b"\x7fELF\x00{not json " + json.dumps(b, indent=1).encode() + b"cards-a.json"
+            + json.dumps(a, indent=1).encode() + b"\xff\xfe")
+    assert vc.embedded_table(blob, "cards-a.1") == a
+    assert vc.embedded_table(blob, "cards-b.1") == b
+    assert vc.embedded_table(blob, "cards-c.1") is None
+
+
+def test_engine_card_table_reads_the_package_file_then_the_extension(tmp_path):
+    ran, own = {"version": "cards-x.1", "units": {}}, {"version": "cards-own.1", "units": {}}
+    pkg = tmp_path / "royalesim"
+    (pkg / "data" / "derived").mkdir(parents=True)
+    (pkg / "data" / "derived" / "cards.json").write_text(json.dumps(own), encoding="utf-8")
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "royalesim.abi3.so").write_bytes(b"\x7fELF" + json.dumps(ran).encode() + b"\x00")
+    rs = types.SimpleNamespace(__file__=str(pkg / "__init__.py"), data_dir=lambda: pkg / "data")
+    battle = types.SimpleNamespace(card_table=lambda: "cards-x.1")
+    assert vc.engine_card_table(battle, rs) == (
+        ran, "royalesim royalesim.abi3.so (its compiled-in copy)")
+    battle.card_table = lambda: "cards-own.1"
+    assert vc.engine_card_table(battle, rs) == (own, "royalesim data/derived/cards.json")
+    battle.card_table = lambda: "cards-gone.1"
+    doc, why = vc.engine_card_table(battle, rs)
+    assert doc is None and "cards-gone.1" in why
+    doc, why = vc.engine_card_table(types.SimpleNamespace(), rs)       # royalesim before 0.1.42
+    assert doc is None and "card_table" in why
 
 
 # ---------------------------------------------------------------------------
