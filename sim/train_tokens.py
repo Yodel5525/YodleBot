@@ -49,6 +49,38 @@ default is wait_keep_at_build itself (no further thinning). Either way
 args.json records the overall share as "wait_keep", which is what RSAgent
 (tools/rs_eval.py) adds back as log(1 / wait_keep) on the wait logit.
 
+Full corpus (E18; tokens-13). By default the kept rows are loaded into RAM (load), as before.
+  --memmap        --data is a store of tools/rs_rows_compact.py (per-column .npy files, memory
+                  mapped read-only): memmap_keep picks exactly the rows load() would (the same
+                  filters, wait draws and --max-rows sample), the two validation sets are read
+                  into RAM (gather), and each epoch's training rows are read from disk a window
+                  (--memmap-window rows, a multiple of --batch) at a time in epoch_order: runs of
+                  CHUNK_ROWS consecutive kept rows in a random order, shuffled within each window
+                  (every row once an epoch); the batches reach CUDA through two pinned buffers
+                  (PinnedStager). With --phase-balance the order is balanced_order's, read the same
+                  way. What this holds in RAM (memmap_ram_need: the ids and the order, the
+                  validation rows, a window twice and two batches) must fit --ram-budget-gb
+                  (default 6, for a 16 GB PC with MuMu and the browser closed), else it stops
+                  before training, naming --val-max-rows and --memmap-window.
+  --gpu-resident  the training rows are copied to the GPU once (from RAM, or from the store a
+                  window at a time) and each batch is an index_select there, in the order RAM
+                  training uses (np.random.permutation, or balanced_order); refused (SystemExit,
+                  before anything is written) when they need more than --gpu-budget-gb (default
+                  7, of the RTX 4070 Super's 12) with their int64 order (resident_gpu_need).
+  --val-max-rows  at most this many rows of each validation set (0: --max-rows's cap, as before).
+  --mirror P      each training row is flipped left-right with probability P (Mirror, seeded by
+                  --seed, its own stream): by tools/rs_schema.py's mirror rules, unit x -> 1 - x
+                  (own-frame x / 18000, the tile x -> 17 - x of the board) where a unit is,
+                  towers left <-> right on both sides, spell centre and aim x -> 1 - x, and a
+                  play's tile x -> 17 - x; nothing else has a side (own_pending holds cards and
+                  land times only, the hand, buttons and scalars none), and the units keep their
+                  order (sorted by distance from the own king, on the centre line). Unit and
+                  spell features are then float32 (the model reads them as float32 anyway), so a
+                  flip twice is the identity. 0 (the default) draws nothing: the run is the one
+                  before E18.
+args.json records these flags; the checkpoint meta does not change (the store's vocab.json is a
+copy of the rows').
+
 Output in <--runs>/<--name>/:
 * ep01.pt, ep02.pt, ...: the model after each epoch (ep01.pt is the one printed
   as "epoch 0"; the "epoch" stored inside a checkpoint stays 0-based);
@@ -77,6 +109,7 @@ import torch
 
 from .model_tokens import (RS, TokenPolicy, gate_targets, load_matching, losses, model_schema,
                            target_slot)
+import rs_rows_compact as RC  # noqa: E402  (tools/ is on sys.path once model_tokens is imported)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "rs_rows"
@@ -94,7 +127,7 @@ DEFAULT_WAIT_KEEP = 0.35
 PROVENANCE_KEYS = ("engine", "version", "fingerprint", "engine_fingerprint", "card_table",
                    "schema", "obs_delay", "obs_delay_jitter", "wait_keep_at_build",
                    "live_compat", "opp_memory", "visibility", "decision_rows", "trust",
-                   "presses")
+                   "presses", "wait_thinning", "selection")
 #: --trust (E09): the column the trusted-rows filter reads. legacy: `trusted`, as before;
 #: v2: `trusted_v2`, which tools/rs_rows.py --trust v2 writes next to `trusted`.
 TRUST_LEGACY, TRUST_V2 = "legacy", "v2"
@@ -225,14 +258,33 @@ def row_record(root: Path, trust: str = TRUST_LEGACY, schema=None) -> dict:
                 presses += int((z[PRESS_COLUMN] > 0).sum())
     if missing:
         raise SystemExit(missing_trust(trust, missing, root, len(paths)))
+    return _record(spec, trust, col, bool(press_shards), presses, root)
+
+
+def _record(spec, trust: str, col: str, press_column: bool, presses: int, root) -> dict:
+    """row_record's dict for rows of `spec` with (or without) an act_press column holding
+    `presses` press rows."""
     if spec.v2:
         labelled = bool(presses) or presses_labelled(_vocab_of(root))
         return {"trust": trust, "trust_column": col,
                 "press_rows": PRESS_TRAINED if labelled else PRESS_NONE,
                 "press_rows_excluded": 0, PRESS_TRAINED_KEY: presses}
     return {"trust": trust, "trust_column": col,
-            "press_rows": PRESS_EXCLUDED if press_shards else PRESS_NONE,
+            "press_rows": PRESS_EXCLUDED if press_column else PRESS_NONE,
             "press_rows_excluded": presses}
+
+
+def row_record_store(store, trust: str = TRUST_LEGACY, schema=None) -> dict:
+    """row_record of a compact store (--memmap): the record row_record gives for the shards it
+    was made from (SystemExit the same way when --trust names a column the rows lack)."""
+    spec = rows_schema(store.root) if schema is None else _spec(schema)
+    col = trust_column(trust)
+    if trust != TRUST_LEGACY and col not in store:
+        names = store.shard_names
+        raise SystemExit(missing_trust(trust, names, store.root, len(names)))
+    has = PRESS_COLUMN in store
+    return _record(spec, trust, col, has, store.count_positive(PRESS_COLUMN) if has else 0,
+                   store.root)
 
 
 def _row_entry(rows: dict) -> dict:
@@ -396,7 +448,12 @@ def balanced_order(data, alpha: float, rng):
     are capped at 20x its size per epoch, so a handful of rows is not drilled
     thousands of times.
     """
-    ph = phase_of(data)
+    return balanced_from_phases(phase_of(data), alpha, rng)
+
+
+def balanced_from_phases(ph, alpha: float, rng):
+    """balanced_order of rows whose phase_of is `ph` (TrainFeed computes it once, --memmap from
+    the store)."""
     counts = np.bincount(ph, minlength=12).astype(float)
     w = (1.0 / np.maximum(counts[ph], 1)) ** alpha
     n = len(ph)
@@ -424,6 +481,327 @@ def batches(data, size: int, shuffle: bool, device, order=None):
                 t = t.float()
             b[c] = t.to(device, non_blocking=True)
         yield b
+
+
+# ---------------------------------------------------------------------------
+# E18: rows on disk (--memmap), on the GPU (--gpu-resident), and the mirror
+# ---------------------------------------------------------------------------
+
+#: --memmap-window default (rounded down to a multiple of --batch), the runs of consecutive kept
+#: rows an epoch is cut into (epoch_order), and the rows a split is picked from at a time.
+WINDOW_ROWS = 1 << 18
+CHUNK_ROWS = 1024
+KEEP_CHUNK = 1 << 22
+#: --ram-budget-gb / --gpu-budget-gb defaults for the PC (16 GB RAM, RTX 4070 Super 12 GB): what
+#: the trainer's own arrays may take next to Windows, the CUDA context and the file cache; what
+#: the rows may take on the GPU next to the model, its optimiser and its activations.
+RAM_BUDGET_GB, GPU_BUDGET_GB = 6.0, 7.0
+GB = 2 ** 30
+#: Mirror's first seed word (default_rng([MIRROR_SALT, --seed])), so its draws are its own.
+MIRROR_SALT = 0x4D52
+_SMALL_INTS = (torch.int8, torch.uint8, torch.int16, torch.int32)
+
+
+def open_store(root):
+    """The compact store (tools/rs_rows_compact.py) in `root`, for --memmap; SystemExit naming
+    the command that makes one when `root` holds none (or one this code cannot read)."""
+    try:
+        return RC.CompactRows(root)
+    except FileNotFoundError:
+        rows = root if any(Path(root).glob("shard-*.npz")) else "<rows folder>"
+        raise SystemExit(f"--memmap: no {RC.COMPACT_JSON} in {root}. Make the store with "
+                         f"tools/rs_rows_compact.py --rows {rows}, then train with --memmap "
+                         f"--data <rows folder>/compact") from None
+    except RC.CompactError as exc:
+        raise SystemExit(f"--memmap: {exc}") from None
+
+
+def memmap_keep(store, split: str, wait_keep: float, trusted_only: bool, hog_only: bool,
+                seed: int = 0, *, max_rows: int = 0, trust: str = TRUST_LEGACY, schema=None,
+                chunk: int = KEEP_CHUNK) -> np.ndarray:
+    """The store rows load() keeps for the same arguments, as ascending int64 row ids: the same
+    filters (_keep_mask on `chunk` rows at a time, so one wait draw per row in row order, the
+    stream load() draws a shard at a time) and the same --max-rows sample (_cap), so gather()
+    of these ids is load()'s rows in load()'s order. ValueError where load() raises one."""
+    spec = rows_schema(store.root) if schema is None else _spec(schema)
+    presses = PRESS_TRAINED if spec.v2 else PRESS_EXCLUDED
+    col = trust_column(trust)
+    if trusted_only and col not in store:
+        raise ValueError(missing_trust(trust, ["the compact store"], store.root))
+    if spec.v2:
+        lacking = [c for c in cols_for(spec) if c not in store]
+        if lacking:
+            raise ValueError(f"the compact store in {store.root} has no {lacking}: not rows of "
+                             f"{spec.name} (tools/rs_rows.py --schema v2)")
+    need = (["split", "act_card", "hog"] + ([col] if trusted_only else [])
+            + ([PRESS_COLUMN] if PRESS_COLUMN in store else []))
+    rng = np.random.default_rng(seed)
+    picks = []
+    for a in range(0, store.rows, chunk):
+        z = {c: np.asarray(store[c][a:a + chunk]) for c in need}
+        z["split"] = store.decode_split(z["split"])
+        keep = _keep_mask(z, split, wait_keep, trusted_only, hog_only, rng, col, presses)
+        picks.append(np.flatnonzero(keep) + a)
+    found = sum(len(p) for p in picks)
+    picks = _cap(picks, max_rows, seed)
+    ids = (np.concatenate(picks) if picks else np.zeros(0)).astype(np.int64)
+    if len(ids) < found:
+        print(f"  {split}{' (hog)' if hog_only else ''}: {len(ids):,} of {found:,} rows "
+              f"(--max-rows {max_rows:,})", flush=True)
+    return ids
+
+
+def gather(store, cols, ids, window: int = WINDOW_ROWS) -> dict:
+    """Columns `cols` of the store rows `ids` (ascending) in RAM at the store's dtypes, read
+    `window` rows at a time: load()'s dict (values, keys in `cols` order) for memmap_keep's ids,
+    with the compacted dtypes (tools/rs_rows_compact.py) the batches widen anyway."""
+    out = {}
+    for c in cols:
+        src = store[c]
+        dst = out[c] = np.empty((len(ids),) + tuple(src.shape[1:]), dtype=src.dtype)
+        for a in range(0, len(ids), window):
+            dst[a:a + window] = src[ids[a:a + window]]
+    return out
+
+
+def store_phases(store, ids, window: int = WINDOW_ROWS) -> np.ndarray:
+    """phase_of of the store rows `ids`, read `window` rows at a time."""
+    ph = np.zeros(len(ids), dtype=np.int64)
+    for a in range(0, len(ids), window):
+        rows = ids[a:a + window]
+        ph[a:a + len(rows)] = phase_of({"scalars": np.asarray(store["scalars"][rows]),
+                                        "towers": np.asarray(store["towers"][rows])})
+    return ph
+
+
+def epoch_order(n: int, rng, chunk: int = CHUNK_ROWS, window: int = WINDOW_ROWS) -> np.ndarray:
+    """One epoch of positions 0..n-1, each exactly once, for rows read from disk: runs of `chunk`
+    consecutive positions in a random order, then each `window` of that shuffled within. A
+    window's rows lie in about window / chunk runs of the file, and a batch draws from all of
+    them."""
+    if n <= 0:
+        return np.zeros(0, dtype=np.int64)
+    chunk, window = max(1, int(chunk)), max(1, int(window))
+    runs = -(-n // chunk)
+    starts = rng.permutation(runs).astype(np.int64) * chunk
+    order = (starts[:, None] + np.arange(chunk, dtype=np.int64)[None, :]).reshape(-1)
+    order = order[order < n]
+    for w in range(0, n, window):
+        seg = order[w:w + window]
+        order[w:w + window] = seg[rng.permutation(len(seg))]
+    return order
+
+
+def to_model(b: dict) -> dict:
+    """The dtypes batches() gives the model: small ints (int8 / uint8 / int16 / int32) as int64,
+    float64 as float32, anything else as it is."""
+    out = {}
+    for c, t in b.items():
+        if t.dtype in _SMALL_INTS:
+            t = t.long()
+        elif t.dtype == torch.float64:
+            t = t.float()
+        out[c] = t
+    return out
+
+
+class PinnedStager:
+    """Host batches (dicts of numpy arrays) to `device` tensors. On CUDA every column goes
+    through one of `slots` pinned host buffers and an asynchronous copy; before a buffer is
+    filled again, the event recorded after its last copy is waited on, so the copy of one batch
+    overlaps the step on the one before. Elsewhere: torch.from_numpy."""
+
+    def __init__(self, device, slots: int = 2):
+        self.device = device
+        self.cuda = str(device).startswith("cuda")
+        self._bufs = [{} for _ in range(max(1, int(slots)))]
+        self._events = [None] * len(self._bufs)
+        self._k = 0
+
+    def __call__(self, arrays: dict) -> dict:
+        if not self.cuda:
+            return {c: torch.from_numpy(np.ascontiguousarray(a)) for c, a in arrays.items()}
+        slot = self._k % len(self._bufs)
+        self._k += 1
+        if self._events[slot] is not None:
+            self._events[slot].synchronize()
+        bufs, out = self._bufs[slot], {}
+        for c, a in arrays.items():
+            src = torch.from_numpy(np.ascontiguousarray(a))
+            buf = bufs.get(c)
+            if (buf is None or buf.dtype != src.dtype or buf.shape[1:] != src.shape[1:]
+                    or buf.shape[0] < src.shape[0]):
+                buf = bufs[c] = torch.empty(tuple(src.shape), dtype=src.dtype).pin_memory()
+            view = buf[:src.shape[0]]
+            view.copy_(src)
+            out[c] = view.to(self.device, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        self._events[slot] = event
+        return out
+
+
+def window_batches(store, cols, ids, order, size: int, window: int, put):
+    """Batches of `size` of the store rows ids[order] (columns `cols`), read a window at a time:
+    each window of `window` positions (a multiple of `size`) is read once, its rows in file
+    order, then cut into batches in `order`'s order and handed to `put` (PinnedStager) and
+    to_model. Every position of `order` is in one batch; all but the last are full."""
+    window = max(size, int(window) // size * size)
+    for w in range(0, len(order), window):
+        rows = ids[order[w:w + window]]
+        uniq, inv = np.unique(rows, return_inverse=True)
+        inv = np.asarray(inv).reshape(-1)
+        data = {c: np.asarray(store[c][uniq]) for c in cols}
+        for i in range(0, len(rows), size):
+            pos = inv[i:i + size]
+            yield to_model(put({c: v[pos] for c, v in data.items()}))
+
+
+def to_device(data: dict, device) -> dict:
+    """Rows in RAM (load()'s dict) as `device` tensors at their dtypes (--gpu-resident)."""
+    return {c: torch.from_numpy(np.ascontiguousarray(v)).to(device) for c, v in data.items()}
+
+
+def store_to_device(store, cols, ids, device, window: int = WINDOW_ROWS) -> dict:
+    """Columns `cols` of the store rows `ids` as `device` tensors at the store's dtypes, read and
+    copied `window` rows at a time (--memmap --gpu-resident: no host copy of the whole set)."""
+    out = {}
+    for c in cols:
+        src = store[c]
+        kind = torch.from_numpy(np.zeros(0, dtype=src.dtype)).dtype
+        dst = torch.empty((len(ids),) + tuple(src.shape[1:]), dtype=kind, device=device)
+        for a in range(0, len(ids), window):
+            dst[a:a + window].copy_(torch.from_numpy(np.asarray(src[ids[a:a + window]])))
+        out[c] = dst
+    return out
+
+
+def resident_batches(data: dict, order, size: int):
+    """Batches of `size` of tensors `data` in `order`, by index_select where they are, then
+    to_model: for the same order, the batches batches() makes from the same rows in RAM."""
+    dev = next(iter(data.values())).device
+    index = torch.from_numpy(np.ascontiguousarray(order, dtype=np.int64)).to(dev)
+    for i in range(0, len(order), size):
+        idx = index[i:i + size]
+        yield to_model({c: t.index_select(0, idx) for c, t in data.items()})
+
+
+def memmap_ram_need(n_train: int, n_eval: int, row_bytes: int, window: int, batch: int) -> int:
+    """Bytes --memmap holds in RAM: the train ids and an epoch's order (int64 each), the
+    validation rows (both sets), a window twice over (the rows read and the batches cut from
+    them) and two pinned batches. The file cache comes on top of it."""
+    return int(16 * n_train + n_eval * row_bytes + 2 * window * row_bytes + 2 * batch * row_bytes)
+
+
+def resident_gpu_need(data_bytes: int, n_train: int) -> int:
+    """Bytes --gpu-resident puts on the GPU: the training rows and an epoch's int64 order."""
+    return int(data_bytes + 8 * n_train)
+
+
+def budget_problem(what: str, need: int, budget_gb: float, hint: str = "") -> str | None:
+    """Why `need` bytes do not fit a `budget_gb` GB (2**30 bytes) budget, or None when they do.
+    `what` is "RAM" (--ram-budget-gb) or "GPU" (--gpu-budget-gb)."""
+    if need <= float(budget_gb) * GB:
+        return None
+    flag = "--gpu-budget-gb" if what == "GPU" else "--ram-budget-gb"
+    return (f"{what} budget: these rows need {need / GB:.2f} GB, more than {flag} "
+            f"{float(budget_gb):g}. {hint}").strip()
+
+
+class TrainFeed:
+    """One epoch of training batches at a time (main) from rows in RAM (load(): batches(), as
+    before E18), on the GPU (resident: resident_batches) or on disk (a store and its train ids:
+    window_batches). `alpha` > 0 is --phase-balance, with the phases taken once."""
+
+    def __init__(self, size: int, device, alpha: float = 0.0, *, train=None, store=None,
+                 ids=None, cols=(), resident: bool = False, window: int = WINDOW_ROWS,
+                 chunk: int = CHUNK_ROWS):
+        self.size, self.device, self.alpha = int(size), device, float(alpha)
+        self.store, self.ids, self.cols = store, ids, tuple(cols)
+        self.window = max(self.size, int(window) // self.size * self.size)
+        self.chunk = int(chunk)
+        if store is None:
+            self.n = len(train["act_card"])
+            self.phases = phase_of(train) if self.alpha > 0 else None
+        else:
+            self.n = len(ids)
+            self.phases = store_phases(store, ids, self.window) if self.alpha > 0 else None
+        self.mode = "resident" if resident else ("memmap" if store is not None else "ram")
+        self.train = train if self.mode == "ram" else None
+        self.data = None
+        if resident:
+            self.data = (to_device(train, device) if store is None
+                         else store_to_device(store, self.cols, ids, device, self.window))
+        self.put = PinnedStager(device) if self.mode == "memmap" else None
+
+    def phase_counts(self) -> np.ndarray:
+        return np.bincount(self.phases, minlength=12)
+
+    def epoch(self, rng):
+        """The batches of one epoch; `rng` is main's generator (balanced_order, epoch_order)."""
+        balanced = (balanced_from_phases(self.phases, self.alpha, rng) if self.alpha > 0
+                    else None)
+        if self.mode == "ram":
+            yield from batches(self.train, self.size, True, self.device, order=balanced)
+        elif self.mode == "resident":
+            order = np.random.permutation(self.n) if balanced is None else balanced
+            yield from resident_batches(self.data, order, self.size)
+        else:
+            order = (epoch_order(self.n, rng, self.chunk, self.window) if balanced is None
+                     else balanced)
+            yield from window_batches(self.store, self.cols, self.ids, order, self.size,
+                                      self.window, self.put)
+
+
+def mirror_batch(b: dict, mask, rules: dict) -> dict:
+    """Batch `b` with the rows of bool `mask` [N] flipped left-right by `rules`
+    (rs_schema.Schema.mirror(), module doc of tools/rs_schema.py, MIRROR): "flip" features k ->
+    1 - k in the slots whose "where" id is not 0 (the column then float32), "swap" pairs of
+    features, "tile" t -> tile - t where the "where" column is > 0. Columns without a rule, or
+    whose rule's columns the batch lacks, are the batch's own; `b` is not changed."""
+    out = dict(b)
+    m = mask.to(torch.bool)
+    for col, rule in rules.items():
+        if col not in b or rule.get("where", col) not in b:
+            continue
+        t = b[col]
+        if "flip" in rule:
+            x = t.float()
+            flipped = x.clone()
+            k = [int(i) for i in rule["flip"]]
+            flipped[..., k] = 1.0 - x[..., k]
+            sel = (m[:, None] & (b[rule["where"]] != 0))[..., None]
+            out[col] = torch.where(sel, flipped, x)
+        elif "swap" in rule:
+            perm = list(range(t.shape[-1]))
+            for i, j in rule["swap"]:
+                perm[i], perm[j] = perm[j], perm[i]
+            sel = m.view((-1,) + (1,) * (t.dim() - 1))
+            out[col] = torch.where(sel, t[..., perm], t)
+        elif "tile" in rule:
+            sel = m & (b[rule["where"]] > 0)
+            out[col] = torch.where(sel, int(rule["tile"]) - t, t)
+    return out
+
+
+class Mirror:
+    """--mirror p: each training row is flipped left-right with probability p (mirror_batch with
+    the schema's rules), one draw per row from default_rng([MIRROR_SALT, seed]). p 0 draws
+    nothing and returns every batch as it is."""
+
+    def __init__(self, p: float = 0.0, schema=None, seed: int = 0):
+        self.p = float(p)
+        if not 0.0 <= self.p <= 1.0:
+            raise ValueError(f"--mirror: a probability in [0, 1], got {p!r}")
+        self.rules = _spec(schema).mirror()
+        self.rng = np.random.default_rng([MIRROR_SALT, int(seed)])
+
+    def __call__(self, b: dict) -> dict:
+        if self.p <= 0.0:
+            return b
+        n = int(b["act_card"].shape[0])
+        mask = torch.from_numpy(self.rng.random(n) < self.p).to(b["act_card"].device)
+        return mirror_batch(b, mask, self.rules)
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +1026,28 @@ def main(argv: list[str] | None = None) -> int:
                          "uniform sample: smoke runs, or less RAM; 0 = all")
     ap.add_argument("--runs", type=Path, default=RUNS,
                     help="folder that holds the run folders (default runs/tokens)")
+    ap.add_argument("--memmap", action="store_true",
+                    help="E18: --data is a store of tools/rs_rows_compact.py; the training rows "
+                         "are read from disk a window at a time (memory-mapped), so they need "
+                         "not fit in RAM")
+    ap.add_argument("--memmap-window", type=int, default=WINDOW_ROWS, metavar="ROWS",
+                    help=f"--memmap: rows read at a time (default {WINDOW_ROWS:,}; a multiple of "
+                         "--batch)")
+    ap.add_argument("--gpu-resident", action="store_true",
+                    help="E18: copy the training rows to the GPU once (refused when they need "
+                         "more than --gpu-budget-gb); needs --device cuda")
+    ap.add_argument("--ram-budget-gb", type=float, default=RAM_BUDGET_GB, metavar="GB",
+                    help=f"--memmap: what the trainer may hold in RAM (default {RAM_BUDGET_GB:g}, "
+                         "for a 16 GB PC); a run that needs more stops before training")
+    ap.add_argument("--gpu-budget-gb", type=float, default=GPU_BUDGET_GB, metavar="GB",
+                    help=f"--gpu-resident: what the rows may take on the GPU (default "
+                         f"{GPU_BUDGET_GB:g}, for 12 GB)")
+    ap.add_argument("--val-max-rows", type=int, default=0,
+                    help="at most this many rows of each validation set, a seeded uniform "
+                         "sample (default 0: as --max-rows)")
+    ap.add_argument("--mirror", type=float, default=0.0, metavar="P",
+                    help="E18: flip each training row left-right with probability P (default 0, "
+                         "as before; 0.5 doubles the data the model sees)")
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be 0 (all rows) or more")
@@ -655,6 +1055,14 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--epochs must be 1 or more")
     if args.init_partial and not args.init:
         ap.error("--init-partial needs --init")
+    if args.val_max_rows < 0:
+        ap.error("--val-max-rows must be 0 (as --max-rows) or more")
+    if not 0.0 <= args.mirror <= 1.0:
+        ap.error("--mirror is a probability, 0 to 1")
+    if args.memmap_window < 1 or args.ram_budget_gb <= 0 or args.gpu_budget_gb <= 0:
+        ap.error("--memmap-window, --ram-budget-gb and --gpu-budget-gb must be more than 0")
+    if args.gpu_resident and args.device != "cuda":
+        ap.error("--gpu-resident needs --device cuda")
 
     device = resolve_device(args.device)        # before anything slow
     torch.manual_seed(args.seed)
@@ -678,25 +1086,75 @@ def main(argv: list[str] | None = None) -> int:
         print(f"schema {schema.name}: {len(cols_for(schema))} columns, state token "
               f"{schema.state_features}, unit features {schema.unit_features}, "
               f"{RS.buttons_of(vocab)} ability buttons", flush=True)
-    rows_rec = row_record(args.data, args.trust, schema)   # SystemExit: --trust v2, no column
+    store = open_store(args.data) if args.memmap else None     # E18
+    if store is not None:
+        rows_rec = row_record_store(store, args.trust, schema)
+    else:
+        if (Path(args.data) / RC.COMPACT_JSON).exists() and not any(
+                Path(args.data).glob("shard-*.npz")):
+            raise SystemExit(f"{args.data} is a compact store (tools/rs_rows_compact.py): train "
+                             "on it with --memmap")
+        rows_rec = row_record(args.data, args.trust, schema)   # SystemExit: --trust v2, no column
     if not legacy_rows(rows_rec):
         print(f"rows: {describe_rows(rows_rec)}", flush=True)
     # v2: whether the press head learns (the rows carry press labels); None: the legacy losses.
     presses = rows_rec["press_rows"] == PRESS_TRAINED if schema.v2 else None
     lkw = {} if presses is None else {"presses": presses}
+    val_cap = args.val_max_rows or args.max_rows
+    cols = cols_for(schema)
     t0 = time.time()
-    train = load("train", keep_p, not args.all_rows, args.finetune_hog, args.seed, args.data,
-                 max_rows=args.max_rows, trust=args.trust, schema=schema)
-    val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=args.max_rows,
-               trust=args.trust, schema=schema)
-    val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=args.max_rows,
+    if store is None:
+        train = load("train", keep_p, not args.all_rows, args.finetune_hog, args.seed, args.data,
+                     max_rows=args.max_rows, trust=args.trust, schema=schema)
+        val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=val_cap,
                    trust=args.trust, schema=schema)
-    mb = (_nbytes(train) + _nbytes(val) + _nbytes(val_hog)) / 2 ** 20
-    print(f"rows: train {len(train['act_card']):,}  val {len(val['act_card']):,}  "
-          f"val(hog) {len(val_hog['act_card']):,}  ({mb:,.0f} MB, {time.time() - t0:.0f}s)",
-          flush=True)
-    if not len(train["act_card"]):
+        val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=val_cap,
+                       trust=args.trust, schema=schema)
+        train_ids, n_train = None, len(train["act_card"])
+        train_bytes = _nbytes(train)
+        mb = (train_bytes + _nbytes(val) + _nbytes(val_hog)) / 2 ** 20
+        where = ""
+    else:
+        # E18 --memmap: the ids of load()'s rows; only the validation rows are read into RAM.
+        train = None
+        train_ids = memmap_keep(store, "train", keep_p, not args.all_rows, args.finetune_hog,
+                                args.seed, max_rows=args.max_rows, trust=args.trust,
+                                schema=schema)
+        val_ids = memmap_keep(store, "val", keep_p, True, args.finetune_hog, 1,
+                              max_rows=val_cap, trust=args.trust, schema=schema)
+        hog_ids = memmap_keep(store, "val", keep_p, True, True, 1, max_rows=val_cap,
+                              trust=args.trust, schema=schema)
+        n_train, row_bytes = len(train_ids), store.row_bytes(cols)
+        window = max(args.batch, args.memmap_window // args.batch * args.batch)
+        problem = budget_problem(
+            "RAM", memmap_ram_need(n_train, len(val_ids) + len(hog_ids), row_bytes, window,
+                                   args.batch), args.ram_budget_gb,
+            "Cap the validation sets (--val-max-rows, held in RAM), lower --memmap-window or "
+            "--max-rows, or raise --ram-budget-gb with MuMu and the browser closed.")
+        if problem:
+            raise SystemExit(problem)
+        val = gather(store, cols, val_ids, window)
+        val_hog = gather(store, cols, hog_ids, window)
+        train_bytes = n_train * row_bytes
+        mb = (_nbytes(val) + _nbytes(val_hog)) / 2 ** 20
+        where = f"; train read from {store.root} ({train_bytes / GB:.2f} GB, --memmap)"
+    print(f"rows: train {n_train:,}  val {len(val['act_card']):,}  "
+          f"val(hog) {len(val_hog['act_card']):,}  ({mb:,.0f} MB, {time.time() - t0:.0f}s)"
+          + where, flush=True)
+    if not n_train:
         raise SystemExit(f"no training rows in {args.data} (split 'train' after the filters)")
+    if args.gpu_resident:
+        problem = budget_problem(
+            "GPU", resident_gpu_need(train_bytes, n_train), args.gpu_budget_gb,
+            "Train without --gpu-resident (--memmap reads the rows from disk), or with "
+            "--max-rows.")
+        if problem:
+            raise SystemExit(problem)
+    feed = TrainFeed(args.batch, device, args.phase_balance, train=train, store=store,
+                     ids=train_ids, cols=cols, resident=args.gpu_resident,
+                     window=args.memmap_window)
+    train = None                          # the feed holds what it needs (resident: on the GPU)
+    mirror = Mirror(args.mirror, schema, args.seed)
 
     meta = checkpoint_meta(vocab, args.d, args.layers, args.heads, rows=rows_rec)
     mkw = {"schema": schema.name} if schema.v2 else {}
@@ -706,7 +1164,7 @@ def main(argv: list[str] | None = None) -> int:
         init_from(model, torch.load(args.init, map_location=device), vocab, schema,
                   args.init, partial=args.init_partial)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    steps = args.epochs * ((len(train["act_card"]) + args.batch - 1) // args.batch)
+    steps = args.epochs * ((n_train + args.batch - 1) // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps,
                                                 pct_start=one_cycle_pct(steps))
     out = Path(args.runs) / args.name
@@ -717,13 +1175,13 @@ def main(argv: list[str] | None = None) -> int:
     step = 0
     rng = np.random.default_rng(args.seed)
     if args.phase_balance > 0:
-        counts = np.bincount(phase_of(train), minlength=12)
+        counts = feed.phase_counts()
         print("train rows per phase: " + ", ".join(f"{PHASE_NAMES[i]} {c:,}"
                                                    for i, c in enumerate(counts) if c), flush=True)
     with (out / "log.jsonl").open("a", encoding="utf-8") as log:
         for epoch in range(args.epochs):
-            order = balanced_order(train, args.phase_balance, rng) if args.phase_balance > 0 else None
-            for b in batches(train, args.batch, True, device, order=order):
+            for b in feed.epoch(rng):
+                b = mirror(b)                 # E18: --mirror 0 returns the batch as it is
                 with torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda"):
                     loss, s = losses(model, b, beta=args.beta, **lkw)
                 opt.zero_grad(set_to_none=True)

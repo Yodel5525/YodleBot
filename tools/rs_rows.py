@@ -205,6 +205,31 @@ schema="v2", opp_elixir=SeenElixir.view(team, t)) gives the same row from any st
 live one from tools/public_state.py included, once _setup has filled UNIT_FORMS, SPELL_CARDS
 and SF. sim/train_tokens.py and the model read v2 rows from E15 on (the legacy trainer cannot:
 unit_feats has 9 features and scalars 7); rs_eval and the live runner still build legacy rows.
+
+Selection (E18; tokens-13): a match of IL_Replay's replays/*.parquet is a candidate when its
+game_mode is in MODES, each side has one player and rs_cards maps every deck card (scan_part).
+Every Hog 2.6 candidate is taken. `--others N` (default 20000) adds non-Hog candidates:
+`--others-pick first` (the default) the first N in parquet order, as before, so the shards are
+the rows of before E18; `--others-pick random` N drawn uniformly without replacement
+(select_rng(--select-seed), default seed 0) and taken in parquet order; `--all-matches` every
+candidate (--others is then not read). select_matches gives the order: Hog 2.6 first, then the
+others, each in parquet order, and shard k holds its k-th --batch matches, as before. The
+corpus is read twice: scan_part keeps only (part, row, tag, hog) of each candidate, then
+selected_payloads re-reads one part at a time for the chosen rows' payloads, and at most
+2 x --workers batches are in flight (bounded), so the builder holds about one part and a few
+batches of payloads, not the whole selection (every match would not fit in 16 GB). vocab.json
+gets "selection" (selection_record) unless the pick is the legacy one.
+
+Wait thinning (E18): `--wait-keep-at-build p` keeps each wait row of a match (act_card 0 and no
+press) with probability p: one draw per row of the match, in row order, from
+default_rng([tap_seed(tag), STREAM_WAITS]) (thin_waits), so a match keeps the same rows whatever
+shard or worker builds it; play and press rows are all kept. vocab.json "wait_keep_at_build" is
+p (sim/train_tokens.py then thins only what is left: resolve_wait_keep) and "wait_thinning" the
+rule (wait_rule); manifest.json "wait_thinning" has p and the waits kept and dropped, and its
+other counts are of the rows the shards hold (the matches' "decision" and "observation" info
+counts are of their rows before the thinning). Without the flag nothing is thinned and
+vocab.json says None, as before. tools/rs_rows_compact.py turns the shards into the per-column
+files sim/train_tokens.py --memmap reads.
 """
 from __future__ import annotations
 
@@ -216,7 +241,8 @@ import math
 import operator
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mode
@@ -319,6 +345,19 @@ UNIT_FORMS = None
 SPELL_CARDS = None
 CARD_KIND_COLUMN = 8
 
+#: --wait-keep-at-build (module doc, "Wait thinning"): None, no thinning (the rows before E18), or
+#: the share of each match's wait rows a shard keeps; build and main set it like the settings above.
+WAIT_KEEP_AT_BUILD = None
+#: --others-pick (module doc, "Selection"): the first --others non-Hog candidates in parquet order
+#: (the rows before E18) or a seeded uniform draw of them.
+PICK_FIRST, PICK_RANDOM = "first", "random"
+PICK_MODES = (PICK_FIRST, PICK_RANDOM)
+#: select_rng's first seed word, so --select-seed 0 is not numpy's plain seed 0.
+SELECT_SALT = 18
+#: The parquet columns the scan (scan_part) and the payload pass (selected_payloads) read.
+SCAN_COLUMNS = ("replay_tag", "game_mode", "payload_json")
+PAYLOAD_COLUMNS = ("replay_tag", "payload_json")
+
 
 def press_vocab(presses) -> dict:
     """vocab_record keywords for --presses: none for off (the vocab.json of the rows before
@@ -338,8 +377,9 @@ DECISION_FIELDS = ("own_pending", "own_pending_land")
 #: exact_hand (tokens-10): the plays after which the FIFO cycle names the hand whatever the deal,
 #: and how far back a Mirror spoils it (sim/replay_rows.cycle_hand); the catalogue name.
 EXACT_PLAYS, EXACT_MIRROR_WINDOW, MIRROR = 4, 8, "Mirror"
-#: tap_delays' rng streams, one per kind of action.
+#: tap_delays' rng streams, one per kind of action, and thin_waits' (E18).
 STREAM_PLAYS, STREAM_PRESSES = 0, 1
+STREAM_WAITS = 2
 #: decision_rule: the settings a DecisionRule's JSON carries, and the keys that only describe it.
 _DECISION_KEYS = ("delay", "jitter", "wait_window")
 _DECISION_NOTES = ("seed", "streams", "tap_floor", "tap_order", "pending_slots",
@@ -1110,13 +1150,16 @@ def _rate(k, n):
     return k / n if n else None
 
 
-def manifest(totals: dict, shards, skipped, rule=None) -> dict:
+def manifest(totals: dict, shards, skipped, rule=None, wait_keep=None) -> dict:
     """manifest.json: the run's merged trust_stats `totals` as counts and rates (a share of the
     rows; None with no rows), wait_rows, the skipped matches by reason, the trust rule and the
     shard entries (shard_entry, in shard order). Under --trust v2 also trusted_v2 and its
     rates, cuts_v2 and princess_votes; with press counts in `totals` (--presses on) also
-    "presses"; with decision counts (--obs-delay > 0) also "decision"."""
+    "presses"; with decision counts (--obs-delay > 0) also "decision". With `wait_keep`
+    (--wait-keep-at-build, E18) also "wait_thinning": keep, and the waits kept and dropped
+    (build's counts in `totals`)."""
     rule = trust_rule(rule)
+    wait_keep = wait_keep_value(wait_keep)
     n, hog, plays = totals.get("rows", 0), totals.get("hog_rows", 0), totals.get("play_rows", 0)
     out = {"rows": n, "play_rows": plays, "wait_rows": n - plays,
            "matches": totals.get("matches", 0), "skipped": dict(skipped),
@@ -1137,6 +1180,10 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
         out["decision"] = totals["decision"]
     if "observation" in totals:
         out["observation"] = totals["observation"]
+    if wait_keep is not None:
+        thin = totals.get("wait_thinning", {})
+        out["wait_thinning"] = {"keep": wait_keep, "kept": int(thin.get("kept", 0)),
+                                "dropped": int(thin.get("dropped", 0))}
     out["shards"] = sorted(shards, key=lambda s: s["shard"])
     return out
 
@@ -1163,6 +1210,10 @@ def describe_manifest(man: dict) -> str:
         text += (f"; schema v2: {o.get('spell_rows', 0):,} of {o.get('rows', 0):,} rows show a "
                  f"spell in flight, {o.get('opp_inexact', 0):,} count the opponent's elixir "
                  f"inexactly")
+    if "wait_thinning" in man:
+        w = man["wait_thinning"]
+        text += (f"; waits kept at build with p {w['keep']:g}: {w['kept']:,} kept, "
+                 f"{w['dropped']:,} dropped")
     return text
 
 
@@ -1247,6 +1298,206 @@ def memory_vocab(mem_lag) -> dict:
 def split_of(tag: str) -> str:
     h = int(hashlib.sha1(tag.encode()).hexdigest()[:8], 16) % 100
     return "test" if h < 5 else "val" if h < 10 else "train"
+
+
+# ---------------------------------------------------------------------------
+# E18: which matches (module doc, "Selection"), and wait thinning at build
+# ---------------------------------------------------------------------------
+
+def others_pick(value) -> str:
+    """--others-pick as select_matches takes it: one of PICK_MODES; ValueError otherwise."""
+    if value not in PICK_MODES:
+        raise ValueError(f"--others-pick: one of {', '.join(PICK_MODES)}, got {value!r}")
+    return value
+
+
+def _nonneg(value, what: str) -> int:
+    """`value` as an int >= 0 (numpy integers too); ValueError otherwise."""
+    if isinstance(value, bool):
+        raise ValueError(f"{what}: an int >= 0, got {value!r}")
+    try:
+        n = operator.index(value)
+    except TypeError:
+        raise ValueError(f"{what}: an int >= 0, got {value!r}") from None
+    if n < 0:
+        raise ValueError(f"{what} must be >= 0, got {n}")
+    return int(n)
+
+
+def select_rng(seed: int = 0) -> np.random.Generator:
+    """The generator --others-pick random draws from: default_rng([SELECT_SALT, seed])."""
+    return np.random.default_rng([SELECT_SALT, _nonneg(seed, "--select-seed")])
+
+
+def match_decks(payload: dict, names: dict):
+    """(team deck, opponent deck) as frozensets of catalogue names, or None for a match the rows
+    are not built from: a side without exactly one player, or a card rs_cards does not map
+    (`names`: IL_Replay key -> catalogue name, rs_cards.load())."""
+    decks = []
+    for side in ("team", "opponent"):
+        players = payload["battle"][side]["players"]
+        if len(players) != 1:
+            return None
+        decks.append(frozenset(names.get(base_key(c["card_key"])[0]) for c in players[0]["deck"]))
+    if any(None in d for d in decks):
+        return None
+    return tuple(decks)
+
+
+def scan_part(rows, names) -> list:
+    """The candidates among one parquet part's rows (dicts with SCAN_COLUMNS, in table order):
+    (row index, replay tag, hog) for each match whose game_mode is in MODES and whose decks
+    match_decks reads, hog when either side plays Hog 2.6. The payloads are parsed, not kept."""
+    out = []
+    for k, r in enumerate(rows):
+        if r["game_mode"] not in MODES:
+            continue
+        decks = match_decks(json.loads(r["payload_json"]), names)
+        if decks is not None:
+            out.append((k, r["replay_tag"], HOG26 in decks))
+    return out
+
+
+def select_matches(cands, others: int = 20000, pick: str = PICK_FIRST, seed: int = 0,
+                   all_matches: bool = False) -> list:
+    """The candidates the rows are built from, in shard order: every Hog 2.6 one, then the
+    others, both in parquet order (`cands`: (part, row, tag, hog) in parquet order). pick
+    "first": the first `others` non-Hog candidates (main before E18); "random": `others` of
+    them drawn uniformly without replacement with select_rng(seed); all_matches: every one, and
+    `others` is not read. Fewer non-Hog candidates than `others` gives them all."""
+    pick = others_pick(pick)
+    hog = [c for c in cands if c[3]]
+    rest = [c for c in cands if not c[3]]
+    if all_matches:
+        return hog + rest
+    n = min(_nonneg(others, "--others"), len(rest))
+    if pick == PICK_FIRST:
+        return hog + rest[:n]
+    idx = np.sort(select_rng(seed).choice(len(rest), n, replace=False)) if n else ()
+    return hog + [rest[int(i)] for i in idx]
+
+
+def selection_record(picked, candidates: int, parts: int, others: int, pick: str, seed: int,
+                     all_matches: bool):
+    """vocab.json "selection" for select_matches' `picked` out of `candidates` matches in
+    `parts` parquet parts, or None for the legacy pick (the first --others, no --all-matches),
+    whose vocab.json has no such key."""
+    pick = others_pick(pick)
+    if pick == PICK_FIRST and not all_matches:
+        return None
+    hog = sum(1 for c in picked if c[3])
+    rec = {"pick": "all" if all_matches else pick,
+           "others": None if all_matches else int(others),
+           "seed": int(seed) if pick == PICK_RANDOM and not all_matches else None,
+           "parts": int(parts), "candidates": int(candidates), "hog": hog,
+           "other_candidates": int(candidates) - hog, "others_taken": len(picked) - hog,
+           "order": "Hog 2.6 first, then the others, each in parquet order"}
+    if rec["seed"] is not None:
+        rec["rng"] = (f"numpy default_rng([{SELECT_SALT}, seed]).choice(other candidates, "
+                      "others, replace=False), sorted")
+    return rec
+
+
+def _read_part(path, columns) -> list:
+    """One parquet part's rows as dicts of `columns`, in table order."""
+    import pyarrow.parquet as pq
+    return pq.read_table(path, columns=list(columns)).to_pylist()
+
+
+def selected_payloads(picked, parts, read_part=None):
+    """The payload text build() takes for each picked (part, row, tag, hog), in order: the
+    payload with source.replay_tag set, as main always passed it. `read_part(path, columns)`
+    (default: pyarrow) reads parts[part] when the order comes to it, and the part is dropped at
+    the next one, so Hog first and the others after read each part at most twice. RuntimeError
+    when a row's tag is not the one scanned (the file changed under the run)."""
+    read = _read_part if read_part is None else read_part
+    held, rows = None, None
+    for part, row, tag, _ in picked:
+        if part != held:
+            rows = None                       # let the last part go before reading the next
+            rows = read(parts[part], PAYLOAD_COLUMNS)
+            held = part
+        r = rows[row]
+        if r["replay_tag"] != tag:
+            raise RuntimeError(f"{parts[part]}: row {row} is {r['replay_tag']!r}, scanned as "
+                               f"{tag!r}; the corpus changed during the run")
+        p = json.loads(r["payload_json"])
+        p.setdefault("source", {})["replay_tag"] = r["replay_tag"]
+        yield json.dumps(p)
+
+
+def chunked(items, size: int):
+    """`items` in lists of `size` (the last one may be shorter), lazily."""
+    if size < 1:
+        raise ValueError(f"--batch must be >= 1, got {size}")
+    batch = []
+    for item in items:
+        batch.append(item)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def bounded(submit, jobs, limit: int):
+    """submit(k, job) for each of `jobs` in order (k from 0), with at most `limit` futures not
+    done at a time; yields each future once it is done, in the order they finish."""
+    limit = max(1, int(limit))
+    pending: set = set()
+    for k, job in enumerate(jobs):
+        pending.add(submit(k, job))
+        if len(pending) >= limit:
+            done, pending = wait_futures(pending, return_when=FIRST_COMPLETED)
+            yield from done
+    while pending:
+        done, pending = wait_futures(pending, return_when=FIRST_COMPLETED)
+        yield from done
+
+
+def wait_keep_value(value):
+    """--wait-keep-at-build as build and main take it: None (no thinning) or a share in (0, 1];
+    ValueError otherwise."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"--wait-keep-at-build: a share in (0, 1], got {value!r}")
+    try:
+        p = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"--wait-keep-at-build: a share in (0, 1], got {value!r}") from None
+    if not 0.0 < p <= 1.0:
+        raise ValueError(f"--wait-keep-at-build: a share in (0, 1], got {value!r}")
+    return p
+
+
+def wait_rule(keep) -> dict | None:
+    """vocab.json "wait_thinning" of rows thinned with `keep` (wait_keep_value); None for none."""
+    p = wait_keep_value(keep)
+    if p is None:
+        return None
+    return {"keep": p, "waits": "rows with act_card 0 and no press",
+            "seed": "int(sha1(replay_tag)[:16], 16)", "stream": STREAM_WAITS,
+            "draws": "one per row of the match, in row order; a wait is kept when its draw < keep"}
+
+
+def is_wait(row) -> bool:
+    """A wait row of rows_for: no card (action card 0) and no press ("press" 0 or absent)."""
+    return not row["action"][0] and not row.get("press", 0)
+
+
+def thin_waits(rows, tag, keep) -> tuple:
+    """(the rows of one match a shard keeps, the waits dropped) under --wait-keep-at-build
+    `keep` (module doc, "Wait thinning"): all of them when `keep` is None; otherwise a wait row
+    (is_wait) is kept when its draw is below `keep`, one draw per row in row order from
+    default_rng([tap_seed(tag), STREAM_WAITS]), and play and press rows are always kept. The
+    rows keep their order."""
+    p = wait_keep_value(keep)
+    if p is None or not rows:
+        return list(rows), 0
+    draws = np.random.default_rng([tap_seed(tag), STREAM_WAITS]).random(len(rows))
+    kept = [r for r, u in zip(rows, draws) if not is_wait(r) or u < p]
+    return kept, len(rows) - len(kept)
 
 
 def _setup(engine=None):
@@ -1789,7 +2040,7 @@ SCHEMA = "rs_rows/legacy"
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
                  opp_memory=None, classes=None, visibility=None, trust=None, presses=None,
-                 decision=None):
+                 decision=None, selection=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -1836,6 +2087,10 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           extra_columns then lists only the columns outside it (trusted_v2
                           under --trust v2), since unit_form, unit_burrow, act_press, the
                           ability and the pending columns are v2's own
+      wait_thinning       with `wait_keep_at_build` not None (E18): wait_rule(), how the
+                          builder kept that share of the waits
+      selection           with `selection` (E18, selection_record; None for the legacy pick):
+                          how the matches were picked
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -1899,6 +2154,10 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         rec["presses"] = press_entry
     if drule is not None:
         rec["decision_rows"] = drule.to_json()
+    if wait_keep_at_build is not None:
+        rec["wait_thinning"] = wait_rule(wait_keep_at_build)
+    if selection is not None:
+        rec["selection"] = dict(selection)
     if rows_v2:
         rec["schema_spec"] = rs_schema.V2.to_json(BUTTONS)
         extra = list(TRUST_FIELDS) if v2 else []
@@ -1915,19 +2174,23 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
           mem_lag=None, visibility=None, trust=None, presses=None, stats=False,
-          decision=None, schema=None):
+          decision=None, schema=None, wait_keep_at_build=None):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` / `schema` as --units /
-    --mem-lag / --visibility / --trust (trust_rule) / --presses / --obs-delay (decision_rule) /
-    --schema (schema_mode), kept as UNITS / MEM_LAG / VISIBILITY / TRUST / PRESSES / DECISION /
-    ROW_SCHEMA for this process (None: keep the module's); main passes all seven to every
-    worker, as it passes `live`. Under presses "on" the shard also has act_press (int16, from
-    each row's "press") and PRESS_FIELDS; with a delay (E11) DECISION_FIELDS. Under schema v2
-    (E14) the shard has rs_schema.V2's columns (shard_columns, with trusted_v2 under --trust v2),
-    each cast to its dtype. A delay or schema v2 with mem_lag "legacy" is refused (ValueError)
-    before any match. Returns (batch_id, rows, skipped by reason); with `stats`, also the
-    shard's trust_stats, which main merges into manifest.json."""
+    `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` / `schema` /
+    `wait_keep_at_build` as --units / --mem-lag / --visibility / --trust (trust_rule) /
+    --presses / --obs-delay (decision_rule) / --schema (schema_mode) / --wait-keep-at-build
+    (wait_keep_value), kept as UNITS / MEM_LAG / VISIBILITY / TRUST / PRESSES / DECISION /
+    ROW_SCHEMA / WAIT_KEEP_AT_BUILD for this process (None: keep the module's); main passes all
+    eight to every worker, as it passes `live`. Under presses "on" the shard also has act_press
+    (int16, from each row's "press") and PRESS_FIELDS; with a delay (E11) DECISION_FIELDS. Under
+    schema v2 (E14) the shard has rs_schema.V2's columns (shard_columns, with trusted_v2 under
+    --trust v2), each cast to its dtype. With a wait share (E18) each match's rows go through
+    thin_waits before they are stacked. A delay or schema v2 with mem_lag "legacy" is refused
+    (ValueError) before any match. Returns (batch_id, rows, skipped by reason); with `stats`,
+    also the shard's trust_stats, which main merges into manifest.json (with a wait share it
+    has "wait_thinning": the waits kept and dropped)."""
     global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
+    global WAIT_KEEP_AT_BUILD
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
@@ -1936,6 +2199,8 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
     press = rs_presses.press_mode(PRESSES if presses is None else presses)
     drule = decision_rule(decision)
     name = schema_mode(ROW_SCHEMA if schema is None else schema)
+    keep = wait_keep_value(WAIT_KEEP_AT_BUILD if wait_keep_at_build is None
+                           else wait_keep_at_build)
     if drule.on and lag == MEM_LEGACY:
         raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
                          "--mem-lag legacy is the order before E08")
@@ -1943,11 +2208,12 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         raise ValueError("--schema v2: the rows read the memory dated at execution; --mem-lag "
                          "legacy is the order before E08")
     LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES = live, units, lag, vis, rule, press
-    DECISION, ROW_SCHEMA = drule, name
+    DECISION, ROW_SCHEMA, WAIT_KEEP_AT_BUILD = drule, name, keep
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
     rows, tags, skipped, infos = [], [], {}, []
+    waits_kept = waits_dropped = 0
     for text in payload_texts:
         p = json.loads(text)
         tag = p["source"]["replay_tag"]
@@ -1959,6 +2225,11 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         if r is None:
             skipped[why] = skipped.get(why, 0) + 1
             continue
+        if keep is not None:
+            # E18: the match's waits thinned, seeded by its tag (thin_waits).
+            r, dropped = thin_waits(r, tag, keep)
+            waits_dropped += dropped
+            waits_kept += sum(1 for row in r if is_wait(row))
         rows += r
         tags += [tag] * len(r)
         infos.append(info)
@@ -1990,13 +2261,29 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         OUT.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(OUT / f"shard-{batch_id:04d}.npz", **data)
     if stats:
-        return batch_id, len(rows), skipped, trust_stats(rows, infos, TRUST)
+        st = trust_stats(rows, infos, TRUST)
+        if keep is not None:
+            st["wait_thinning"] = {"kept": waits_kept, "dropped": waits_dropped}
+        return batch_id, len(rows), skipped, st
     return batch_id, len(rows), skipped
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--others", type=int, default=20000)
+    ap.add_argument("--others", type=int, default=20000,
+                    help="non-Hog matches added to every Hog 2.6 match (default 20000)")
+    ap.add_argument("--others-pick", choices=PICK_MODES, default=PICK_FIRST,
+                    help="which --others: 'first' (default) the first in parquet order, as "
+                         "before; 'random' a uniform draw seeded by --select-seed (E18)")
+    ap.add_argument("--select-seed", type=int, default=0,
+                    help="--others-pick random: the draw's seed (default 0)")
+    ap.add_argument("--all-matches", action="store_true",
+                    help="every match the rows can be built from (--others is not read; E18). "
+                         "Add --wait-keep-at-build so the shards stay a sensible size")
+    ap.add_argument("--wait-keep-at-build", type=float, default=None, metavar="P",
+                    help="keep each wait row with probability P, seeded by the match tag "
+                         "(E18; default: every wait row, as before); train_tokens reads it "
+                         "from vocab.json")
     ap.add_argument("--workers", type=int, default=7)
     ap.add_argument("--batch", type=int, default=250)
     ap.add_argument("--limit-parts", type=int, default=0)
@@ -2057,18 +2344,24 @@ def main() -> int:
         if schema == rs_schema.SCHEMA_V2 and args.mem_lag == MEM_LEGACY:
             raise ValueError("--schema v2 needs the memory dated at execution: --mem-lag / "
                              "--opp-lag TICKS, not legacy")
+        wait_keep = wait_keep_value(args.wait_keep_at_build)
+        _nonneg(args.others, "--others")
+        _nonneg(args.select_seed, "--select-seed")
+        if args.batch < 1 or args.workers < 1:
+            raise ValueError("--batch and --workers must be 1 or more")
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
     global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
+    global WAIT_KEEP_AT_BUILD
     LIVE = args.live_compat
     UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
     PRESSES = args.presses
     DECISION = decision
     ROW_SCHEMA = schema
+    WAIT_KEEP_AT_BUILD = wait_keep
     if args.out:
         OUT = args.out
-    import pyarrow.parquet as pq
     royalesim, names, ids, cat = _setup(cfg)
     vocab_battle = rs_engine.make_battle(cfg, royalesim)
     fp = rs_engine.fingerprint(vocab_battle, royalesim, cfg)
@@ -2088,53 +2381,52 @@ def main() -> int:
             print(f"        {len(VC.unknown)} engine unit types have no class and read as "
                   f"unknown (token 1): {', '.join(VC.unknown[:12])}"
                   f"{' ...' if len(VC.unknown) > 12 else ''}", flush=True)
+    if WAIT_KEEP_AT_BUILD is not None:
+        print(f"waits:  each kept with p {WAIT_KEEP_AT_BUILD:g}, seeded by the match tag",
+              flush=True)
     t0 = time.time()
-    hog, others = [], []
     parts = sorted((CORPUS / "replays").glob("part-*.parquet"))
     if args.limit_parts:
         parts = parts[:args.limit_parts]
-    for part in parts:
-        for r in pq.read_table(part, columns=["replay_tag", "game_mode", "payload_json"]).to_pylist():
-            if r["game_mode"] not in MODES:
-                continue
-            p = json.loads(r["payload_json"])
-            sides = []
-            ok = True
-            for side in ("team", "opponent"):
-                pl = p["battle"][side]["players"]
-                if len(pl) != 1:
-                    ok = False
-                    break
-                sides.append(frozenset(names.get(base_key(c["card_key"])[0]) for c in pl[0]["deck"]))
-            if not ok or any(None in s for s in sides):
-                continue
-            p.setdefault("source", {})["replay_tag"] = r["replay_tag"]
-            text = json.dumps(p)
-            if HOG26 in sides:
-                hog.append(text)
-            elif len(others) < args.others:
-                others.append(text)
-    picked = hog + others
-    print(f"selected {len(hog):,} Hog 2.6 + {len(others):,} others ({time.time() - t0:.0f}s)", flush=True)
+    # E18, pass 1: which rows are candidates; no payload is kept (module doc, "Selection").
+    cands = []
+    for n, part in enumerate(parts):
+        cands += [(n, k, tag, hog) for k, tag, hog in scan_part(_read_part(part, SCAN_COLUMNS),
+                                                                names)]
+    picked = select_matches(cands, args.others, args.others_pick, args.select_seed,
+                            args.all_matches)
+    n_hog = sum(1 for c in picked if c[3])
+    print(f"selected {n_hog:,} Hog 2.6 + {len(picked) - n_hog:,} others ({time.time() - t0:.0f}s)", flush=True)
+    selection = selection_record(picked, len(cands), len(parts), args.others, args.others_pick,
+                                 args.select_seed, args.all_matches)
+    if selection is not None:
+        print(f"        pick {selection['pick']}"
+              + (f", seed {selection['seed']}" if selection["seed"] is not None else "")
+              + f": {selection['others_taken']:,} of {selection['other_candidates']:,} non-Hog "
+                f"candidates in {len(parts)} parts", flush=True)
     OUT.mkdir(parents=True, exist_ok=True)
     unit_types = json.loads(vocab_battle.unit_types_json())
     (OUT / "vocab.json").write_text(json.dumps(vocab_record(
         cat, unit_types, cfg, fp, card_map, LIVE,
         version=getattr(royalesim, "__version__", "?"), schema=ROW_SCHEMA,
+        wait_keep_at_build=WAIT_KEEP_AT_BUILD, selection=selection,
         classes=VCT if UNITS == UNITS_VISION else None,
         **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST),
         **press_vocab(PRESSES), **decision_vocab(DECISION))),
         encoding="utf-8")
-    batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
+    n_batches = -(-len(picked) // args.batch)
     total, skipped, totals, shards = 0, {}, {}, []
     with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
-        futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
-                            mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
-                            presses=PRESSES, stats=True, decision=DECISION.to_json(),
-                            schema=ROW_SCHEMA)
-                for k, b in enumerate(batches)]
-        for n, f in enumerate(as_completed(futs), 1):
+        def submit(k, b):
+            return pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
+                               mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
+                               presses=PRESSES, stats=True, decision=DECISION.to_json(),
+                               schema=ROW_SCHEMA, wait_keep_at_build=WAIT_KEEP_AT_BUILD)
+
+        # E18, pass 2: the picked payloads a part at a time, at most 2 x workers batches out.
+        jobs = chunked(selected_payloads(picked, parts), args.batch)
+        for n, f in enumerate(bounded(submit, jobs, 2 * args.workers), 1):
             bid, rows, sk, st = f.result()
             total += rows
             for k, v in sk.items():
@@ -2142,10 +2434,10 @@ def main() -> int:
             merge_stats(totals, st)
             if rows:                                  # build writes no shard without rows
                 shards.append(shard_entry(bid, st))
-            if n % 10 == 0 or n == len(batches):
-                print(f"  {n}/{len(batches)} shards, {total:,} rows, skipped {skipped} "
+            if n % 10 == 0 or n == n_batches:
+                print(f"  {n}/{n_batches} shards, {total:,} rows, skipped {skipped} "
                       f"({time.time() - t0:.0f}s)", flush=True)
-    man = manifest(totals, shards, skipped, TRUST)
+    man = manifest(totals, shards, skipped, TRUST, wait_keep=WAIT_KEEP_AT_BUILD)
     (OUT / "manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
     print(f"done: {total:,} rows -> {OUT}\n      {describe_manifest(man)}")
     return 0
