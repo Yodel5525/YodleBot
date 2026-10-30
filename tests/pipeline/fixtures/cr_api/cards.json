@@ -1,0 +1,34 @@
+{
+  "items": [
+    {"name": "Knight", "id": 26000000, "maxLevel": 16, "maxEvolutionLevel": 1, "elixirCost": 3,
+     "rarity": "common",
+     "iconUrls": {"medium": "https://example.invalid/cards/knight.png",
+                  "evolutionMedium": "https://example.invalid/cards/knight-ev1.png"}},
+    {"name": "Giant", "id": 26000003, "maxLevel": 16, "maxEvolutionLevel": 2, "elixirCost": 5,
+     "rarity": "rare",
+     "iconUrls": {"medium": "https://example.invalid/cards/giant.png",
+                  "heroMedium": "https://example.invalid/cards/giant-hero.png"}},
+    {"name": "Hog Rider", "id": 26000021, "maxLevel": 14, "elixirCost": 4, "rarity": "rare",
+     "iconUrls": {"medium": "https://example.invalid/cards/hog-rider.png"}},
+    {"name": "Mini P.E.K.K.A", "id": 26000018, "maxLevel": 14, "maxEvolutionLevel": 1,
+     "elixirCost": 4, "rarity": "rare",
+     "iconUrls": {"medium": "https://example.invalid/cards/mini-pekka.png",
+                  "evolutionMedium": "https://example.invalid/cards/mini-pekka-ev1.png"}},
+    {"name": "X-Bow", "id": 27000008, "maxLevel": 11, "elixirCost": 6, "rarity": "epic",
+     "iconUrls": {"medium": "https://example.invalid/cards/x-bow.png"}},
+    {"name": "The Log", "id": 28000011, "maxLevel": 8, "elixirCost": 2, "rarity": "legendary",
+     "iconUrls": {"medium": "https://example.invalid/cards/the-log.png"}},
+    {"name": "Musketeer", "id": 26000014, "maxLevel": 14, "maxEvolutionLevel": 3,
+     "elixirCost": 4, "rarity": "rare",
+     "iconUrls": {"medium": "https://example.invalid/cards/musketeer.png",
+                  "evolutionMedium": "https://example.invalid/cards/musketeer-ev1.png",
+                  "heroMedium": "https://example.invalid/cards/musketeer-hero.png"}},
+    {"name": "Minion Giant", "id": 26000099, "maxLevel": 11, "elixirCost": 6,
+     "rarity": "epic",
+     "iconUrls": {"medium": "https://example.invalid/cards/minion-giant.png"}}
+  ],
+  "supportItems": [
+    {"name": "Tower Princess", "id": 159000000, "maxLevel": 16, "rarity": "common",
+     "iconUrls": {"medium": "https://example.invalid/cards/tower-princess.png"}}
+  ]
+}

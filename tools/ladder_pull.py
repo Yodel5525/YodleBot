@@ -19,6 +19,14 @@ API exposes decks and results, not replays.
 The token is read from `.secrets/supercell_token`, which is gitignored. Keys
 are bound to a single public IP, so a changed address fails every request with
 `accessDenied.invalidIp` and the fix is to edit the key rather than the code.
+
+The HTTP side is `tools/cr_api.py` (U02 of docs/SEASON_UPDATES.md): the shared
+rate, the 429 back-off (a throttled battle log used to be dropped without a
+word), the custom User-Agent and `--base proxy` for RoyaleAPI's proxy. It
+answers with HTTP codes; this tool still stops on a 403, as it always has. The
+default transport stays curl over IPv4. The two output files are unchanged:
+`ladder_battles.csv` and `ladder_meta.json` under `--out`, both gitignored
+because they carry player tags.
 """
 
 from __future__ import annotations
@@ -27,91 +35,60 @@ import argparse
 import collections
 import csv
 import json
-import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
-TOKEN_FILE = ROOT / ".secrets" / "supercell_token"
-BASE = "https://api.clashroyale.com/v1"
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+import cr_api  # noqa: E402
+
+TOKEN_FILE = cr_api.TOKEN_FILE
+BASE = cr_api.OFFICIAL_BASE
 
 # Ranked ladder only. A battlelog also carries challenges, 2v2 and friendlies,
 # and none of those are the metagame this bot plays in.
 RANKED_TYPES = {"pathOfLegend", "pathOfLegendMatch"}
 
+#: The shared ceiling on requests per second, now in tools/cr_api.py.
+Rate = cr_api.Rate
 
-class Rate:
-    """A simple ceiling on requests per second, shared across threads.
-
-    The developer tier is throttled and the documented limit is not published
-    as a number, so this stays well under anything plausible rather than
-    probing for it. The whole point of using the official API is not having to
-    find out where somebody's limiter gives up.
-    """
-
-    def __init__(self, per_second: float):
-        self.gap = 1.0 / max(0.1, per_second)
-        self._lock = threading.Lock()
-        self._next = 0.0
-
-    def wait(self) -> None:
-        with self._lock:
-            now = time.monotonic()
-            due = max(now, self._next)
-            self._next = due + self.gap
-        if due > now:
-            time.sleep(due - now)
+FORBIDDEN = ("403 from the API. The key is bound to one public IP and this "
+             "machine's has probably changed; the response body names the "
+             "address it saw. Edit the key at developer.clashroyale.com "
+             "rather than making a new one.")
 
 
-def get(path: str, token: str, rate: Rate, scratch: Path) -> dict | list | None:
-    """One GET, forced over IPv4 because the key is bound to an IPv4 address."""
-    rate.wait()
-    out = scratch / f"resp_{threading.get_ident()}.json"
-    argv = ["curl", "-4", "-sS", "--compressed", "--max-time", "30",
-            "-o", str(out), "-w", "%{http_code}",
-            "-H", f"Authorization: Bearer {token}", f"{BASE}/{path}"]
-    done = subprocess.run(argv, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-    code = (done.stdout or "").strip()
-    if code != "200":
-        if code == "403":
-            raise SystemExit(
-                "403 from the API. The key is bound to one public IP and this "
-                "machine's has probably changed; the response body names the "
-                "address it saw. Edit the key at developer.clashroyale.com "
-                "rather than making a new one.")
-        return None
-    try:
-        return json.loads(out.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+def stop_on_403(resp: cr_api.Response | None) -> None:
+    """A 403 fails every later call too, so the pull stops, as it always has."""
+    if resp is not None and resp.status == 403:
+        said = (f" The API said: {resp.reason}: {resp.message}"
+                if resp.reason or resp.message else "")
+        raise SystemExit(FORBIDDEN + said)
 
 
-def leaderboard(token: str, rate: Rate, scratch: Path, want: int) -> list[dict]:
+def get(client: cr_api.Client, path: str) -> dict | list | None:
+    """One GET: the parsed body of a 200, else None (a 403 stops the pull)."""
+    resp = client.get(path)
+    stop_on_403(resp)
+    return resp.data if resp.ok else None
+
+
+def leaderboard(client: cr_api.Client, want: int) -> list[dict]:
     """The Path of Legends global top, paged until `want` players."""
-    players: list[dict] = []
-    after = None
-    while len(players) < want:
-        page = min(1000, want - len(players))
-        path = f"locations/global/pathoflegend/players?limit={page}"
-        if after:
-            path += f"&after={after}"
-        data = get(path, token, rate, scratch)
-        if not isinstance(data, dict) or not data.get("items"):
-            break
-        players.extend(data["items"])
-        after = data.get("paging", {}).get("cursors", {}).get("after")
-        if not after:
-            break
-    return players[:want]
+    players, last = client.paged("locations/global/pathoflegend/players", want=want)
+    stop_on_403(last)
+    return players
 
 
-def battles_for(tag: str, token: str, rate: Rate, scratch: Path) -> list[dict]:
-    data = get(f"players/{quote(tag)}/battlelog", token, rate, scratch)
+def battles_for(client: cr_api.Client, tag: str) -> list[dict]:
+    try:
+        path = f"players/{cr_api.tag_path(tag)}/battlelog"
+    except ValueError:                  # not a tag: no log, as a 404 would give
+        return []
+    data = get(client, path)
     return data if isinstance(data, list) else []
 
 
@@ -145,7 +122,7 @@ def rows_from(battle: dict, elo: dict) -> list[dict]:
     }]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--top", type=int, default=1000,
                     help="how many Path of Legends players to walk")
@@ -153,17 +130,31 @@ def main() -> int:
                     help="requests per second ceiling, kept deliberately low")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "ladder")
-    args = ap.parse_args()
+    ap.add_argument("--base", default=None,
+                    help=f"API base: official (default), proxy ({cr_api.PROXY_BASE}, "
+                         f"with {cr_api.PROXY_IP} on the key) or an https URL ending "
+                         f"in /v1; {cr_api.BASE_ENV} sets the default")
+    ap.add_argument("--transport", choices=("curl", "urllib"), default="curl",
+                    help="curl over IPv4, as before (default), or Python's urllib, "
+                         "also over IPv4")
+    args = ap.parse_args(argv)
 
-    if not TOKEN_FILE.exists():
-        raise SystemExit(f"no token at {TOKEN_FILE}")
-    token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+    try:
+        token = cr_api.read_token(TOKEN_FILE)
+    except cr_api.TokenError as exc:
+        raise SystemExit(str(exc)) from None
     scratch = args.out / ".scratch"
     scratch.mkdir(parents=True, exist_ok=True)
-    rate = Rate(args.rate)
+    try:
+        client = cr_api.Client(
+            token, base=args.base, rate=Rate(args.rate),
+            transport=cr_api.make_transport(args.transport, scratch=scratch),
+            log=lambda line: print(f"  {line}", flush=True))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     started = time.time()
-    players = leaderboard(token, rate, scratch, args.top)
+    players = leaderboard(client, args.top)
     if not players:
         raise SystemExit("the leaderboard came back empty")
     elo = {p["tag"]: p.get("eloRating", "") for p in players}
@@ -174,7 +165,7 @@ def main() -> int:
     done = [0]
 
     def walk(player):
-        for battle in battles_for(player["tag"], token, rate, scratch):
+        for battle in battles_for(client, player["tag"]):
             for row in rows_from(battle, elo):
                 # The same battle is in both players' logs; key it so it lands
                 # once regardless of whose log it came from.
@@ -188,6 +179,8 @@ def main() -> int:
 
     with ThreadPoolExecutor(args.workers) as pool:
         list(pool.map(walk, players))
+    if not rows:
+        raise SystemExit("no ranked battles came back")
 
     args.out.mkdir(parents=True, exist_ok=True)
     battles_csv = args.out / "ladder_battles.csv"

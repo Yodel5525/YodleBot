@@ -1,0 +1,4 @@
+{
+ "reason": "accessDenied.invalidIp",
+ "message": "Invalid authorization: API key does not allow access from IP 198.51.100.7"
+}
