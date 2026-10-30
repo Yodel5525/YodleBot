@@ -51,6 +51,12 @@ accuracy of matched pairs (P(enemy) > 0.5 against the label's side). Forms are n
 (Skeleton_EV1 counts as Skeleton). An empty label file is a frame with nothing on it; frames
 without one are not scored.
 
+DETECTOR SETTINGS. --conf, --imgsz and --max-det replace the live DetectorConfig's score
+threshold, input size and box cap (0.35, 640 and 150, scripts/vision/detector.py) for this run;
+the summary's "detector" line and "detector_config" say what ran. Leave them out to replay
+exactly what vision_play runs live (the plays gate scores the live settings); a harvest scan
+asks for a low --conf.
+
 Not here: fitting the perception noise profile (V11's fit_noise_profile, from these errors
 and own-tap ground truth) needs E17's profile format, which is not built yet.
 
@@ -80,7 +86,7 @@ import numpy as np  # noqa: E402
 from latency_probe import describe  # noqa: E402
 from scripts import vision_play as VP  # noqa: E402
 from scripts.vision import hpbars  # noqa: E402
-from scripts.vision.detector import BAR_CLASSES, Detector, box_iou  # noqa: E402
+from scripts.vision.detector import BAR_CLASSES, Detector, DetectorConfig, box_iou  # noqa: E402
 from scripts.vision.geometry import check_frame_size  # noqa: E402
 from scripts.vision.labels import (TYPE_SPELL, TYPE_TOWER, TYPE_UNIT, parse_side,  # noqa: E402
                                    resolve_label, split_side)
@@ -991,6 +997,28 @@ def engine_card_ids(path: str | Path | None, table: Any) -> tuple[dict | None, d
     return None, {n: i for i, n in enumerate(sorted(table.cards))}, "replay-only ids (classes.json)"
 
 
+def detector_config(conf: float | None = None, imgsz: int | None = None,
+                    max_det: int | None = None) -> DetectorConfig | None:
+    """The live DetectorConfig with --conf / --imgsz / --max-det replaced, or None when none is
+    given (Detector.load then builds the live default, as vision_play does). ValueError on a
+    value the detector cannot take: conf outside [0, 1], imgsz not a positive multiple of 32
+    (YOLO's stride; ultralytics would round it), max_det below 1."""
+    over: dict[str, Any] = {}
+    if conf is not None:
+        over["conf"] = float(conf)
+    if imgsz is not None:
+        if int(imgsz) != imgsz or imgsz < 32 or int(imgsz) % 32:
+            raise ValueError(f"--imgsz must be a positive multiple of 32, not {imgsz}")
+        over["imgsz"] = int(imgsz)
+    if max_det is not None:
+        if int(max_det) != max_det or max_det < 1:
+            raise ValueError(f"--max-det must be at least 1, not {max_det}")
+        over["max_det"] = int(max_det)
+    if not over:
+        return None
+    return dataclasses.replace(DetectorConfig(), **over)     # __post_init__ checks conf
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tools/vision_replay.py",
                                  description="Re-run perception offline on a recording (V11).")
@@ -1003,6 +1031,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pr-all", action="store_true", help="score every type, HP bars and UI included")
     ap.add_argument("--detector", default=None, help="detector weights (default: the pin)")
     ap.add_argument("--device", default=None, help="detector device (default: CUDA GPU 0, else cpu)")
+    ap.add_argument("--conf", type=float, default=None,
+                    help=f"detector score threshold (default: the live {DetectorConfig.conf:g})")
+    ap.add_argument("--imgsz", type=int, default=None,
+                    help=f"detector input size, a multiple of 32 (default: the live {DetectorConfig.imgsz})")
+    ap.add_argument("--max-det", type=int, default=None,
+                    help=f"most boxes per image (default: the live {DetectorConfig.max_det})")
     ap.add_argument("--no-detector", action="store_true", help="screen cues and HUD only")
     ap.add_argument("--recorded", action="store_true",
                     help="use the recording's detections (a vision_play session) instead of the detector")
@@ -1022,6 +1056,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        det_config = detector_config(args.conf, args.imgsz, args.max_det)
+    except ValueError as exc:
+        print(f"detector settings: {exc}")
+        return 2
     from scripts.vision import capture as CAP
     from scripts.vision import events as EV
     from scripts.vision import hud as HUD
@@ -1058,11 +1097,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif not args.no_detector:
         from scripts.vision.detector import Detector as _Det
         try:
-            detector = _Det.load(args.detector, device=args.device, geometry=geometry, table=table)
+            detector = _Det.load(args.detector, device=args.device, geometry=geometry, table=table,
+                                 config=det_config)
             detector.warmup()
             det_note = f"{detector.weights} sha256 {str(detector.sha256)[:12]} on {detector.device_desc}"
         except Exception as exc:
             det_note = f"NONE ({type(exc).__name__}: {exc})"
+    if det_config is not None:
+        det_note += (f"; conf {det_config.conf:g}, imgsz {det_config.imgsz}, max_det {det_config.max_det}"
+                     if detector is not None else "; --conf / --imgsz / --max-det unused")
     labels = None
     if args.labels:
         names_path = Path(args.label_names) if args.label_names else find_label_names(args.labels)
@@ -1103,6 +1146,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary = replay.run()
         summary.update(input=str(rec_path), output=str(recorder.session_dir), detector=det_note,
                        card_ids=ids_from, deck=deck)
+        if det_config is not None:
+            summary["detector_config"] = {"conf": det_config.conf, "imgsz": det_config.imgsz,
+                                          "max_det": det_config.max_det, "used": detector is not None}
         recorder.log("replay_summary", **summary)
     finally:
         source.close()

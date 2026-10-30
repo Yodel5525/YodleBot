@@ -384,6 +384,71 @@ def test_next_frame_waits_for_a_newer_frame():
 
 
 # ---------------------------------------------------------------------------
+# the command line: --record and --budget-mb (N04)
+# ---------------------------------------------------------------------------
+REAL_RECORDER = R.VisionRecorder
+
+
+def _capture_main(monkeypatch, tmp_path, root: str, *extra: str):
+    """capture.main over a 3-image folder replayed in order, recording under tmp_path/root
+    without images; returns (exit code, [(VisionRecorder keyword arguments, recorder)])."""
+    frames = tmp_path / "frames"
+    if not frames.is_dir():
+        frames.mkdir()
+        for i in range(3):
+            R.save_image(frames / f"{i:03d}.npy", rgb(10 + i), "npy")
+    monkeypatch.setattr(C, "open_source", lambda kind, **kw: C.FileReplaySource(kind))
+    made = []
+
+    class SpyRecorder(REAL_RECORDER):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            made.append((dict(kw), self))
+
+    monkeypatch.setattr(R, "VisionRecorder", SpyRecorder)    # main imports it from record when called
+    rc = C.main(["--source", str(frames), "--seconds", "30", "--record", str(tmp_path / root),
+                 "--image-every", "0", *extra])
+    return rc, made
+
+
+def test_capture_records_with_the_recorders_budget_by_default(tmp_path, monkeypatch, capsys):
+    rc, made = _capture_main(monkeypatch, tmp_path, "rec")
+    assert rc == 0 and len(made) == 1
+    kw, rec = made[0]
+    assert kw == {"prefix": "capture", "image_every": 0}          # the call as before --budget-mb
+    assert rec.budget.budget_bytes == int(4000.0 * 1024 * 1024)
+    assert rec.frames_written == 3 and rec.session_dir.parent == tmp_path / "rec"
+    out = capsys.readouterr().out
+    assert f"recording to {rec.session_dir}" in out and "image budget" not in out
+
+
+def test_capture_budget_mb_sets_the_roots_prune_budget(tmp_path, monkeypatch, capsys):
+    rc, made = _capture_main(monkeypatch, tmp_path, "harvest", "--budget-mb", "12000")
+    assert rc == 0 and len(made) == 1
+    kw, rec = made[0]
+    assert kw == {"prefix": "capture", "image_every": 0, "budget_mb": 12000.0}
+    assert rec.budget.budget_bytes == int(12000.0 * 1024 * 1024)
+    assert "image budget 12000 MB for everything under" in capsys.readouterr().out
+    rc, made = _capture_main(monkeypatch, tmp_path, "small", "--budget-mb", "0.5")
+    assert rc == 0 and made[0][1].budget.budget_bytes == 512 * 1024
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf"])
+def test_capture_refuses_a_budget_that_is_not_a_positive_size(tmp_path, monkeypatch, value):
+    with pytest.raises(SystemExit) as exc:
+        _capture_main(monkeypatch, tmp_path, "rec", "--budget-mb", value)
+    assert exc.value.code == 2
+    assert not (tmp_path / "rec").exists()                       # refused before recording
+
+
+def test_capture_budget_mb_needs_record(monkeypatch):
+    monkeypatch.setattr(C, "open_source", lambda kind, **kw: pytest.fail("opened a source"))
+    with pytest.raises(SystemExit) as exc:
+        C.main(["--source", "adb", "--budget-mb", "8000"])
+    assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
 # import weight
 # ---------------------------------------------------------------------------
 def test_vision_modules_import_without_torch_cv2_or_the_memory_reader():

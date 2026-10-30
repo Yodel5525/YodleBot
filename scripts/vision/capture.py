@@ -35,7 +35,12 @@ Capture only reads pixels: nothing here taps or navigates.
 
 The bench prints the frame rate, distinct frames and staleness; --record keeps
 the frames (VisionFrames with empty perception plus every Nth image), e.g. to
-label a friendly later.
+label a friendly later. The recorder prunes the OLDEST images under the whole
+--record root once they pass --budget-mb (default 4000 MB, record.py's
+VisionRecorder): give each session its own root, or raise the budget, to keep
+every image of several battles.
+
+    python -m scripts.vision.capture --source auto --seconds 420 --record reports/vision/harvest/S1 --budget-mb 8000
 """
 from __future__ import annotations
 
@@ -55,6 +60,7 @@ if __name__ == "__main__" and not __package__:
     __import__("scripts.vision")
     __package__ = "scripts.vision"
 
+import math  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
@@ -625,7 +631,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resize", default=None, help="publish frames at WIDTHxHEIGHT, e.g. 1080x1920")
     ap.add_argument("--record", default=None, help="record frames under this root (VisionRecorder)")
     ap.add_argument("--image-every", type=int, default=5, help="with --record: an image every N frames")
+    ap.add_argument("--budget-mb", type=float, default=None,
+                    help="with --record: the image budget of the WHOLE --record root in MB; above it the "
+                         "oldest images under the root are deleted (default: the recorder's 4000)")
     args = ap.parse_args(argv)
+    if args.budget_mb is not None:
+        if not args.record:
+            ap.error("--budget-mb applies to --record")
+        if not (math.isfinite(args.budget_mb) and args.budget_mb > 0):
+            ap.error(f"--budget-mb must be a positive number of MB, not {args.budget_mb}")
     from .geometry import parse_size
     resize = parse_size(args.resize) if args.resize else None
     source = open_source(args.source, instance=args.instance, max_stale_s=args.max_stale, resize_to=resize)
@@ -633,8 +647,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.record:
         from .record import VisionRecorder
         from .types import VisionFrame
-        recorder = VisionRecorder(args.record, prefix="capture", image_every=args.image_every)
+        budget = {} if args.budget_mb is None else {"budget_mb": args.budget_mb}
+        recorder = VisionRecorder(args.record, prefix="capture", image_every=args.image_every, **budget)
         print(f"recording to {recorder.session_dir}")
+        if budget:
+            print(f"  image budget {args.budget_mb:g} MB for everything under {recorder.root}")
     seen_t: list[float] = []
     stale: list[float] = []
     size = None

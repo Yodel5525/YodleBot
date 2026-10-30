@@ -7,9 +7,12 @@ a spell seen 10 ticks after its tap, a tap never seen, and decoys (an enemy unit
 card, an own one far from the aim, tracks outside a battle). The replay runs the real tracker
 and event deriver behind a scripted HUD reader and detector on a recorded npy session, with a
 tap replayed from the recording and a labels folder, then the probe reads the replay's output.
+N04: the command line runs on a menu-only recording with Detector.load replaced by a spy, so
+--conf / --imgsz / --max-det are seen reaching the detector (and nothing when left out).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import sys
@@ -27,6 +30,7 @@ for _p in (str(ROOT / "tools"), str(ROOT)):
 
 import latency_probe as LP  # noqa: E402
 import vision_replay as VR  # noqa: E402
+from scripts.vision import detector as DET  # noqa: E402
 from scripts.vision import events as EV  # noqa: E402
 from scripts.vision.capture import FileReplaySource  # noqa: E402
 from scripts.vision.geometry import ArenaGeometry  # noqa: E402
@@ -523,3 +527,77 @@ def test_replay_perception_can_track_the_recorded_detections():
 def test_vision_replay_command_line_refuses_a_missing_recording(tmp_path, capsys):
     assert VR.main([str(tmp_path / "nothing")]) == 2
     assert "nothing to replay" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# replay: detector settings (N04)
+# ---------------------------------------------------------------------------
+
+def test_detector_config_from_the_command_line():
+    live = DET.DetectorConfig()
+    assert VR.detector_config() is None                                   # Detector.load's live default
+    args = VR.build_parser().parse_args(["rec"])
+    assert (args.conf, args.imgsz, args.max_det) == (None, None, None)
+    args = VR.build_parser().parse_args(["rec", "--conf", "0.05", "--imgsz", "960", "--max-det", "300"])
+    cfg = VR.detector_config(args.conf, args.imgsz, args.max_det)
+    assert (cfg.conf, cfg.imgsz, cfg.max_det) == (0.05, 960, 300)
+    assert dataclasses.replace(cfg, conf=live.conf, imgsz=live.imgsz, max_det=live.max_det) == live  # nothing else
+    assert VR.detector_config(conf=0.2) == dataclasses.replace(live, conf=0.2)
+    assert VR.detector_config(max_det=1).max_det == 1 and VR.detector_config(imgsz=32).imgsz == 32
+    for bad in ({"conf": 1.5}, {"conf": -0.1}, {"conf": float("nan")}, {"imgsz": 1000}, {"imgsz": 0},
+                {"max_det": 0}):
+        with pytest.raises(ValueError):
+            VR.detector_config(**bad)
+
+
+def _replay_main(tmp_path, monkeypatch, out: str, *extra: str):
+    """vision_replay.main on a 2-image menu recording (nothing reaches the detector), with
+    Detector.load replaced by a spy; returns (exit code, load calls, summary.json or None)."""
+    calls = []
+
+    def fake_load(cls, weights=None, **kw):
+        calls.append((weights, kw))
+        return SimpleNamespace(weights=Path("w.pt"), sha256="ab" * 32, device_desc="cpu (fake)",
+                               warmup=lambda: 0.0, detect=lambda rgb: pytest.fail("the detector ran"))
+
+    monkeypatch.setattr(DET.Detector, "load", classmethod(fake_load))
+    session = tmp_path / "rec" / "menu"
+    if not session.is_dir():
+        rec = VisionRecorder(tmp_path / "rec", session="menu", image_every=1, image_format="npy",
+                             wall_clock=lambda: 0.0)
+        for t in (1.0, 1.1):
+            rec.write(VisionFrame(t_capture=t, screen=SCREEN_MENU, frame_size=SIZE), np.zeros((400, 225, 3), np.uint8))
+        rec.close()
+    rc = VR.main([str(session), "--out", str(tmp_path / out), "--templates", str(tmp_path / "no_templates"),
+                  "--spawn-table", str(tmp_path / "no_spawn_primary.json"), "--no-taps", *extra])
+    runs = sorted((tmp_path / out).glob("*/summary.json"))
+    return rc, calls, json.loads(runs[0].read_text(encoding="utf-8")) if runs else None
+
+
+def test_vision_replay_detector_flags_reach_the_detector(tmp_path, monkeypatch, capsys):
+    rc, calls, s = _replay_main(tmp_path, monkeypatch, "live")
+    assert rc == 0 and len(calls) == 1 and calls[0][0] is None
+    assert calls[0][1]["config"] is None                                   # exactly the live chain
+    assert s["detector"] == "w.pt sha256 abababababab on cpu (fake)" and "detector_config" not in s
+    assert (s["frames"], s["screens"]) == (2, {"menu": 2})
+
+    rc, calls, s = _replay_main(tmp_path, monkeypatch, "scan", "--conf", "0.05", "--imgsz", "960",
+                                "--max-det", "300")
+    assert rc == 0 and len(calls) == 1
+    assert calls[0][1]["config"] == DET.DetectorConfig(conf=0.05, imgsz=960, max_det=300)
+    assert s["detector"].endswith("on cpu (fake); conf 0.05, imgsz 960, max_det 300")
+    assert s["detector_config"] == {"conf": 0.05, "imgsz": 960, "max_det": 300, "used": True}
+    assert "conf 0.05, imgsz 960, max_det 300" in capsys.readouterr().out
+
+    rc, calls, s = _replay_main(tmp_path, monkeypatch, "rec_dets", "--recorded", "--conf", "0.1")
+    assert rc == 0 and calls == []
+    assert s["detector"] == "the recording's detections (--recorded); --conf / --imgsz / --max-det unused"
+    assert s["detector_config"]["used"] is False
+
+
+def test_vision_replay_refuses_bad_detector_settings_before_loading(tmp_path, monkeypatch, capsys):
+    for flags in (["--conf", "1.5"], ["--imgsz", "1000"], ["--max-det", "0"]):
+        rc, calls, s = _replay_main(tmp_path, monkeypatch, "bad", *flags)
+        assert (rc, calls, s) == (2, [], None)
+        assert "detector settings:" in capsys.readouterr().out
+    assert not (tmp_path / "bad").exists()
