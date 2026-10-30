@@ -33,8 +33,8 @@ $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, roy
 | 14: first model | done: `runs\tokens\live_big_hog\best.pt` (Hog card 66.8%, tile-within-1 55.7%) |
 | 10, 13 | not reported back. Section 16 covers what step 10 was for. |
 | 15-18: detector, calibration, dry run, first friendly with taps | to do |
-| 19: second model (decision-time rows) | done 2026-10-30: `dt_big_hog` 29.3% against `live_big_hog`'s 46.0% at a 21-tick delay. The checks of "Why the second model lost" (`scripts\dt_diagnose.ps1`) are to do |
-| 20: third model (v2 rows, the whole corpus) | to do, after the section 19 checks |
+| 19: second model (decision-time rows) | done 2026-10-30: `dt_big_hog` 29.3% against `live_big_hog`'s 46.0% at a 21-tick delay. The checks of "Why the second model lost" done the same day: the waits with our own play in flight were the cause (`dt_big_hog_np` without them: 80.7%), and against `live_big` epoch 1 both models win far more with no wait bias. Next: `scripts\model_check.ps1 -League` on `dt_big_hog_np`, against the champion (section 19, "Result (2026-10-30)", Decisions) |
+| 20: third model (v2 rows, the whole corpus) | step 1 (`-Others 20000 -Tag 20k`) running the night of 2026-10-30; step 2 once `v2_hog_20k` beats the champion in that league (section 19, "What to do next") |
 | 21: RL fine-tuning (bench, then days of training) | to do, after 20 |
 
 ## 1. GPU driver
@@ -824,7 +824,7 @@ After `git pull`, run the tests of section 12 first. The new tests are `tests\pi
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\dt_diagnose.ps1
 ```
 
-The optional checks are `fullablation` (about 50 minutes), `trust` and `ticks` (about 30 minutes together): add for example `-Steps fullablation`, or `-Steps all` for everything (about 2.5 hours). `-Steps ablation` runs one check alone; `-Workers 6` uses less RAM.
+The optional checks are `fullablation` (about 50 minutes), `trust` and `ticks` (about 30 minutes together): add for example `-Steps fullablation`, or `-Steps all` for everything (about 2.5 hours). `-Steps ablation` runs one check alone; `-Workers 6` uses less RAM. The default, `ablation` and `all` retrain `runs\tokens\dt_big_hog_np` in place: do not run them while that model or its `_wk100` copy is the champion or in the live runner.
 
 | Check | What it runs | Time | What the result means |
 |---|---|---|---|
@@ -862,17 +862,141 @@ $OPP = 'runs\tokens\live_big\ep01.pt'
 & $RG tools\rs_dt_diag.py ghost --delay 21
 ```
 
-**What to do next:**
+#### Result (2026-10-30)
+
+The checks ran on 2026-10-30, in about 80 minutes (`reports\dt_diagnose_20261030_165702.log`). Every `rs_eval` run: 300 held-out matches against `runs\tokens\live_big\ep01.pt`, 8 workers.
+
+| Run | wait_keep | Rule | Delay | Win rate [95% CI] | Crown difference | Plays per match |
+|---|---|---|---|---|---|---|
+| A `live_big_hog` (`second_model.ps1`) | 0.25 | plain | 21 | 46.0% [40.4, 51.7] | -0.34 | 33.3 |
+| B `dt_big_hog` (`second_model.ps1`) | 0.25 | plain | 21 | 29.3% [24.5, 34.7] | -1.02 | 28.7 |
+| waitbias: `dt_big_hog` | 0.5 | plain | 21 | 63.3% [57.7, 68.6] | +0.30 | 38.8 |
+| waitbias: `dt_big_hog` | 1.0 | plain | 21 | 68.0% [62.5, 73.0] | +0.51 | 43.3 |
+| waitbias: `live_big_hog` (the control) | 1.0 | plain | 21 | 65.3% [59.8, 70.5] | +0.47 | 41.8 |
+| live: `live_big_hog` | 0.25 | live | 21 | 51.7% [46.0, 57.3] | -0.15 | 38.3 |
+| live: `dt_big_hog` | 0.25 | live | 21 | 45.7% [40.1, 51.3] | -0.29 | 40.5 |
+| offset: `dt_big_hog` | 0.25 | plain | 24 | 29.0% [24.2, 34.4] | -0.96 | 28.0 |
+| ablation: `dt_big_hog_np` | 0.25 | plain | 21 | **80.7%** [75.8, 84.7], 1 draw | +0.79 | 37.4 |
+
+How to read the columns:
+- **wait_keep**: `rs_eval` and the live runner add log(1 / wait_keep) to the model's "wait" score, with wait_keep read from the `args.json` next to the checkpoint. Both models trained with 0.25, which adds 1.39; 0.5 adds 0.69 and 1.0 adds nothing. A larger wait_keep means fewer waits and more plays.
+- **Rule**: plain is `rs_eval`'s own decision rule. live is `--decide live`, the live runner's rule: no wait at a full bar, no second tap of a card in flight. It applies to both seats, the opponent too, so live rows compare only with live rows.
+
+The headroom check:
+- On `rs_rows_dt`, the `< -7` share is 0.019, about 0. So the recorded tick is the tick a play ran, as assumed. The `< 0` share is 0.038.
+- On `rs_rows_live`, no row is below 0, 0.2% are below 6 ticks and 1.7% below 15. That is the same answer. (Its folder has no manifest because it comes from an older run; that is harmless.)
+- Waits with our own play in flight are 19.8% of the wait rows, and 24.2% in the trusted Hog 2.6 rows.
+
+The ablation's fine-tune left out 105,736 of those waits. Its validation figures (Hog card 63.4%, tile-within-1 54.0%, gate 57.5%) are those of `dt_big_hog` (63.3%, 54.0%), yet it wins 80.7% instead of 29.3%. Leaving those waits out also thins the waits by about a quarter, which is worth about 0.3 of the 1.39 bias (like wait_keep 0.33 instead of 0.25). But wait_keep 0.5 takes away 0.69 of the bias and reaches only 63.3%, with more plays (38.8 against 37.4), so the ablation's gain is not the play rate.
+
+**Reading:**
+1. The leading explanation holds strongly. Without the waits in flight the same recipe goes from 29.3% to 80.7%. The other checks agree:
+   - waitbias: at wait_keep 1.0, `dt_big_hog` gains 38.7 points (29.3% to 68.0%), twice the control's 19.3 (46.0% to 65.3%), about 3.5 standard errors apart. Its plays go from 28.7 to 43.3 a match, the control's from 33.3 to 41.8, and the two models end level (68.0% against 65.3%). That is the table's first outcome: a lazy gate.
+   - live: under the live rule the gap between the two models shrinks from 16.7 points (plain) to 6.0 (51.7% against 45.7%), within the noise. The live rule's in-flight mask recovers most of what `dt_big_hog` lost. The gains themselves (16.4 points against 5.7) differ by about 2 standard errors: suggestive, not conclusive.
+2. A second effect, which both models share: against `live_big` epoch 1 in `rs_eval` (no noise, 300 matches), both win far more with no wait bias. wait_keep 1.0 lifts the control `live_big_hog` by 19 points too (46.0% to 65.3%). This is one result against one opponent, and that opponent plays with the 0.25 bias itself, so "a busier model beats a passive 0.25 one" fits it as well as "0.25 is too high". The wait_keep 1.0 runs also play 41.8-43.3 cards a match, above the pros' 35-40. The third model reads `own_pending` (our own plays in flight), which addresses 1 but not 2.
+3. Ruled out: what the recorded tick means (headroom), and the 24-tick lead against the 21-tick delay (offset: 29.0% at 24 ticks against 29.3% at 21).
+
+**Caveats:**
+- There is one opponent, `live_big` epoch 1, reactive. A model can beat one opponent's habits without being better in general.
+- There is no perception noise, and each run is 300 matches, so each interval is about +-5.6 points.
+- The league (`tools\rs_league_eval.py`) is the stricter instrument. It plays paired games on the same deals, from both seats, at a 24-tick delay, with the noise prior on every seat and the live rule. Its gate (plan L03; `GateConfig` in that file) needs 1,000 games against the champion with a Wilson 95% lower bound above 52%, that is at least 551 points of 1,000 (a win is 1, a draw 0.5), and no more than 2 points below the champion against `live_big` over 400 games.
+- In the league the champion and `live_big` play at wait_keep 0.25 too (unless the champion is a `_wk100` copy). So a wait_keep 1.0 copy that passes has shown that it beats 0.25 models, not that 1.0 is right in general. Real friendlies are the final check (plan, "Evaluation").
+- This log's `== summary` block leaves out the wait_keep 0.5 line and repeats some `engine:` lines. `Invoke-WaitBias`'s `-Keep` parameter ('0.5', '1.0') stood in for the summary's pattern: a PowerShell function reads its callers' variables, case ignored. The runs are not affected, and the lines above the summary are complete. `dt_diagnose.ps1` is fixed since 2026-10-30.
+
+**Decisions:**
+- The night of 2026-10-30: section 20 step 1, `third_model.ps1 -Others 20000 -Tag 20k`, about 3-4 hours. Its model is `v2_hog_20k`. Its league plays it against `live_big_hog` in `runs\league\third_model.jsonl`, and the log's `gate:` block has a line `  v2_hog_20k: PASS (vs champion live_big_hog)`, or FAIL, CYCLE or INCOMPLETE.
+- The live runner keeps `live_big_hog` at wait_keep 0.25 for now. 80.7% against one opponent without noise is not a gate pass.
+- **The champion** is the last model whose league said PASS, and `live_big_hog` until one does. Every candidate plays the current champion, never a former one, so that two models never both replace `live_big_hog` without meeting. `model_check.ps1` plays `live_big_hog` unless `-Champion` names another. A `_wk100` copy of a model is a candidate like any other.
+- **From 2026-10-31, whenever the PC is free** (not during `third_model.ps1`, detector training or a friendly), with MuMu and the browser closed, in this order. All of them use `runs\league\model_check.jsonl`.
+  1. Read the night's verdict: `Select-String -Path C:\hcr\reports\third_model_*.log -Pattern '== done|^ERROR: step|v2_hog_20k: (PASS|FAIL|CYCLE|INCOMPLETE)'`. Neither a `== done` nor an `ERROR: step` line: `third_model.ps1` is still running, so wait. Send that log back in any case. A `v2_hog_20k: PASS` line: the champion is `runs\tokens\v2_hog_20k\best.pt`. Anything else, or no gate line: it is `runs\tokens\live_big_hog\best.pt`.
+  2. `scripts\model_check.ps1 -League -Champion <the champion's best.pt>`: `dt_big_hog_np` at its own wait_keep 0.25, its `rs_eval` runs (with the champion as their control) and its league (next subsection). About 2.5-3 hours. On a PASS, the champion is `runs\tokens\dt_big_hog_np\best.pt`.
+  3. `scripts\model_check.ps1 -LeagueOnly -LeagueKeep 1.0 -Champion <the champion's best.pt>`: its wait_keep 1.0 copy, `dt_big_hog_np_wk100`. About 1 hour. On a PASS, the champion is `runs\tokens\dt_big_hog_np_wk100\best.pt`. This works against `dt_big_hog_np` itself too: the copy is another file, so another player.
+  4. `scripts\model_check.ps1 -Ckpt runs\tokens\live_big_hog\best.pt -LeagueOnly -LeagueKeep 1.0 -Champion <the champion's best.pt>`: `live_big_hog_wk100`, the live model with only the bias changed. About 1 hour. On a PASS, the champion is `runs\tokens\live_big_hog_wk100\best.pt`.
+
+  The league times are estimates until a league has been timed on the PC (the night's league has its start time in its `==` line).
+- **Switching the live runner** to the champion, once that is not `live_big_hog`:
+  - Repeat the section 17 dry run with `--ckpt <the champion's best.pt>` added to its `vision_play.py` command, and check its `decide` start-up line: `wait_keep 0.25 (wait bias 1.386)` for a model at its own wait_keep (0.25 for every model so far), `wait_keep 1 (wait bias 0.000)` for a `_wk100` copy. Only then add the same `--ckpt` to section 18's `--tap` friendlies.
+  - The live runner reads wait_keep from the `args.json` next to the checkpoint. So a model at 1.0 is the copy that `model_check.ps1` makes, `runs\tokens\<name>_wk100\`: the same `best.pt`, with an `args.json` that says `"wait_keep": "1.0"`. Never edit the `args.json` in a trained model's own folder.
+  - Do not retrain into the live model's folder: no `dt_diagnose.ps1` default run, `-Steps ablation` or `-Steps all` while `dt_big_hog_np` or its copy is in use. `model_check.ps1` never replaces an existing copy whose source has changed; it stops and says so.
+  - Nothing passes: keep `live_big_hog` at 0.25.
+- Section 20 step 2 (the whole corpus) needs `v2_hog_20k` to beat `live_big_hog`, the champion its league met ("What to do next", below). Its model, `v2_hog`, then plays `live_big_hog` in section 20's league. If the champion is another model by then, `v2_hog` must also pass against that one before it goes into the live runner (section 20, "Reading the result").
+
+So the second bullet below applies: run section 20, in two steps.
+
+#### What to do next
+
 - `headroom` says the tick is the tap (a large `headroom: < -7` share on `rs_rows_dt`, or many rows near 0 on `rs_rows_live`): do not run section 20. Send the log back. The rows then need a re-drive with the delay first.
 - `ablation` or `fullablation` lifts the model clearly, to about 40% or more, or `waitbias` lifts `dt_big_hog` clearly more than its `live_big_hog` control: run section 20, in two steps.
   1. The second model's corpus size first, about 3-4 hours instead of a night: `third_model.ps1 -Others 20000 -Tag 20k` (add `-SkipDiskCheck` if `C:` has less than the 90 GB the full run checks for). Its model is `v2_hog_20k`.
-  2. Only once `v2_hog_20k` beats `live_big_hog` (its league score against it above 50%; a PASS needs at least 551 of 1,000): the whole corpus, `third_model.ps1` with no `-Tag`. Its model is `v2_hog`; the 20k run's files stay as they were. Free the disk first (section 20, "Disk").
+  2. Only once `v2_hog_20k` beats the champion (its league score against it above 50%; a PASS needs at least 551 of 1,000): the whole corpus, `third_model.ps1` with no `-Tag`. Its model is `v2_hog`; the 20k run's files stay as they were. Free the disk first (section 20, "Disk").
 - `ablation` stays near 29%: run `-Steps fullablation` before deciding anything.
 - Neither ablation moves it, and `waitbias` lifts both models alike or neither: hold section 20, run `-Steps trust`, and send the log back.
 
-Keep `live_big_hog` in the live runner meanwhile.
+Keep `live_big_hog` in the live runner meanwhile. The champion is `live_big_hog` until a league PASS replaces it ("Result (2026-10-30)", Decisions).
 
 Send back `reports\dt_diagnose_<time>.log`. If you cannot send all of it, send the `== summary` block at its end.
+
+### Checking a checkpoint: model_check.ps1
+
+`scripts\model_check.ps1` runs this section's simulator checks on any checkpoint, unattended, with the control in the same log. Use it for `dt_big_hog_np` now, and later for `v2_hog_20k`, `v2_hog` and the RL checkpoints of section 21. It needs no copies made by hand. It uses only the CPU venv (`.venvs\royalegym`), but close MuMu and the browser first: 8 workers use most of the RAM. Do not run it while `third_model.ps1` or the live runner is running.
+
+After `git pull`, run the tests of section 12 first. The new test is `tests\pipeline\test_model_check_ps1.py`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -League
+```
+
+What it does:
+- **The runs.** For each checkpoint (`-Ckpt`, default `runs\tokens\dt_big_hog_np\best.pt`), each wait_keep (`-Keeps`, default `own,1.0`) and each rule (`-Rules`, default `plain,live`), one `rs_eval` run: 300 matches against `live_big` epoch 1 at `--delay 21`. Each run has a label such as `dt_big_hog_np wk own(0.25) live d21`.
+- **The control.** Right after each setting, the champion (`-Champion`, default `live_big_hog`) runs under the same setting. `-NoBaseline` leaves it out. A run that was already made earlier in the same run is not made again.
+- **wait_keep.** `own` is the value in the checkpoint's own `args.json`. A checkpoint without one is refused for `own`. A number plays a copy in `runs\tokens\<name>_wkNNN\` (wk100 is 1.0, wk050 is 0.5), as `dt_diagnose.ps1` made them. The copy is made at the start and read back through `rs_decide.wait_keep_for` before anything runs. An existing copy is used only when it holds the same `best.pt` as its source. When the source has changed since (retrained), or another checkpoint with the same name made the copy, the script stops before anything runs, because the copy may be the live model. A folder that is not such a copy is never overwritten. Two checkpoints of one run with the same name are refused too.
+- **`-League`.** After the runs, `tools\rs_league_eval.py run` plays the first checkpoint against the champion, with `live_big` epoch 1 as the anchor. Only that one checkpoint, and only at one wait_keep: its own, or `-LeagueKeep`. A `_wk100` copy plays in the `rs_eval` runs only; its league is a separate `-LeagueOnly -LeagueKeep 1.0` run (Decisions above). The settings are those of section 20's league step: 24-tick delay, the noise prior, both seats, 1,000 games against the champion and 400 against the anchor for each (`--full`), at most 6 workers. The log is `runs\league\model_check.jsonl`, with `model_check.pairs.json` (the frozen deals) and `model_check.report.json` next to it. A rerun plays only the games the log lacks, so `live_big_hog`'s 400 games against `live_big` are played once and reused for every later candidate.
+- **League names.** A checkpoint plays under its folder's name (`best.pt`), or its folder and file name (`runs\rl\hog_rl1\it0010.pt` plays as `hog_rl1_it0010`). A copy plays as `<name>_wk100`. One name must mean one checkpoint, so the script stops at the start when the league log (`-LeagueLog`) already uses a name of this run for another checkpoint or path (the league would refuse those games), or when any log under `runs\league\` or `runs\rl\` uses the candidate's name for another checkpoint. `-LeagueName` gives the candidate another name. For the champion's or the anchor's name in another log it prints a yellow `warning:` line and goes on. Never move an RL run's `gate.jsonl`: it is part of that run's state.
+- **The log.** Everything goes to `reports\model_check_<time>.log`. Its `== summary` block has a table: label, wins, draws, win %, 95% CI, crown difference, plays per match, and the points above the control at the same wait_keep and rule. With `-League` the league's report follows, and a `league verdict:` line.
+
+Do not use the league's `wait_keep=` player option to change a wait_keep. `rs_eval`'s agent reads the `args.json` next to the checkpoint first, so the option changes nothing for a trained checkpoint. Use the copies.
+
+| Part | Time |
+|---|---|
+| each `rs_eval` run (300 matches, 8 workers) | about 10 min; the default is 8 runs, about 80 min |
+| the league, on a new log | about 1-1.5 h (1,800 games; an estimate, not yet timed on the PC) |
+| the league again with another candidate, same log | about 1 h (1,400 games; the champion's anchor games are reused when the champion has played in that log) |
+
+More examples:
+
+Each of these plays `live_big_hog` as the champion. Once another model has passed, add `-Champion <its best.pt>` (Decisions above).
+
+```powershell
+# the league alone, dt_big_hog_np at wait_keep 1.0 (it plays as dt_big_hog_np_wk100)
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -LeagueOnly -LeagueKeep 1.0
+# the live model with only the wait bias changed (live_big_hog_wk100)
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -Ckpt runs\tokens\live_big_hog\best.pt -LeagueOnly -LeagueKeep 1.0
+# the third model at both wait_keeps; its league games are already in third_model.jsonl
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -Ckpt runs\tokens\v2_hog_20k\best.pt -League -LeagueLog runs\league\third_model.jsonl
+# an RL champion (section 21): champion.pt changes when RL promotes, so name each one
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -Ckpt runs\rl\hog_rl1\champion.pt -League -LeagueName hog_rl1_c1
+```
+
+Other options: `-Workers 6` uses less RAM; `-Matches`, `-Delay` and `-Opponent` change the `rs_eval` runs; `-Noise` changes the league's noise profile. With `-LeagueLog runs\league\third_model.jsonl`, a candidate with section 20's name, champion and anchor finds its games already played. Give other candidates the default log.
+
+The same runs one by one, in the shorthand at the top of this file. A `_wk100` copy exists once the script has made it:
+
+```powershell
+$OPP = 'runs\tokens\live_big\ep01.pt'
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np_wk100\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np_wk100\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
+& $RG tools\rs_league_eval.py run --candidate dt_big_hog_np=runs\tokens\dt_big_hog_np\best.pt --champion live_big_hog=runs\tokens\live_big_hog\best.pt --anchor live_big=runs\tokens\live_big\ep01.pt --delay 24 --noise data\noise\default_prior.json --champion-games 1000 --anchor-games 400 --full --workers 6 --log runs\league\model_check.jsonl
+& $RG tools\rs_league_eval.py report --log runs\league\model_check.jsonl
+```
+
+**Reading the result.**
+- In the table, compare each line with its control, in the `vs control` column. At 300 matches a difference under about 8 points is not conclusive.
+- The `live` lines are the closest to live play. Pros play about 35-40 cards a match, so `plays` far outside that range shows a lazy or a jumpy model.
+- The `league verdict:` line decides. PASS means the candidate is the new champion, and every later candidate plays it. It goes into the live runner after a section 17 dry run with it ("Decisions" in "Result (2026-10-30)" above). FAIL, CYCLE or INCOMPLETE means you keep the champion. INCOMPLETE means games are missing: run it again with `-LeagueOnly` and the same `-Ckpt`, `-LeagueKeep`, `-LeagueName`, `-LeagueLog` and `-Champion`. The league plays only the games its log lacks, and `-LeagueOnly` skips the `rs_eval` runs (about 80 minutes with the defaults).
+
+Send back `reports\model_check_<time>.log`. If you cannot send all of it, send its `== summary` block.
 
 ## 20. Third model: v2 rows from the whole corpus
 
@@ -987,7 +1111,8 @@ If space runs short:
   - **no delay** and **24-tick delay**: a model trained for the 24-tick lead should do best at 21-24 ticks and worse without a delay, as `dt_big_hog` did (21.0% without one). If v2_hog does much better without a delay than at 21, its timing is off.
   - **live rule**: the two `decide live` lines compare only with each other, because both seats change rule. v2_hog should be at least level with `live_big_hog` there, since these are the numbers closest to live play. The `plays/match` figures show a lazy gate directly: the pros play about 35-40 cards a match.
 - **league** is the real test. It plays at a 24-tick delay with perception noise on every seat, from both seats, on deck pairings and seeds that are the same for every player. Against the champion, each pairing is also played with the decks exchanged. Its `gate:` lines give the decision for `v2_hog`:
-  - **PASS**: v2_hog beats `live_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `live_big_hog` against `live_big`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` (`runs\tokens\v2_hog_20k\best.pt` for the `-Tag 20k` run) to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
+  - **PASS**: v2_hog beats `live_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `live_big_hog` against `live_big`. If `live_big_hog` is still the champion, v2_hog is now the champion (section 19, "Result (2026-10-30)", Decisions), and every later candidate plays it. It becomes the live model after a section 17 dry run with `--ckpt runs\tokens\v2_hog\best.pt` (`runs\tokens\v2_hog_20k\best.pt` for the `-Tag 20k` run) added to the `vision_play.py` command; then add the same `--ckpt` to section 18's. The runner reads the checkpoint's schema and builds v2 rows by itself.
+    - If another model has become the champion meanwhile, v2_hog must pass against that model too: `scripts\model_check.ps1 -Ckpt runs\tokens\v2_hog\best.pt -LeagueOnly -Champion <the champion's best.pt>` (`runs\tokens\v2_hog_20k\best.pt` for the 20k run), about 1 hour. `-League` instead adds its `rs_eval` runs, about 80 minutes more.
   - **FAIL**, **CYCLE** or **INCOMPLETE**: keep the live model you have.
 
   The `paired` lines show v2_hog's score minus live_big_hog's against the same opponent on the same positions, with an interval.

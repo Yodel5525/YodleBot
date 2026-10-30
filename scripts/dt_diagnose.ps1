@@ -97,18 +97,20 @@ $summary = New-Object System.Collections.Generic.List[string]
 $failed = New-Object System.Collections.Generic.List[string]
 
 # One check: its output to the console and the log, its result lines to the summary. $true
-# when it exited 0; a failure is logged and the script goes on.
+# when it exited 0; a failure is logged and the script goes on. $script:keep, not $keep: a
+# function reads its callers' variables first (case ignored), and on 2026-10-30 Invoke-WaitBias's
+# -Keep ('0.5', '1.0') stood in for the pattern, so the summary lost the wait_keep 0.5 result.
 function Invoke-Check([string]$Name, [string]$Python, [string[]]$ArgList) {
     Write-Both ("== {0}  ({1})  {2} {3}" -f $Name, (Get-Date -Format 'HH:mm:ss'), $Python, ($ArgList -join ' ')) 'Cyan'
     & $Python @ArgList 2>&1 | ForEach-Object {
         $line = "$_"
         Write-Both $line
-        if ($line -match $keep) { $summary.Add(("{0}: {1}" -f $Name, $line.Trim())) }
+        if ($line -match $script:keep) { $script:summary.Add(("{0}: {1}" -f $Name, $line.Trim())) }
     }
     $code = $LASTEXITCODE
     if ($code -ne 0) {
         Write-Both ("ERROR: '{0}' failed with exit code {1}; going on with the next check." -f $Name, $code) 'Red'
-        $failed.Add($Name)
+        $script:failed.Add($Name)
         return $false
     }
     return $true
@@ -174,23 +176,23 @@ if ($run -contains 'headroom') {
 # the checkpoint (tools\rs_decide.py wait_keep_for). A copy of best.pt with another args.json
 # plays the same model with a smaller wait bias: 0.69 (wait_keep 0.5) and 0 (1.0) instead of
 # 1.39 (0.25, what both models trained with).
-function Invoke-WaitBias([string]$Label, [string]$Source, [string]$DirName, [string]$Keep) {
+function Invoke-WaitBias([string]$Label, [string]$Source, [string]$DirName, [string]$KeepText) {
     $dir = Join-Path $root ('runs\tokens\' + $DirName)
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Copy-Item -Force (Join-Path $root $Source) (Join-Path $dir 'best.pt')
     # No byte-order mark: json.loads refuses one, and rs_decide would fall back to 0.35.
-    [System.IO.File]::WriteAllText((Join-Path $dir 'args.json'), ('{"wait_keep": "' + $Keep + '"}'), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText((Join-Path $dir 'args.json'), ('{"wait_keep": "' + $KeepText + '"}'), (New-Object System.Text.UTF8Encoding($false)))
     $ck = Join-Path $dir 'best.pt'
     # No double quotes in the probe: PowerShell 5.1 passes them to python unescaped.
     $probe = 'import sys; sys.path[:0] = [''tools'']; import rs_decide; print(rs_decide.wait_keep_for(sys.argv[1]))'
     $got = "$(& $RG -c $probe $ck 2>&1 | Select-Object -Last 1)".Trim()
     # A string comparison: python prints 0.5 and 1.0, whatever Windows' decimal separator.
-    if ($got -eq $Keep) {
+    if ($got -eq $KeepText) {
         Write-Both ("{0}: rs_eval reads wait_keep {1}" -f $ck, $got)
     } else {
-        Write-Both ("warning: {0}: rs_decide.wait_keep_for read '{1}', not {2}; this run's bias is not the one asked for." -f $ck, $got, $Keep) 'Yellow'
+        Write-Both ("warning: {0}: rs_decide.wait_keep_for read '{1}', not {2}; this run's bias is not the one asked for." -f $ck, $got, $KeepText) 'Yellow'
     }
-    Invoke-Check ("wait bias: {0}, wait_keep {1}, 21-tick delay" -f $Label, $Keep) $RG (@('tools\rs_eval.py', '--ckpt', $ck) + $vs + @('--delay', '21')) | Out-Null
+    Invoke-Check ("wait bias: {0}, wait_keep {1}, 21-tick delay" -f $Label, $KeepText) $RG (@('tools\rs_eval.py', '--ckpt', $ck) + $vs + @('--delay', '21')) | Out-Null
 }
 
 if ($run -contains 'waitbias') {
