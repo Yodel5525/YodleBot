@@ -62,7 +62,11 @@ Matching (numpy only; OpenCV is never needed):
   column runs, each glyph letterboxed to 20x20 (aspect kept, so '1' stays thin)
   and matched by NCC against the font's templates. A glyph much shorter than
   the tallest is punctuation (the clock's ':') unless ':' templates exist;
-  one under SPECK_FRAC of the tallest is noise and ignored.
+  one under SPECK_FRAC of the tallest is noise and ignored. The elixir font
+  (ELIXIR_GLYPH_STYLE) also cleans its mask first (GlyphStyle.min_stroke,
+  clean_glyph_mask): the elixir bar's 1-2 px white top line crosses the
+  count's rows on both sides of it, and fill thinner than 3 px is not a digit
+  stroke there. Templates are cleaned the same way when they are loaded.
 """
 from __future__ import annotations
 
@@ -436,6 +440,73 @@ class CardMatcher:
 Rule = tuple[int, int, int, int]                 # (cr, cg, cb, t): cr*R + cg*G + cb*B >= t
 
 
+def thin_fill(mask: np.ndarray, min_run: int) -> np.ndarray:
+    """The pixels of `mask` whose vertical run (the consecutive fill pixels of
+    their column they belong to) is shorter than `min_run`: a horizontal line
+    or a speck thinner than min_run px. All False when min_run <= 1."""
+    m = np.asarray(mask, dtype=bool)
+    if m.ndim != 2:
+        raise ValueError(f"thin_fill needs a 2-D mask, got shape {m.shape}")
+    h, w = m.shape
+    k = int(min_run)
+    if k <= 1 or m.size == 0:
+        return np.zeros((h, w), dtype=bool)
+    p = np.zeros((w, h + 2), dtype=np.int8)        # one row per column, padded at both ends
+    p[:, 1:-1] = m.T
+    d = np.diff(p, axis=1)                         # +1 where a run starts, -1 one past its end
+    sc, sr = np.nonzero(d == 1)                    # row-major: per column, starts and ends alternate
+    ec, er = np.nonzero(d == -1)
+    short = (er - sr) < k
+    paint = np.zeros((w, h + 1), dtype=np.int32)
+    paint[sc[short], sr[short]] = 1
+    paint[ec[short], er[short]] = -1
+    return (np.cumsum(paint, axis=1)[:, :h] > 0).T
+
+
+def clean_glyph_mask(mask: np.ndarray, min_stroke: int) -> np.ndarray:
+    """`mask` without what a thin horizontal line or a speck adds to it
+    (GlyphStyle.min_stroke; min_stroke <= 1 returns the mask as it is):
+
+    1. fill in vertical runs shorter than `min_stroke` px is dropped
+       (thin_fill): a line up to min_stroke - 1 px tall, specks, and the 1-2 px
+       tips of a glyph's anti-aliased edges;
+    2. a row where step 1 dropped at least 2 x min_stroke px holds a line. At
+       each end of a column run (a glyph, as segment_glyphs cuts them), the
+       columns whose fill lies within min_stroke - 1 rows of such a row are
+       dropped as well, so a thicker piece of the line touching a glyph neither
+       widens its box nor stays a glyph of its own.
+    Both steps work within columns or at the ends of whole column runs, so a
+    glyph's crop cleans to that glyph's part of the cleaned region: templates
+    (cleaned when loaded) and live crops agree.
+    """
+    m = np.asarray(mask, dtype=bool)
+    if m.ndim != 2:
+        raise ValueError(f"clean_glyph_mask needs a 2-D mask, got shape {m.shape}")
+    k = int(min_stroke)
+    if k <= 1 or m.size == 0:
+        return m
+    thin = thin_fill(m, k)
+    out = m & ~thin
+    line_rows = np.nonzero(thin.sum(axis=1) >= 2 * k)[0]
+    if line_rows.size == 0:
+        return out
+    band = np.zeros(m.shape[0], dtype=bool)
+    for r in line_rows.tolist():
+        band[max(0, r - k + 1):r + k] = True
+    filled = out.any(axis=0)
+    on_line = filled & ~(out & ~band[:, None]).any(axis=0)      # all of the column's fill is on the line
+    edges = np.diff(np.concatenate([[0], filled.astype(np.int8), [0]]))
+    for x0, x1 in zip(np.nonzero(edges == 1)[0].tolist(), np.nonzero(edges == -1)[0].tolist()):
+        a, b = x0, x1
+        while a < b and on_line[a]:
+            a += 1
+        while b > a and on_line[b - 1]:
+            b -= 1
+        out[:, x0:a] = False
+        out[:, b:x1] = False
+    return out
+
+
 @dataclass(frozen=True)
 class GlyphStyle:
     """Which pixels are digit fill.
@@ -445,40 +516,63 @@ class GlyphStyle:
     each tint is a tuple of linear rules (cr, cg, cb, t), all of which a pixel
     must meet (cr*R + cg*G + cb*B >= t). The clock and elixir digits are white
     with a dark outline; the tower digits are tinted (TOWER_GLYPH_STYLE).
+    min_stroke > 1 then cleans the mask (clean_glyph_mask): fill thinner than
+    min_stroke px in its column (a thin horizontal line, a speck) is not fill,
+    nor are the columns at a glyph's ends that lie on such a line
+    (ELIXIR_GLYPH_STYLE). 0, the default, keeps the colour tests' mask as is.
     """
     min_value: int = 190
     max_chroma: int = 45
     tints: tuple[tuple[Rule, ...], ...] = ()
+    min_stroke: int = 0
 
     def mask(self, rgb: np.ndarray) -> np.ndarray:
         a = np.asarray(rgb)
         if a.ndim == 2:
-            return a >= self.min_value
-        a = a[..., :3].astype(np.int32)
-        lo, hi = a.min(axis=2), a.max(axis=2)
-        m = (lo >= self.min_value) & (hi - lo <= self.max_chroma)
-        for rules in self.tints:
-            t = np.ones(m.shape, dtype=bool)
-            for cr, cg, cb, th in rules:
-                t &= (cr * a[..., 0] + cg * a[..., 1] + cb * a[..., 2]) >= th
-            m |= t
+            m = a >= self.min_value
+        else:
+            a = a[..., :3].astype(np.int32)
+            lo, hi = a.min(axis=2), a.max(axis=2)
+            m = (lo >= self.min_value) & (hi - lo <= self.max_chroma)
+            for rules in self.tints:
+                t = np.ones(m.shape, dtype=bool)
+                for cr, cg, cb, th in rules:
+                    t &= (cr * a[..., 0] + cg * a[..., 1] + cb * a[..., 2]) >= th
+                m |= t
+        if self.min_stroke > 1:
+            m = clean_glyph_mask(m, self.min_stroke)
         return m
 
     def to_dict(self) -> dict[str, Any]:
         return {"min_value": self.min_value, "max_chroma": self.max_chroma,
-                "tints": [[list(r) for r in rules] for rules in self.tints]}
+                "tints": [[list(r) for r in rules] for rules in self.tints],
+                "min_stroke": self.min_stroke}
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> "GlyphStyle":
+        """The inverse of to_dict; a missing key takes the default (a dict
+        written before min_stroke existed loads with min_stroke 0)."""
         d = d or {}
         tints = tuple(tuple(tuple(int(c) for c in r) for r in rules) for rules in d.get("tints") or ())
         for rules in tints:
             if any(len(r) != 4 for r in rules):
                 raise ValueError("a tint rule is (cr, cg, cb, threshold)")
-        return cls(int(d.get("min_value", 190)), int(d.get("max_chroma", 45)), tints)
+        min_stroke = int(d.get("min_stroke", 0) or 0)
+        if min_stroke < 0:
+            raise ValueError(f"min_stroke must be >= 0, not {min_stroke}")
+        return cls(int(d.get("min_value", 190)), int(d.get("max_chroma", 45)), tints, min_stroke)
 
 
 DEFAULT_GLYPH_STYLE = GlyphStyle()
+#: The elixir count on the owner's client (747x1328 recordings, e.g. 00000665):
+#: white like the clock (strokes 7-8 px, the digit 27-28 rows), but the elixir
+#: bar's top highlight, a 1 px white line (row 15 of the 37-row elixir_digit
+#: box; 1-2 px at other scales), runs through the count's rows on both sides of
+#: it to the box's edges, and JPEG leaves 1 px specks above it. Column runs join
+#: a speck and the line into a glyph 10 rows tall ('9' read as 2 glyphs), or the
+#: line and a digit it touches into one too wide (or cut off at the box edge).
+#: min_stroke 3 drops lines and specks up to 2 px (clean_glyph_mask).
+ELIXIR_GLYPH_STYLE = GlyphStyle(min_stroke=3)
 #: Tower hit points on the owner's client (frames of 2026-10-29, build 160635001):
 #: the opponent's digits are pinkish white (255, 220-240, 230-245) over the light,
 #: yellowish arena floor (250, 245, 210), which the white test would take too,
@@ -490,7 +584,7 @@ TOWER_GLYPH_STYLE = GlyphStyle(
     tints=(((1, 0, 0, 225), (0, 1, 0, 185), (0, 0, 1, 195), (0, -1, 1, -2)),     # enemy: pinkish white
            ((1, 0, 0, 160), (0, 1, 0, 195), (0, 0, 1, 215), (-1, 0, 1, 15))))    # own: light blue
 #: The style each font's templates and readings use unless one is passed.
-FONT_STYLES = {"clock": DEFAULT_GLYPH_STYLE, "elixir": DEFAULT_GLYPH_STYLE, "tower": TOWER_GLYPH_STYLE}
+FONT_STYLES = {"clock": DEFAULT_GLYPH_STYLE, "elixir": ELIXIR_GLYPH_STYLE, "tower": TOWER_GLYPH_STYLE}
 #: A glyph box less than this fraction of the tallest glyph's height is a speck
 #: (JPEG noise, a bar highlight), not a character; ':' is about 0.55-0.7.
 SPECK_FRAC = 0.3
@@ -569,8 +663,9 @@ class DigitRead:
 
 class DigitOCR:
     """Template OCR for one HUD font (digits/<font> in the store). The glyph style
-    defaults to the font's (FONT_STYLES); glyph boxes under SPECK_FRAC of the
-    tallest are ignored."""
+    defaults to the font's (FONT_STYLES); its mask, cleaned when the style has a
+    min_stroke, is used for the templates and the readings alike; glyph boxes
+    under SPECK_FRAC of the tallest are ignored."""
 
     def __init__(self, store: TemplateStore | None, font: str, style: GlyphStyle | None = None, *,
                  min_score: float = 0.6, min_margin: float = 0.02, small_frac: float = 0.75,
@@ -633,7 +728,9 @@ def add_digit_templates(store: TemplateStore, font: str, region_rgb: np.ndarray,
 
     `text` lists the characters left to right as the screen shows them, ':'
     included (e.g. '2:47'); spaces are ignored. Uses the font's glyph style
-    unless `style` is given, and ignores specks (drop_specks). Raises
+    unless `style` is given (for the elixir font its mask leaves out the
+    elixir bar's thin top line, GlyphStyle.min_stroke), and ignores specks
+    (drop_specks). Raises
     TemplateError when the number of glyphs found differs from the number of
     characters.
     """

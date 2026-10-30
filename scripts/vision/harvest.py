@@ -46,10 +46,11 @@ clock-sweep
 harvest
     Crops the region(s) of --what from every image: elixir (elixir_digit),
     tower (the 6 tower_* digit boxes), clock (clock), hand (hand_0..hand_3),
-    next (next). Digits are split into glyphs with the `digits` splitter (an
-    elixir glyph wider than SPLIT_ASPECT x its height, as '10' would be if its
-    two digits touched, is cut at its thinnest column); a glyph touching its
-    box's edge is cut off and skipped. Cards are whole crops; flat ones (an
+    next (next). Digits are split into glyphs with the `digits` splitter (for
+    elixir, the font's mask leaves out the elixir bar's thin top line and
+    specks, GlyphStyle.min_stroke; an elixir glyph wider than SPLIT_ASPECT x
+    its height, as '10' would be if its two digits touched, is cut at its
+    thinnest column); a glyph touching its box's edge is cut off and skipped. Cards are whole crops; flat ones (an
     empty slot, which the reader knows without a template) are skipped.
     Crops are clustered by NCC (the 20x20 glyph signature DigitOCR uses, or the
     32x32 card signature CardMatcher uses; greyed and coloured cards apart,
@@ -313,7 +314,9 @@ class _Problems:
 # ---------------------------------------------------------------------------
 def glyph_boxes(region_rgb: np.ndarray, style: GlyphStyle) -> tuple[list[Box], np.ndarray]:
     """The `digits` splitter (templates.add_digit_templates): the style's fill
-    mask, cut into column runs, specks dropped. Returns (boxes, mask)."""
+    mask (cleaned of thin lines and specks when the style has a min_stroke, as
+    the elixir font's has), cut into column runs, specks dropped. Returns
+    (boxes, mask)."""
     a = np.asarray(region_rgb)
     if a.ndim != 3 or a.size == 0:
         return [], np.zeros(a.shape[:2] if a.ndim >= 2 else (0, 0), dtype=bool)

@@ -88,6 +88,18 @@ def seg_glyph(ch: str, cell: int = 2) -> np.ndarray:
     return np.kron(g, np.ones((cell, cell), dtype=bool)).astype(bool)
 
 
+def bold_glyph(ch: str) -> np.ndarray:
+    """A seven-segment digit with 3 px strokes, 27 px tall: the elixir font. Its
+    digits are bold (7-8 px strokes, 27-28 rows on the owner's frames), and
+    ELIXIR_GLYPH_STYLE drops fill thinner than 3 px, so seg_glyph's 2 px
+    strokes are not elixir digits."""
+    return seg_glyph(ch, cell=3)
+
+
+def font_glyph(font: str):
+    return bold_glyph if font == "elixir" else seg_glyph
+
+
 def compose(text: str, glyph=seg_glyph, gap: int = 3, pad: int = 2) -> np.ndarray:
     """White glyphs on BG, top-aligned, `gap` columns apart, `pad` around."""
     gs = [glyph(c) for c in text]
@@ -104,11 +116,11 @@ def compose(text: str, glyph=seg_glyph, gap: int = 3, pad: int = 2) -> np.ndarra
     return out
 
 
-def digit_store(fonts=("clock", "elixir", "tower"), glyph=seg_glyph) -> TP.TemplateStore:
+def digit_store(fonts=("clock", "elixir", "tower"), glyph=None) -> TP.TemplateStore:
+    """Templates of 0-9 for each font, from `glyph` or the font's (font_glyph)."""
     store = TP.TemplateStore.memory()
-    sheet = compose("0123456789", glyph)
     for font in fonts:
-        TP.add_digit_templates(store, font, sheet, "0123456789")
+        TP.add_digit_templates(store, font, compose("0123456789", glyph or font_glyph(font)), "0123456789")
     return store
 
 
@@ -310,6 +322,143 @@ def test_digit_specks_are_ignored():
     store = TP.TemplateStore.memory()
     assert len(TP.add_digit_templates(store, "clock", img, "3052")) == 4
     assert TP.DigitOCR(digit_store(("clock",)), "clock").read(img).text == "3052"
+
+
+# -- the elixir bar's top line through the elixir count -------------------------------
+ELX = (66, 37)                          # the owner's elixir_digit box at 747x1328 (w, h)
+ELX_AT = (16, 6)                        # where the count starts in it (x, top row)
+LINE_ROW = 15                           # the elixir bar's 1 px white top line in it
+
+
+def elixir_box(text: str, *, line_px: int = 1, touch: bool = False, speck: bool = True,
+               thick: bool = False) -> tuple[np.ndarray, np.ndarray, list]:
+    """A synthetic elixir_digit box shaped like the owner's frame 00000665 (elixir 9):
+    `text` in bold digits from ELX_AT, 3 px apart, and the bar's white top line,
+    `line_px` tall from LINE_ROW, from box edge to box edge on both sides of the
+    digits and between them, stopping 2 px short of each glyph (its dark
+    outline) or, with touch, at it. speck: a 1 px speck in the line's columns,
+    8 px right of the last digit, on the digits' top row. thick: the line 3 px
+    tall (rows 14-16) in the 3 columns right of the last digit, touching it.
+    Returns the image, the digits alone (the clean image) and their boxes."""
+    w, h = ELX
+    digits = np.zeros((h, w), dtype=bool)
+    boxes, x = [], ELX_AT[0]
+    for ch in text:
+        g = bold_glyph(ch)
+        digits[ELX_AT[1]:ELX_AT[1] + g.shape[0], x:x + g.shape[1]] = g
+        ys, xs = np.nonzero(g)
+        boxes.append((x + int(xs.min()), ELX_AT[1] + int(ys.min()), x + int(xs.max()) + 1,
+                      ELX_AT[1] + int(ys.max()) + 1))
+        x += g.shape[1] + 3
+    line = np.ones(w, dtype=bool)
+    clear = 0 if touch else 2
+    for x0, _, x1, _ in boxes:
+        line[max(0, x0 - clear):x1 + clear] = False
+    extra = np.zeros((h, w), dtype=bool)
+    extra[LINE_ROW:LINE_ROW + line_px, line] = True
+    end = boxes[-1][2]
+    if thick:
+        extra[LINE_ROW - 1:LINE_ROW + 2, end:end + 3] = True
+    if speck:
+        extra[ELX_AT[1], end + 8] = True
+    clean = np.empty((h, w, 3), dtype=np.uint8)
+    clean[:] = BG
+    clean[digits] = WHITE
+    img = clean.copy()
+    img[extra & ~digits] = WHITE
+    return img, clean, boxes
+
+
+def test_thin_fill_and_bold_digits_survive_cleaning():
+    m = np.zeros((9, 4), dtype=bool)
+    m[0, 0] = True                              # runs of 1, 2 and 3 px in column 0
+    m[2:4, 0] = True
+    m[5:8, 0] = True
+    m[:, 1] = True                              # a stroke
+    m[4, 2:4] = True                            # a 1 px line
+    want = np.zeros_like(m)
+    want[0, 0] = want[2, 0] = want[3, 0] = True
+    want[4, 2:4] = True
+    assert np.array_equal(TP.thin_fill(m, 3), want)
+    assert not TP.thin_fill(m, 1).any() and int(TP.thin_fill(m, 10).sum()) == int(m.sum())
+    assert TP.thin_fill(np.zeros((0, 3), dtype=bool), 3).shape == (0, 3)
+    assert np.array_equal(TP.clean_glyph_mask(m, 3), m & ~want)
+    assert np.array_equal(TP.clean_glyph_mask(m, 0), m)
+    for ch in TP.DIGITS:                        # 3 px strokes are kept whole
+        assert np.array_equal(TP.clean_glyph_mask(bold_glyph(ch), 3), bold_glyph(ch)), ch
+    sheet = compose("0123456789", bold_glyph)
+    assert TP.drop_specks(TP.segment_glyphs(TP.ELIXIR_GLYPH_STYLE.mask(sheet))) == \
+        TP.segment_glyphs(TP.DEFAULT_GLYPH_STYLE.mask(sheet))
+
+
+def test_elixir_count_ignores_the_bar_line_and_a_speck():
+    # frame 00000665 (elixir 9): the line right of the '9' and a speck above it, in its
+    # columns, are one column run 10 rows tall, which the clock's style kept as a glyph
+    img, clean, boxes = elixir_box("9")
+    assert boxes == [(16, 6, 31, 33)]
+    assert TP.drop_specks(TP.segment_glyphs(TP.DEFAULT_GLYPH_STYLE.mask(img))) == \
+        [(16, 6, 31, 33), (33, 6, 66, 16)]
+    with pytest.raises(TP.TemplateError, match="found 2 glyphs"):
+        TP.add_digit_templates(TP.TemplateStore.memory(), "elixir", img, "9", style=TP.DEFAULT_GLYPH_STYLE)
+    style = TP.font_style("elixir")
+    assert style is TP.ELIXIR_GLYPH_STYLE and style.min_stroke == 3
+    assert np.array_equal(style.mask(img), TP.DEFAULT_GLYPH_STYLE.mask(clean))
+    store = TP.TemplateStore.memory()
+    assert TP.add_digit_templates(store, "elixir", img, "9") == [None]            # `digits --text 9`
+    (e,) = store.entries(TP.digit_kind("elixir"))
+    assert e.label == "9" and np.array_equal(e.image, img[6:33, 16:31])
+    r = TP.DigitOCR(digit_store(("elixir",)), "elixir").read(img)                 # the live reader
+    assert r.text == "9" and r.conf == pytest.approx(1.0) and [g.box for g in r.glyphs] == boxes
+
+
+@pytest.mark.parametrize("text, kw", [
+    ("9", {"touch": True}), ("9", {"line_px": 2}), ("9", {"line_px": 2, "touch": True}),
+    ("9", {"thick": True}), ("0", {"thick": True, "touch": True}),
+    ("10", {"touch": True}), ("10", {"line_px": 2, "touch": True, "speck": False})])
+def test_elixir_bar_line_never_joins_or_widens_a_glyph(text, kw):
+    img, clean, boxes = elixir_box(text, **kw)
+    # the clock's style: the line joins the glyphs into one, widens one, or is a glyph itself
+    assert TP.drop_specks(TP.segment_glyphs(TP.DEFAULT_GLYPH_STYLE.mask(img))) != boxes
+    mask = TP.ELIXIR_GLYPH_STYLE.mask(img)
+    assert np.array_equal(mask, TP.DEFAULT_GLYPH_STYLE.mask(clean))
+    assert TP.drop_specks(TP.segment_glyphs(mask)) == boxes
+    for x0, y0, x1, y1 in boxes:                # a glyph's crop cleans to its part of the box
+        assert np.array_equal(TP.ELIXIR_GLYPH_STYLE.mask(img[y0:y1, x0:x1]), mask[y0:y1, x0:x1])
+    store = TP.TemplateStore.memory()
+    assert len(TP.add_digit_templates(store, "elixir", img, text)) == len(text)
+    assert [e.image.shape[:2] for e in store.entries(TP.digit_kind("elixir"))] == \
+        [(y1 - y0, x1 - x0) for x0, y0, x1, y1 in boxes]
+    r = TP.DigitOCR(digit_store(("elixir",)), "elixir").read(img)
+    assert r.text == text and r.conf == pytest.approx(1.0)
+
+
+def test_elixir_templates_stored_before_the_fix_still_match():
+    # with the line touching the '9', the old splitter stored the whole box width as
+    # the '9'; loading cleans the line out of it, so it matches like a clean '9'
+    img, _, _ = elixir_box("9", touch=True)
+    store = TP.TemplateStore.memory()
+    TP.add_digit_templates(store, "elixir", img, "9", style=TP.DEFAULT_GLYPH_STYLE)
+    (e,) = store.entries(TP.digit_kind("elixir"))
+    assert e.image.shape[:2] == (27, 66)
+    ocr = TP.DigitOCR(store, "elixir")
+    assert np.allclose(ocr.refs["9"][0], TP.glyph_signature(bold_glyph("9")))
+    assert ocr.read(elixir_box("9")[0]).text == "9"
+
+
+def test_glyph_style_dicts_and_which_fonts_clean():
+    for st in (TP.DEFAULT_GLYPH_STYLE, TP.ELIXIR_GLYPH_STYLE, TP.TOWER_GLYPH_STYLE):
+        assert TP.GlyphStyle.from_dict(json.loads(json.dumps(st.to_dict()))) == st
+    assert TP.ELIXIR_GLYPH_STYLE.to_dict()["min_stroke"] == 3
+    before = {"min_value": 190, "max_chroma": 45, "tints": []}             # a dict from before min_stroke
+    assert TP.GlyphStyle.from_dict(before) == TP.DEFAULT_GLYPH_STYLE
+    with pytest.raises(ValueError):
+        TP.GlyphStyle.from_dict({"min_stroke": -1})
+    # the clock and tower styles do not clean: their masks, so their readings, are as before
+    assert TP.font_style("clock") is TP.DEFAULT_GLYPH_STYLE and TP.font_style("tower") is TP.TOWER_GLYPH_STYLE
+    img, _, _ = elixir_box("9")
+    white = np.all(img == WHITE, axis=2)
+    assert np.array_equal(TP.DEFAULT_GLYPH_STYLE.mask(img), white)
+    assert np.array_equal(TP.TOWER_GLYPH_STYLE.mask(img), white)             # pure white passes its first tint
 
 
 def _pil_glyph_fn():
@@ -770,7 +919,7 @@ def test_hand_boxes_from_the_geometry_match_the_authors_card_boxes():
 def hud_frame(clock="2:59", elixir="6", fill_px=160) -> np.ndarray:
     f = hand_frame([slot_art(i) for i in range(4)], next_art(4))
     paste(f, compose(clock), 260, 25)
-    paste(f, compose(elixir), 71, 600)
+    paste(f, compose(elixir, bold_glyph), 71, 600)
     f[610:620, 100:100 + fill_px] = PURPLE
     f[610:620, 100 + fill_px:350] = TRACK
     return f

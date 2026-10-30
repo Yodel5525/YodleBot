@@ -95,9 +95,9 @@ def tight(mask: np.ndarray) -> np.ndarray:
     return np.asarray(mask)[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
 
-def compose(text: str, fg=WHITE, bg=BG, gap: int = 3, pad: int = 2) -> np.ndarray:
+def compose(text: str, fg=WHITE, bg=BG, gap: int = 3, pad: int = 2, cell: int = 2) -> np.ndarray:
     """Glyphs in `fg` on `bg`, top-aligned, `gap` columns apart, `pad` around."""
-    gs = [seg_glyph(c) for c in text]
+    gs = [seg_glyph(c, cell) for c in text]
     h = max(g.shape[0] for g in gs)
     w = sum(g.shape[1] for g in gs) + gap * (len(gs) - 1) + 2 * pad
     mask = np.zeros((h + 2 * pad, w), dtype=bool)
@@ -111,13 +111,23 @@ def compose(text: str, fg=WHITE, bg=BG, gap: int = 3, pad: int = 2) -> np.ndarra
     return out
 
 
-def which_char(crop: np.ndarray, style: TP.GlyphStyle = TP.DEFAULT_GLYPH_STYLE) -> str | None:
+def which_char(crop: np.ndarray, style: TP.GlyphStyle = TP.DEFAULT_GLYPH_STYLE, cell: int = 2) -> str | None:
     """The seven-segment character a glyph crop shows, by exact mask equality."""
     m = tight(style.mask(crop))
     for ch in "0123456789:":
-        if np.array_equal(m, tight(seg_glyph(ch))):
+        if np.array_equal(m, tight(seg_glyph(ch, cell))):
             return ch
     return None
+
+
+#: The elixir digits are bold (7-8 px strokes on the owner's frames) and
+#: ELIXIR_GLYPH_STYLE drops fill thinner than 3 px: synthetic elixir digits
+#: have 3 px strokes (seven segments of 3 x 3 px cells, 27 px tall).
+ELIXIR_CELL = 3
+
+
+def elixir_char(crop: np.ndarray) -> str | None:
+    return which_char(crop, TP.ELIXIR_GLYPH_STYLE, ELIXIR_CELL)
 
 
 def mmss(s: int) -> str:
@@ -513,17 +523,31 @@ def test_harvest_tower_digits_cluster_by_digit_and_label_into_the_store(tmp_path
     assert ocr.read(compose("4790", fg=LIGHT_BLUE, bg=STONE)).text == "4790"
 
 
-def test_harvest_elixir_reads_ten_as_two_glyphs(tmp_path):
+def test_harvest_elixir_reads_ten_as_two_glyphs_through_the_bar_line(tmp_path):
+    x0, y0, x1, y1 = PX["elixir_digit"]
+
     def draw(f, t):
-        x0, y0, x1, y1 = PX["elixir_digit"]
         text = "10" if t < 1.0 else "7" if t < 2.0 else "0"
-        paste(f, compose(text), x0 + 10, y0 + 10)
+        paste(f, compose(text, cell=ELIXIR_CELL), x0 + 10, y0 + 10)
+        # the elixir bar's 1 px white top line, 9 rows below the digits' top, from box
+        # edge to box edge, up to the digits and through their gaps and holes; and a
+        # 1 px speck above it, right of the digits (owner's frame 00000665)
+        row = f[y0 + 21, x0:x1]
+        row[np.all(row == BG, axis=1)] = WHITE
+        f[y0 + 12, x0 + 47] = WHITE
     sim = Sim(3.0, draw)
+    crop = regions().crop(sim.frame(0), "elixir_digit")
+    old, _ = HV.glyph_boxes(crop, TP.DEFAULT_GLYPH_STYLE)
+    assert old == [(0, 12, 50, 39)]                                      # one glyph, cut at both edges
+    boxes, _ = HV.glyph_boxes(crop, TP.font_style("elixir"))
+    assert boxes == [(24, 12, 27, 39), (30, 12, 45, 39)]                 # '1' and '0', whole
     res = HV.harvest(sim.recording(), "elixir", regions(), min_ncc=0.95, load=sim.load)
-    found = {which_char(c.members[0].crop): c.size for c in res.clusters}
+    found = {elixir_char(c.members[0].crop): c.size for c in res.clusters}
     n10 = sum(1 for im in sim.recording().images if im.t < 1.0)
     n0 = sum(1 for im in sim.recording().images if im.t >= 2.0)
-    assert found == {"1": n10, "0": n10 + n0, "7": len(sim.recording().images) - n10 - n0}
+    n7 = len(sim.recording().images) - n10 - n0
+    assert found == {"1": n10, "0": n10 + n0, "7": n7}
+    assert res.cut == 0 and res.samples == 2 * n10 + n7 + n0
 
 
 def card_art(i: int, greyed: bool = False, scale: int = 2) -> np.ndarray:
@@ -640,7 +664,7 @@ def test_contact_sheet_layout():
 # The CLI, on a recording on disk
 # ---------------------------------------------------------------------------
 SMALL = (216, 384)
-SMALL_PX = {"clock": (150, 8, 214, 40), "elixir_digit": (20, 330, 60, 370)}
+SMALL_PX = {"clock": (150, 8, 214, 40), "elixir_digit": (20, 330, 80, 372)}
 
 
 def test_cli_clock_sweep_harvest_and_label(tmp_path, capsys):
@@ -656,7 +680,7 @@ def test_cli_clock_sweep_harvest_and_label(tmp_path, capsys):
                 x0, y0, x1, y1 = SMALL_PX["clock"]
                 rgb[y0:y1, x0:x1] = BOX
                 paste(rgb, compose(mmss(12 - math.floor(t + PHASE)), bg=BOX), 160, 12)
-                paste(rgb, compose("7" if t < 1.3 else "10"), 30, 338)
+                paste(rgb, compose("7" if t < 1.3 else "10", cell=ELIXIR_CELL), 30, 338)
             rec.write(VT.VisionFrame(t_capture=t), rgb)
     session = root / "capture_1"
     tpl = tmp_path / "tpl"
@@ -679,7 +703,7 @@ def test_cli_clock_sweep_harvest_and_label(tmp_path, capsys):
     assert TP.main(["harvest", *common, "--what", "elixir", "--out", str(sheet), "--min-ncc", "0.95"]) == 0
     js = sheet.with_suffix(".json")
     assert "wrote" in capsys.readouterr().out and js.exists()
-    digits = _identify(js, which_char)
+    digits = _identify(js, elixir_char)
     assert sorted(digits.values()) == ["0", "1", "7"]
     mapping = ",".join(f"{cid}={d}" for cid, d in digits.items())
     assert TP.main(["harvest-label", "--sheet", str(sheet), "--map", "0=10", "--root", str(tpl)]) == 1
