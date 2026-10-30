@@ -75,7 +75,8 @@ function Invoke-Step([string]$Name, [string]$Python, [string[]]$ArgList) {
 }
 
 $order = @('rows', 'general', 'hog', 'eval')
-$start = [array]::IndexOf($order, $From)
+# ValidateSet accepts any case (-From Eval) but IndexOf compares exactly; lower-case it.
+$start = [array]::IndexOf($order, $From.ToLowerInvariant())
 $model = @('--wait-keep', '0.25', '--epochs', '3', '--d', '256', '--layers', '6', '--heads', '8')
 if ($MaxRows -gt 0) { $model += @('--max-rows', "$MaxRows") }
 Write-Both ("first_model.ps1: from '{0}', workers {1}, others {2}, max rows {3}. Log: {4}" -f $From, $Workers, $Others, $(if ($MaxRows -gt 0) { $MaxRows } else { 'all' }), $log) 'Cyan'
