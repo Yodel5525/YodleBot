@@ -1,0 +1,33 @@
+{
+ "_comment": [
+  "Cards a friendly deck cannot hold (docs/NEW_CARDS_PLAN.md 1.1, item N08): the 22 cards of RoyaleSim 0.1.42's 16.402.22 card table (client160402017_20261019, the one data/engine.json selects) whose not_visible flag is set. None is in the RoyaleAPI key map (data/cards) or in any of the 1,467 top-ladder decks of data/ladder/battles_2p6.csv. The other 123 cards of data/vision/classes.json are the regular pool.",
+  "tools/vision_autolabel.py ingest refuses a deck that names one. kind: super (event-only Super cards), event (event-only cards), internal (a form of a visible card, not a deck card; `use` names the card to give instead).",
+  "A new season: regenerate from the new table's not_visible flags together with classes.json (plan 7)."
+ ],
+ "schema": "hastycr.vision.event_cards/1",
+ "source": "RoyaleSim 0.1.42, card table 16.402.22 (client160402017_20261019), not_visible cards",
+ "cards": {
+  "SuperArcher": {"kind": "super", "note": "event-only"},
+  "SuperEliteArcher": {"kind": "super", "note": "event-only"},
+  "SuperHogRider": {"kind": "super", "note": "Santa Hog Rider, event-only"},
+  "SuperHogRiderTerry": {"kind": "super", "note": "Terry, event-only"},
+  "SuperIceGolemite": {"kind": "super", "note": "event-only"},
+  "SuperKnight": {"kind": "super", "note": "event-only"},
+  "SuperLavaHound": {"kind": "super", "note": "event-only"},
+  "SuperMiniPekka": {"kind": "super", "note": "event-only"},
+  "SuperWitch": {"kind": "super", "note": "event-only"},
+  "PrinceBuff": {"kind": "event", "note": "Raging Prince, event-only"},
+  "TriWizards": {"kind": "event", "note": "event-only"},
+  "RoyalRecruits_Chess": {"kind": "event", "note": "event-only"},
+  "SkeletonWarriors_SpookyChess": {"kind": "event", "note": "event-only"},
+  "GoblinPartyHut": {"kind": "event", "note": "event-only"},
+  "GoblinPartyRocket": {"kind": "event", "note": "event-only"},
+  "GoblinRocketSilo": {"kind": "event", "note": "event-only"},
+  "BarbarianLauncher": {"kind": "event", "note": "event-only"},
+  "GlobalClone": {"kind": "event", "note": "event-only"},
+  "GlobalLightning": {"kind": "event", "note": "event-only"},
+  "WarmSpell": {"kind": "event", "note": "event-only"},
+  "MergeMaiden_Normal": {"kind": "internal", "use": "MergeMaiden", "note": "Spirit Empress below 6 elixir: give spirit-empress (MergeMaiden)"},
+  "MergeMaiden_Mounted": {"kind": "internal", "use": "MergeMaiden", "note": "Spirit Empress at 6 or more: give spirit-empress (MergeMaiden)"}
+ }
+}

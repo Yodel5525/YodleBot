@@ -1,0 +1,41 @@
+{
+ "_comment": [
+  "Append-only detector label registry (docs/NEW_CARDS_PLAN.md 2.3 and 7, item N07). Read by tools/vision_autolabel.py.",
+  "These labels are APPENDED to the label set scripts/prepare_yolo_dataset.py wrote (tmp/yolo/detector_labels.json, 155 labels x 2 sides = 310 classes on the owner's PC on 2026-10-30). Label k of this list is label len(base) + k, YOLO classes 2 (len(base) + k) + side. ultralytics 8.4.192 copies the learned class rows by name when the class count grows (nn/tasks.py _remap_cls_by_names), so the old classes survive a fine-tune.",
+  "APPEND ONLY: never remove, rename or reorder an entry, or every later class index moves and the pinned weights read the wrong names. The old yolo_names() must stay a prefix of the new ones: `tools/vision_autolabel.py labels --against <older extended detector_labels.json>` checks it.",
+  "Each entry: label (a detector key: the canonical unit name of a class form as tools/vision_classes.py ClassTable.detector_key gives it, or a spell card name); card (the deck card, a catalogue name); type (unit, tower or spell); form (base, evo or hero); base (form entries only: the base-form label it falls back to); train_as (null: a form trains as its base label while it has fewer than thin_tracks labelled tracks, a base label as itself; \"self\": always itself; a label name: always that label); valid_from_client (null, or the first client version whose look this label learns: sessions recorded on an older client are not used for it); phase, added, note: provenance.",
+  "reworks: {label: client version} for a label already in the base set whose look changed in a rework; owner sessions older than that version are not used for it. KataCR frames have no client and are not filtered.",
+  "Every entry must resolve through scripts/vision/labels.resolve_label against data/vision/classes.json (tests/pipeline/test_label_registry.py). A card the client has but classes.json lacks cannot be added until the table is regenerated (plan 7.3)."
+ ],
+ "schema": "hastycr.vision.detector_extra_labels/1",
+ "thin_tracks": 8,
+ "classes_digest": "dc897910e1e8ce3826acdbd54e83e37209f1d55d",
+ "base": {
+  "labels": 155,
+  "yolo_classes": 310,
+  "digest": null,
+  "note": "tmp/yolo/detector_labels.json from scripts/prepare_yolo_dataset.py on the owner's PC, 2026-10-30 (KataCR names through data/vision/classes.json). digest stays null until the owner reports that file's label-set digest; once set, extending any other base is refused."
+ },
+ "reworks": {},
+ "labels": [
+  {"label": "goblinstein", "card": "Goblinstein", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblinstein (champion, 5): the building-targeting unit"},
+  {"label": "goblinstein_doctor", "card": "Goblinstein", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblinstein's ranged doctor unit"},
+  {"label": "Berserker", "card": "Berserker", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Berserker (common, 2): small fast melee unit"},
+  {"label": "BerserkerHero", "card": "Berserker", "type": "unit", "form": "hero", "base": "Berserker", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Berserker hero form (107 of 1,467 ladder decks); trains as Berserker while thin"},
+  {"label": "GiantBuffer", "card": "GiantBuffer", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Rune Giant (epic, 4)"},
+  {"label": "GoblinDemolisher", "card": "GoblinDemolisher", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblin Demolisher (rare, 4): the ranged form"},
+  {"label": "GoblinDemolisher_kamikaze_form", "card": "GoblinDemolisher", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblin Demolisher after it turns kamikaze"},
+  {"label": "SuspiciousBush", "card": "SuspiciousBush", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Suspicious Bush (rare, 2): the kamikaze bush"},
+  {"label": "BushGoblin", "card": "SuspiciousBush", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "the goblins the bush releases"},
+  {"label": "BossBandit", "card": "BossBandit", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Boss Bandit (champion, 6)"},
+  {"label": "Ronin", "card": "Ronin", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Ronin (legendary, 5)"},
+  {"label": "GoblinMachine", "card": "GoblinMachine", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblin Machine (legendary, 5)"},
+  {"label": "MergeMaiden_Normal", "card": "MergeMaiden", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Spirit Empress played below 6 elixir (ground, 3)"},
+  {"label": "MergeMaiden_Mounted", "card": "MergeMaiden", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Spirit Empress played at 6 or more (flying, 6)"},
+  {"label": "MinionGiant", "card": "MinionGiant", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Minion Giant (rare, 4): flying, targets buildings; no RoyaleAPI key yet"},
+  {"label": "ThreeMusketeer_Rework_Character_1", "card": "ThreeMusketeers", "type": "unit", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Three Musketeers rework units; classes.json aliases Character_2 to this class"},
+  {"label": "DarkMagic", "card": "DarkMagic", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Void: the DarkMagicAOE circle (2.5 tiles, 4 s)"},
+  {"label": "Vines", "card": "Vines", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Vines: the Vines_AeO area (2.5 tiles, 1.4 s)"},
+  {"label": "GoblinCurse", "card": "GoblinCurse", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblin Curse: the GoblinCurseBase circle (3 tiles, 6 s)"}
+ ]
+}

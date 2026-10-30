@@ -1,0 +1,1548 @@
+r"""Auto-labelling of recorded friendlies, first steps: the label registry, ingest and status.
+
+docs/NEW_CARDS_PLAN.md 2.3, 4 and 5 (items N07, N08). The owner's main account plays the
+post-2024 cards against Yodle2 in friendlies; Yodle2 records them; this tool turns the
+recordings into detector labels. This file holds:
+
+  labels   the append-only label registry data/vision/detector_extra_labels.json (N07),
+           checked against data/vision/classes.json and, with a base, appended to the label set
+           scripts/prepare_yolo_dataset.py wrote (tmp/yolo/detector_labels.json).
+  ingest   one recorded friendly into a per-session store, at once (N08): its images are
+           hard-linked, so the recorder's disk budget can no longer prune them; the deck is
+           checked; the role (train, gold, dev) is fixed; data/vision/owner_labels/<sid>/
+           session.json is written.
+  status   the ingested sessions, what each has done, and which registry labels still have no
+           training or gold session (plan 6.4: what to record next).
+
+Later items (scan, sheet, label, emit, review, mark, plays, mix: N09-N13) are added to this file
+as their own commands; they find a session through session_paths() and load_session().
+
+Owner commands (PowerShell, from the repo root; $BB = .venvs\buildabot\Scripts\python.exe):
+
+    # the registry: check it, and see the indices it appends to tonight's label set
+    & $BB tools\vision_autolabel.py labels --base tmp\yolo\detector_labels.json
+
+    # after each recorded friendly, at once (plan 4.1)
+    $SID = '20261101_A_1'      # date, deck letter, friendly number
+    & $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --deck "goblinstein,rune-giant,goblin-demolisher,suspicious-bush,vines,goblin-curse,elite-barbarians-ev1,baby-dragon-ev1" --role auto --client 16.635.1
+
+    # Round 0 (the 2026-10-29 friendly, copied out of reports\vision\recordings first)
+    & $BB tools\vision_autolabel.py ingest reports\vision\round0\<its folder> --sid 20261029_R0_1 --role gold --capture natural --deck "<its 8 cards>" --client 16.635.1
+
+    # what is ingested, and what to record next
+    & $BB tools\vision_autolabel.py status
+
+The registry (N07)
+  Each entry appends one label: YOLO classes 2 * (len(base) + k) + side. The base is the real
+  tmp/yolo/detector_labels.json, not a list in the code (plan 8: prepare_yolo_dataset may append
+  KataCR names the class list does not map). Registry.extend() returns the extended LabelSet;
+  the base's yolo_names() is always a prefix of it (check_prefix), and `labels --against OLD`
+  checks the same against any older extended label set, so a registry edit that removes or
+  reorders an entry is caught before a model is trained on it. Every entry must resolve through
+  scripts/vision/labels.resolve_label as what it claims to be (unit form of the named card, or the
+  spell card itself) and be written as ClassTable.detector_key writes it.
+  Thin forms: a hero or evolution entry trains as its base label while it has fewer than
+  thin_tracks (8) labelled training tracks, so the card is still named right (train_label,
+  train_index); "train_as" pins the choice. valid_from_client (per entry) and "reworks" (for
+  base labels) drop sessions recorded on an older client from that label (valid_for).
+
+Ingest (N08)
+  The recording is a scripts/vision/record.py session (<session>/frames.jsonl plus
+  images/<8 digits>.jpg). `capture --record reports\vision\harvest\$SID` writes one session
+  folder (capture_<time>) under that root: ingest accepts the root when it holds exactly one
+  session, or the session folder itself (then give --sid). The session id is the root's name
+  by default.
+  Every image file is hard-linked into <store>/<sid>/recording/images (copied when the store is
+  on another drive, and reported), and frames.jsonl is copied next to them, so the store is
+  itself a record.py session that harvest.open_recording and VisionLogReader read. The store
+  (default reports\vision\autolabel, gitignored) is never committed: frames show account names.
+  The store keeps the recording one level down (<sid>/recording), so a recorder pointed at the
+  store root by mistake would not see sessions there to prune.
+  The deck: 8 cards, each a RoyaleAPI key as in data/ladder/battles_2p6.csv (hog-rider,
+  ronin-hero, cannon-ev1: tools/rs_cards.py's map with its extras) or a catalogue name of
+  classes.json (MinionGiant, which has no key yet), with -ev1 or -hero for the evolution or hero
+  slot. Refused: a card classes.json lacks, a form it lacks, a duplicate, a deck not of 8, and
+  the 22 event-only or internal cards of data/vision/event_cards.json (SuperKnight;
+  MergeMaiden_Normal, where spirit-empress is meant). Warnings, not refusals: the observed slot
+  rules (plan 1.10: at most 2 evolutions, at most 2 heroes and champions together, at most 3 in
+  all) and deck units that have no detector label yet.
+  Roles (plan 4.4, 4.5, 6): --role auto reads a session id date_DECK_N: friendly 2 of a deck is
+  gold (held out, never trained on), deck A's friendly 4 is dev (early stopping only), every
+  other friendly trains. --capture natural (Round 0) and field (clanmate friendlies) are gold
+  only. A role, deck, client or capture once written is changed only with --force.
+  session.json (committed, small): sid, role, capture, client, the deck as checked, the
+  recording's counts and frames.jsonl SHA-1, the store counts, digests and warnings. Paths are
+  written relative to the repo, or not at all, never as machine paths.
+  Ingesting again with the same deck and role is safe: images not linked yet are linked (a
+  recording still being written, an interrupted ingest), frames.jsonl is refreshed.
+
+Exit codes: 0 ok; 1 a check failed or a change was refused; 2 bad input.
+
+Standard library only (scripts/vision/labels.py loads tools/vision_classes.py; tools/rs_cards.py
+gives the RoyaleAPI keys), so ingest works whatever the vision packages do. Nothing here talks
+to the emulator, reads game memory or taps.
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+import time
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:                    # rs_cards
+    sys.path.insert(0, str(TOOLS))
+if str(ROOT) not in sys.path:                     # scripts.vision.labels
+    sys.path.append(str(ROOT))
+
+from scripts.vision import labels as L  # noqa: E402
+
+REGISTRY_PATH = ROOT / "data" / "vision" / "detector_extra_labels.json"
+EVENT_CARDS_PATH = ROOT / "data" / "vision" / "event_cards.json"
+LABELS_ROOT = ROOT / "data" / "vision" / "owner_labels"      # committed: small JSON only
+STORE_ROOT = ROOT / "reports" / "vision" / "autolabel"         # gitignored: images
+BASE_LABELS = ROOT / "tmp" / "yolo" / "detector_labels.json"  # scripts/prepare_yolo_dataset.py OUT
+
+REGISTRY_SCHEMA = "hastycr.vision.detector_extra_labels/1"
+EVENT_CARDS_SCHEMA = "hastycr.vision.event_cards/1"
+SESSION_SCHEMA = "hastycr.vision.autolabel_session/1"
+
+# The recorder's layout (scripts/vision/record.py:58-61), restated so ingest needs no numpy.
+FRAMES_FILE = "frames.jsonl"
+IMAGES_DIR = "images"
+IMAGE_NAME_RE = re.compile(r"^\d{8}\.(jpg|png|npy)$")
+
+SESSION_FILE = "session.json"          # in data/vision/owner_labels/<sid>/
+RECORDING_DIR = "recording"            # in <store>/<sid>/: frames.jsonl and images/
+#: Track labels of a session (N10's `label` writes it). What status reads of it:
+#: {"tracks": [{"label": <detector label>, ...}, ...]}; anything else is ignored.
+TRACKS_FILE = "tracks.json"
+#: (stage, "labels" or "store", path in that session folder): a stage is done when the path
+#: exists. N09-N13 append theirs.
+STAGES: list[tuple[str, str, str]] = [("ingest", "labels", SESSION_FILE),
+                                      ("label", "labels", TRACKS_FILE)]
+
+FORM_BASE, FORM_EVO, FORM_HERO = 0, 1, 2        # tools/vision_classes.py FORMS
+FORM_NAMES = ("base", "evo", "hero")
+#: RoyaleAPI form suffixes, as tools/royalesim_redrive.py:150-154 base_key reads them.
+KEY_SUFFIXES = (("-ev1", FORM_EVO), ("-hero", FORM_HERO))
+THIN_TRACKS = 8                                 # plan 2.3: below this a form trains as its base
+TRAIN_SELF = "self"
+ENTRY_TYPES = (L.TYPE_UNIT, L.TYPE_TOWER, L.TYPE_SPELL)
+
+ROLE_TRAIN, ROLE_GOLD, ROLE_DEV = "train", "gold", "dev"
+ROLES = (ROLE_TRAIN, ROLE_GOLD, ROLE_DEV)
+ROLE_AUTO = "auto"
+CAPTURE_HARVEST, CAPTURE_NATURAL, CAPTURE_FIELD = "harvest", "natural", "field"
+CAPTURES = (CAPTURE_HARVEST, CAPTURE_NATURAL, CAPTURE_FIELD)
+GOLD_ONLY_CAPTURES = frozenset({CAPTURE_NATURAL, CAPTURE_FIELD})     # plan 6: never trained on
+SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+HARVEST_SID_RE = re.compile(r"^(?P<date>\d{8})_(?P<deck>[A-Za-z][A-Za-z0-9]*)_(?P<n>[1-9][0-9]*)$")
+GOLD_FRIENDLY = 2                               # plan 4.4 / 4.5: friendly 2 of each deck
+DEV_FRIENDLIES = frozenset({("A", 4)})          # plan 4.4: deck A's friendly 4
+DECK_SIZE = 8
+#: Champions of the 16.402.22 pool, for the slot-rule warnings only: data/royaleapi/cards.json
+#: rarity Champion (its terry is an event card), plus Little Prince, Goblinstein and Boss Bandit
+#: (plan 1.2), which that file predates.
+CHAMPIONS = frozenset({"ArcherQueen", "GoldenKnight", "SkeletonKing", "MightyMiner", "Monk",
+                       "LittlePrince", "Goblinstein", "BossBandit"})
+RECENT_WRITE_S = 15.0                           # frames.jsonl younger than this: still recording?
+
+EXIT_OK, EXIT_CHECK, EXIT_INPUT = 0, 1, 2
+
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+
+def _read_json(path: str | os.PathLike) -> Any:
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))     # a Windows editor may add a BOM
+
+
+def write_json(path: str | os.PathLike, doc: Any) -> Path:
+    """Write `doc` as indented JSON, atomically (temp file + rename)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    return p
+
+
+def shown_path(path: str | os.PathLike | None) -> str | None:
+    """A path as committed JSON may show it: relative to the repo (posix), else None."""
+    if path is None:
+        return None
+    try:
+        return Path(path).resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    child, parent = child.resolve(), parent.resolve()
+    return child == parent or parent in child.parents
+
+
+def parse_version(text: Any) -> tuple[int, ...]:
+    """"16.635.1" -> (16, 635, 1); trailing zeros dropped, so 16.635.0 == 16.635. ValueError
+    for anything that is not dot-separated whole numbers."""
+    s = str(text).strip()
+    if not re.fullmatch(r"\d+(\.\d+)*", s):
+        raise ValueError(f"not a client version like 16.635.1: {text!r}")
+    parts = [int(x) for x in s.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def check_sid(sid: Any) -> str:
+    s = str(sid)
+    if not SID_RE.match(s):
+        raise ValueError(f"session id {sid!r}: use letters, digits, '_', '-' and '.' (like 20261101_A_1)")
+    return s
+
+
+def load_table(path: str | os.PathLike | None = None):
+    """data/vision/classes.json (or `path`) as a tools/vision_classes.py ClassTable."""
+    return L.load_class_table(path)
+
+
+# ---------------------------------------------------------------------------
+# the label registry (N07)
+# ---------------------------------------------------------------------------
+
+class RegistryError(ValueError):
+    """The registry file is malformed, contradicts classes.json, or would move class indices."""
+
+    def __init__(self, problems: str | Iterable[str]):
+        self.problems = [problems] if isinstance(problems, str) else list(problems)
+        super().__init__("; ".join(self.problems))
+
+
+@dataclass(frozen=True)
+class ExtraLabel:
+    """One registry entry: a detector label appended to the base label set."""
+    label: str
+    card: str
+    type: str
+    form: int = FORM_BASE
+    base: str | None = None              # form entries: the base-form label
+    train_as: str | None = None          # None: automatic; "self"; or a label name
+    valid_from_client: str | None = None
+    phase: int | None = None
+    added: str | None = None
+    note: str = ""
+
+    @property
+    def form_name(self) -> str:
+        return FORM_NAMES[self.form]
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"label": self.label, "card": self.card, "type": self.type,
+                             "form": self.form_name}
+        if self.base is not None:
+            d["base"] = self.base
+        d.update({"train_as": self.train_as, "valid_from_client": self.valid_from_client,
+                  "phase": self.phase, "added": self.added, "note": self.note})
+        return d
+
+
+def _name(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+def _parse_entry(d: Any, where: str) -> tuple[ExtraLabel | None, list[str]]:
+    if not isinstance(d, Mapping):
+        return None, [f"{where}: not an object"]
+    problems = []
+    label, card, typ = d.get("label"), d.get("card"), d.get("type")
+    if not _name(label):
+        problems.append(f"{where}: label must be a non-empty name, got {label!r}")
+    elif L.SIDE_SEP in label:
+        problems.append(f"{where}: label {label!r} must not contain {L.SIDE_SEP!r}")
+    if not _name(card):
+        problems.append(f"{where}: card must be a catalogue name, got {card!r}")
+    if typ not in ENTRY_TYPES:
+        problems.append(f"{where}: type must be one of {', '.join(ENTRY_TYPES)}, got {typ!r}")
+    form = d.get("form", FORM_NAMES[FORM_BASE])
+    if form in FORM_NAMES:
+        form = FORM_NAMES.index(form)
+    elif not (isinstance(form, int) and not isinstance(form, bool) and 0 <= form < len(FORM_NAMES)):
+        problems.append(f"{where}: form must be base, evo or hero, got {form!r}")
+        form = FORM_BASE
+    base, train_as, valid = d.get("base"), d.get("train_as"), d.get("valid_from_client")
+    for key, value in (("base", base), ("train_as", train_as)):
+        if value is not None and not _name(value):
+            problems.append(f"{where}: {key} must be a label name or null, got {value!r}")
+    if form == FORM_BASE and base is not None:
+        problems.append(f"{where}: base is for evo and hero entries only")
+    if form != FORM_BASE and base is None:
+        problems.append(f"{where}: an {FORM_NAMES[form]} entry needs base, the base-form label it "
+                        "trains as while it is thin")
+    if train_as is not None and train_as == label:
+        problems.append(f"{where}: train_as names the label itself; use \"{TRAIN_SELF}\"")
+    if valid is not None:
+        try:
+            parse_version(valid)
+        except ValueError as exc:
+            problems.append(f"{where}: valid_from_client: {exc}")
+    phase = d.get("phase")
+    if phase is not None and (isinstance(phase, bool) or not isinstance(phase, int)):
+        problems.append(f"{where}: phase must be a whole number or null")
+    if problems:
+        return None, problems
+    return ExtraLabel(label, card, typ, form, base, train_as, None if valid is None else str(valid),
+                      phase, None if d.get("added") is None else str(d.get("added")),
+                      str(d.get("note") or "")), []
+
+
+class Registry:
+    """data/vision/detector_extra_labels.json, loaded. Entries in index order.
+
+        reg = Registry.load()
+        reg.validate(table)                      problems against classes.json ([] = fine)
+        ext = reg.extend(base)                   the base LabelSet plus every entry, in order
+        reg.train_index(ext, "BerserkerHero", 1, tracks=3)   the base index while thin
+        reg.valid_for("Vines", "16.635.1")       may a session of that client teach the label
+    """
+
+    def __init__(self, entries: Sequence[ExtraLabel], *, thin_tracks: int = THIN_TRACKS,
+                 reworks: Mapping[str, str] | None = None, classes_digest: str | None = None,
+                 base_pin: Mapping[str, Any] | None = None, path: Path | None = None):
+        self.entries: tuple[ExtraLabel, ...] = tuple(entries)
+        self.thin_tracks = int(thin_tracks)
+        self.reworks = {str(k): str(v) for k, v in (reworks or {}).items()}
+        self.classes_digest = classes_digest
+        self.base_pin = dict(base_pin or {})
+        self.path = path
+        self._by_label: dict[str, ExtraLabel] = {}
+        dups = []
+        for e in self.entries:
+            if e.label in self._by_label:
+                dups.append(f"label {e.label!r} appears twice")
+            self._by_label[e.label] = e
+        for label, version in self.reworks.items():
+            try:
+                parse_version(version)
+            except ValueError as exc:
+                dups.append(f"reworks[{label!r}]: {exc}")
+        if dups:
+            raise RegistryError(dups)
+
+    # ------------------------------------------------------------ loading
+    @classmethod
+    def from_dict(cls, doc: Mapping[str, Any], path: Path | None = None) -> "Registry":
+        if not isinstance(doc, Mapping):
+            raise RegistryError("the registry must be a JSON object")
+        if doc.get("schema") != REGISTRY_SCHEMA:
+            raise RegistryError(f"schema must be {REGISTRY_SCHEMA!r}, got {doc.get('schema')!r}")
+        raw = doc.get("labels")
+        if not isinstance(raw, list):
+            raise RegistryError("labels must be a list of entries")
+        entries, problems = [], []
+        for i, d in enumerate(raw):
+            e, p = _parse_entry(d, f"labels[{i}]")
+            problems += p
+            if e is not None:
+                entries.append(e)
+        thin = doc.get("thin_tracks", THIN_TRACKS)
+        if isinstance(thin, bool) or not isinstance(thin, int) or thin < 1:
+            problems.append(f"thin_tracks must be a positive whole number, got {thin!r}")
+            thin = THIN_TRACKS
+        reworks = doc.get("reworks") or {}
+        if not isinstance(reworks, Mapping):
+            problems.append("reworks must be an object of label -> client version")
+            reworks = {}
+        for label, version in reworks.items():
+            try:
+                parse_version(version)
+            except ValueError as exc:
+                problems.append(f"reworks[{label!r}]: {exc}")
+        base_pin = doc.get("base") or {}
+        if not isinstance(base_pin, Mapping):
+            problems.append("base must be an object")
+            base_pin = {}
+        if problems:
+            raise RegistryError(problems)
+        return cls(entries, thin_tracks=thin, reworks=reworks, classes_digest=doc.get("classes_digest"),
+                   base_pin=base_pin, path=path)
+
+    @classmethod
+    def load(cls, path: str | os.PathLike | None = None) -> "Registry":
+        p = Path(path) if path is not None else REGISTRY_PATH
+        try:
+            doc = _read_json(p)
+        except FileNotFoundError:
+            raise RegistryError(f"no registry at {p}") from None
+        except json.JSONDecodeError as exc:
+            raise RegistryError(f"{p} is not valid JSON: {exc}") from None
+        return cls.from_dict(doc, p)
+
+    # ------------------------------------------------------------ access
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self):
+        return iter(self.entries)
+
+    def __contains__(self, label: object) -> bool:
+        return label in self._by_label
+
+    def get(self, label: str) -> ExtraLabel | None:
+        return self._by_label.get(str(label))
+
+    @property
+    def labels(self) -> list[str]:
+        return [e.label for e in self.entries]
+
+    @property
+    def digest(self) -> str:
+        """SHA-1 of the labels in order, one per line: equal means the same appended indices."""
+        return hashlib.sha1("\n".join(self.labels).encode("utf-8")).hexdigest()
+
+    # ------------------------------------------------------------ checks
+    def validate(self, table: Any, event_cards: Mapping[str, Any] | None = None) -> list[str]:
+        """Problems of the entries against a class table ([] when every entry resolves
+        through labels.resolve_label as what it claims to be)."""
+        events = load_event_cards() if event_cards is None else event_cards
+        problems: list[str] = []
+        for e in self.entries:
+            where = repr(e.label)
+            lab = L.resolve_label(table, e.label)
+            if lab.type not in ENTRY_TYPES:
+                problems.append(f"{where} does not resolve to a unit, tower or spell of the class "
+                                f"table (it reads as {lab.type})")
+                continue
+            if lab.type != e.type:
+                problems.append(f"{where} is a {lab.type} in the class table, not a {e.type}")
+                continue
+            info = table.cards.get(e.card)
+            if info is None:
+                problems.append(f"{where}: card {e.card!r} is not a card of the class table")
+            elif e.card in events:
+                problems.append(f"{where}: card {e.card!r} is not a deck card "
+                                f"({events[e.card].get('kind', 'event')}); name the card a deck holds")
+            elif e.form not in [int(f) for f in info.get("forms") or [FORM_BASE]]:
+                problems.append(f"{where}: card {e.card} has no {e.form_name} form in the class table")
+            if lab.form != e.form:
+                problems.append(f"{where} reads as the {FORM_NAMES[lab.form] if 0 <= lab.form < 3 else lab.form} "
+                                f"form, the entry says {e.form_name}")
+            if lab.type == L.TYPE_SPELL:
+                if lab.card != e.label:
+                    problems.append(f"{where}: a spell label is its card name ({lab.card!r})")
+                if lab.card != e.card:
+                    problems.append(f"{where} is the spell {lab.card!r}, not card {e.card!r}")
+            else:
+                key = table.detector_key(lab.class_id, lab.form)
+                if key != e.label:
+                    problems.append(f"{where} is not how the class table names this form: write {key!r}")
+                vc = table.classes[lab.class_id]
+                if e.card not in vc.card_names:
+                    problems.append(f"{where}: class {vc.name} is made by {', '.join(vc.card_names) or 'no card'}, "
+                                    f"not {e.card}")
+                if e.form != FORM_BASE:
+                    want = table.detector_key(lab.class_id, FORM_BASE)
+                    if e.base != want:
+                        problems.append(f"{where}: base must be {want!r}, the base form of {vc.name}")
+            target = e.train_as if e.train_as != TRAIN_SELF else None
+            if target is not None:
+                t = L.resolve_label(table, target)
+                same = (t.type == lab.type and t.form == FORM_BASE
+                        and ((t.class_id is not None and t.class_id == lab.class_id)
+                             or (t.type == L.TYPE_SPELL and t.card == lab.card)))
+                if not same:
+                    problems.append(f"{where}: train_as {target!r} is not the base form of the same "
+                                    "class or spell")
+        for label in self.reworks:
+            if L.resolve_label(table, label).type not in ENTRY_TYPES:
+                problems.append(f"reworks: {label!r} does not resolve to a unit, tower or spell")
+        return problems
+
+    def table_note(self, table: Any) -> str | None:
+        """A note when the class table is not the one the registry was written against."""
+        digest = getattr(table, "digest", None)
+        if self.classes_digest and digest and digest != self.classes_digest:
+            return (f"classes.json digest {digest[:12]} differs from the registry's "
+                    f"{self.classes_digest[:12]}: entries are checked by name; update classes_digest "
+                    "once they pass")
+        return None
+
+    def in_base(self, base: L.LabelSet) -> list[str]:
+        """Entries the base label set already has: they add no class."""
+        return [e.label for e in self.entries if e.label in base]
+
+    def extend(self, base: L.LabelSet) -> L.LabelSet:
+        """The base label set with every entry appended, in registry order. The base's
+        yolo_names() stays a prefix (checked). RegistryError for a KataCR-mode base, a base the
+        registry was not pinned to, or a base / train_as target that is no label of the result."""
+        problems = []
+        if base.mode != L.MODE_VISION:
+            problems.append(f"the base label set is in {base.mode!r} mode; the registry extends a "
+                            f"{L.MODE_VISION!r} label set (prepare_yolo_dataset --labels vision)")
+        pin = self.base_pin.get("digest")
+        if pin and base.digest != pin:
+            problems.append(f"the base label set has digest {base.digest}, the registry is pinned to "
+                            f"{pin}: appending to another base would move every new index")
+        if problems:
+            raise RegistryError(problems)
+        out = L.LabelSet(list(base.labels), base.joint_side, dict(base.status),
+                         {k: list(v) for k, v in base.sources.items()}, base.mode, base.classes_digest)
+        for e in self.entries:
+            if e.label not in out:
+                out.add(e.label, L.STATUS_EXTRA)
+        for e in self.entries:
+            for what, target in (("base", e.base), ("train_as", None if e.train_as == TRAIN_SELF else e.train_as)):
+                if target is not None and target not in out:
+                    problems.append(f"{e.label}: its {what} {target!r} is no label of the extended set")
+        problems += check_prefix(base.yolo_names(), out.yolo_names())
+        if problems:
+            raise RegistryError(problems)
+        return out
+
+    # ------------------------------------------------------------ training
+    def train_label(self, label: str, tracks: int) -> str:
+        """The label a box of `label` is written as, given its number of labelled training
+        tracks: a form entry trains as its base while it has fewer than thin_tracks, unless
+        train_as pins it; every other label trains as itself."""
+        e = self._by_label.get(str(label))
+        if e is None or e.train_as == TRAIN_SELF:
+            return str(label)
+        if e.train_as is not None:
+            return e.train_as
+        if e.base is not None and int(tracks) < self.thin_tracks:
+            return e.base
+        return e.label
+
+    def train_index(self, labels: L.LabelSet, label: str, side: int | None, tracks: int) -> int:
+        """The YOLO class index a box of `label` on `side` is written with."""
+        return labels.yolo_index(self.train_label(label, tracks), side)
+
+    def valid_from(self, label: str) -> tuple[int, ...] | None:
+        """The first client version whose look `label` learns (entry or rework), or None."""
+        versions = []
+        e = self.get(label)
+        if e is not None and e.valid_from_client:
+            versions.append(parse_version(e.valid_from_client))
+        if str(label) in self.reworks:
+            versions.append(parse_version(self.reworks[str(label)]))
+        return max(versions) if versions else None
+
+    def valid_for(self, label: str, client: str | None) -> bool:
+        """Whether a session recorded on `client` may teach `label`. A label without a start
+        version takes every session; with one, a session of unknown client is left out."""
+        start = self.valid_from(label)
+        if start is None:
+            return True
+        if client is None:
+            return False
+        return parse_version(client) >= start
+
+
+def check_prefix(old: Sequence[str], new: Sequence[str]) -> list[str]:
+    """Problems if `old` (YOLO names of an earlier label set) is not a prefix of `new`."""
+    old, new = list(old), list(new)
+    for i, (a, b) in enumerate(zip(old, new)):
+        if a != b:
+            return [f"YOLO class {i} was {a!r} and is now {b!r}: class indices would move "
+                    "(the registry is append-only)"]
+    if len(new) < len(old):
+        return [f"the new label set has {len(new)} YOLO classes, fewer than the earlier {len(old)}: "
+                f"{old[len(new)]!r} and later were removed (the registry is append-only)"]
+    return []
+
+
+def label_set_from_doc(doc: Mapping[str, Any], where: str = "label set") -> L.LabelSet:
+    """A detector_labels.json document as a LabelSet; its recorded digest must match."""
+    if not isinstance(doc, Mapping) or doc.get("schema") != L.SCHEMA:
+        raise RegistryError(f"{where} is not a {L.SCHEMA} document")
+    labels = L.LabelSet.from_dict(doc)
+    if doc.get("digest") and doc["digest"] != labels.digest:
+        raise RegistryError(f"{where}: its digest {doc['digest']} does not match its labels "
+                            f"({labels.digest}); was it edited by hand?")
+    return labels
+
+
+def load_label_set(path: str | os.PathLike) -> L.LabelSet:
+    p = Path(path)
+    try:
+        doc = _read_json(p)
+    except FileNotFoundError:
+        raise RegistryError(f"no label set at {p} (scripts/prepare_yolo_dataset.py writes "
+                            "tmp/yolo/detector_labels.json)") from None
+    except json.JSONDecodeError as exc:
+        raise RegistryError(f"{p} is not valid JSON: {exc}") from None
+    return label_set_from_doc(doc, str(p))
+
+
+def read_yolo_names(path: str | os.PathLike) -> list[str]:
+    """YOLO class names from a detector_labels.json (its yolo_names, else its labels) or a JSON
+    list of names."""
+    doc = _read_json(path)
+    if isinstance(doc, list) and all(isinstance(x, str) for x in doc):
+        return list(doc)
+    if isinstance(doc, Mapping) and isinstance(doc.get("yolo_names"), list):
+        return [str(x) for x in doc["yolo_names"]]
+    if isinstance(doc, Mapping) and isinstance(doc.get("labels"), list):
+        return L.LabelSet.from_dict(doc).yolo_names()
+    raise RegistryError(f"{path}: expected a detector_labels.json or a JSON list of YOLO names")
+
+
+def crosswalk_base(table: Any) -> L.LabelSet:
+    """The label set prepare_yolo_dataset builds from classes.json's own KataCR names: a
+    preview of tonight's (the real one follows the dataset yaml's names)."""
+    labels, _ = L.build_label_set(table, list(table.doc.get("katacr_names") or []))
+    return labels
+
+
+def extended_doc(base: L.LabelSet, registry: Registry, extended: L.LabelSet | None = None) -> dict[str, Any]:
+    """The extended label set as a detector_labels.json document, with where it came from: the
+    base (count, YOLO classes, digest) and the registry (entries, digest, form fallbacks)."""
+    ext = registry.extend(base) if extended is None else extended
+    doc = ext.to_dict()
+    doc["base"] = {"labels": len(base), "yolo_classes": len(base.yolo_names()), "digest": base.digest,
+                   "classes_digest": base.classes_digest}
+    doc["registry"] = {
+        "path": shown_path(registry.path) if registry.path else None,
+        "labels": len(registry), "digest": registry.digest, "thin_tracks": registry.thin_tracks,
+        "forms": {e.label: {"base": e.base, "train_as": e.train_as} for e in registry
+                  if e.base is not None or e.train_as is not None},
+        "valid_from_client": {e.label: e.valid_from_client for e in registry if e.valid_from_client},
+        "reworks": dict(registry.reworks)}
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# event cards and the deck check (N08)
+# ---------------------------------------------------------------------------
+
+def load_event_cards(path: str | os.PathLike | None = None) -> dict[str, dict[str, Any]]:
+    """data/vision/event_cards.json: catalogue name -> {"kind", "note", "use"?}."""
+    p = Path(path) if path is not None else EVENT_CARDS_PATH
+    doc = _read_json(p)
+    if not isinstance(doc, Mapping) or doc.get("schema") != EVENT_CARDS_SCHEMA:
+        raise ValueError(f"{p} is not a {EVENT_CARDS_SCHEMA} document")
+    cards = doc.get("cards")
+    if not isinstance(cards, Mapping) or not all(isinstance(v, Mapping) for v in cards.values()):
+        raise ValueError(f"{p}: cards must be an object of name -> {{kind, note}}")
+    return {str(k): dict(v) for k, v in cards.items()}
+
+
+def load_key_map() -> tuple[dict[str, str], str | None]:
+    """RoyaleAPI key -> catalogue name (tools/rs_cards.py load(), extras always merged), and a
+    warning when it does not load (then only catalogue names are accepted)."""
+    try:
+        import rs_cards
+        return rs_cards.load(extras=True), None
+    except Exception as exc:                     # a broken card map must not block an ingest
+        return {}, (f"the RoyaleAPI key map did not load ({type(exc).__name__}: {exc}); "
+                    "only catalogue names are accepted")
+
+
+class DeckError(ValueError):
+    def __init__(self, problems: str | Iterable[str]):
+        self.problems = [problems] if isinstance(problems, str) else list(problems)
+        super().__init__("; ".join(self.problems))
+
+
+@dataclass(frozen=True)
+class DeckCard:
+    """One checked deck slot: what was typed, the catalogue card and the slot's form."""
+    given: str
+    card: str
+    form: int = FORM_BASE
+    kind: str = ""
+    elixir: int | None = None
+
+    @property
+    def form_name(self) -> str:
+        return FORM_NAMES[self.form]
+
+    @property
+    def champion(self) -> bool:
+        return self.card in CHAMPIONS
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"given": self.given, "card": self.card, "form": self.form, "form_name": self.form_name,
+                "kind": self.kind, "elixir": self.elixir}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "DeckCard":
+        return cls(str(d.get("given", d["card"])), str(d["card"]), int(d.get("form", FORM_BASE)),
+                   str(d.get("kind") or ""), None if d.get("elixir") is None else int(d["elixir"]))
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def split_form_suffix(token: str) -> tuple[str, int]:
+    """"cannon-ev1" -> ("cannon", 1), "ronin-hero" -> ("ronin", 2), "MinionGiant" -> (it, 0)."""
+    low = token.lower()
+    for suffix, form in KEY_SUFFIXES:
+        if low.endswith(suffix) and len(token) > len(suffix):
+            return token[:-len(suffix)], form
+    return token, FORM_BASE
+
+
+class CardResolver:
+    """Deck tokens -> DeckCard: RoyaleAPI keys (key_map) first, then catalogue names of the
+    class table, then either up to case and punctuation ("minion-giant"); -ev1 / -hero give
+    the form. Event-only and internal cards are refused."""
+
+    def __init__(self, table: Any, key_map: Mapping[str, str], event_cards: Mapping[str, Any]):
+        self.table = table
+        self.keys = dict(key_map)
+        self.events = dict(event_cards)
+        self._by_norm: dict[str, set[str]] = {}
+        for key, name in self.keys.items():
+            self._by_norm.setdefault(_norm(key), set()).add(name)
+        for name in table.cards:
+            self._by_norm.setdefault(_norm(name), set()).add(name)
+
+    def _event_problem(self, given: str, name: str) -> str:
+        info = self.events.get(name) or {}
+        text = f"{given!r} is {name}, which no friendly deck can hold ({info.get('kind', 'event')} card"
+        text += f": {info['note']})" if info.get("note") else ")"
+        if info.get("use"):
+            text += f"; give {info['use']} instead"
+        return text
+
+    def resolve(self, token: str) -> tuple[DeckCard | None, str | None]:
+        given = str(token).strip()
+        if not given:
+            return None, "an empty card name"
+        base, form = split_form_suffix(given)
+        if base in self.events:
+            return None, self._event_problem(given, base)
+        if base in self.keys:
+            name = self.keys[base]
+        elif base in self.table.cards:
+            name = base
+        else:
+            hits = self._by_norm.get(_norm(base), set())
+            if len(hits) > 1:
+                return None, (f"{given!r} could be any of {', '.join(sorted(hits))}: give the RoyaleAPI key "
+                              "or the exact catalogue name")
+            if not hits:
+                close = difflib.get_close_matches(base, sorted(set(self.keys) | set(self.table.cards)), n=3)
+                hint = f" (did you mean {', '.join(close)}?)" if close else ""
+                return None, (f"unknown card {given!r}{hint}: give a RoyaleAPI key such as hog-rider, "
+                              "cannon-ev1 or ronin-hero, or a catalogue name such as MinionGiant")
+            name = next(iter(hits))
+        if name in self.events:
+            return None, self._event_problem(given, name)
+        info = self.table.cards.get(name)
+        if info is None:
+            return None, (f"{given!r} is {name}, which classes.json does not have: a card newer than "
+                          "the class table cannot be labelled until classes.json is regenerated (plan 7)")
+        forms = [int(f) for f in info.get("forms") or [FORM_BASE]]
+        if form not in forms:
+            return None, (f"{given!r}: classes.json has no {FORM_NAMES[form]} form of {name} "
+                          f"(it has {', '.join(FORM_NAMES[f] for f in forms)})")
+        elixir = info.get("elixir")
+        return DeckCard(given, name, form, str(info.get("kind") or ""),
+                        None if elixir is None else int(elixir)), None
+
+
+def parse_deck(deck: str | Sequence[str], resolver: CardResolver) -> list[DeckCard]:
+    """A deck string ("a,b,...") or list -> 8 DeckCards. DeckError lists every problem."""
+    tokens = deck.split(",") if isinstance(deck, str) else [str(t) for t in deck]
+    tokens = [t.strip() for t in tokens if t.strip()]
+    cards, problems = [], []
+    for token in tokens:
+        card, problem = resolver.resolve(token)
+        if problem:
+            problems.append(problem)
+        else:
+            cards.append(card)
+    twice = sorted(name for name, n in Counter(c.card for c in cards).items() if n > 1)
+    if twice:
+        problems.append(f"a card appears twice: {', '.join(twice)}")
+    if len(tokens) != DECK_SIZE:
+        problems.append(f"a deck has {DECK_SIZE} cards; {len(tokens)} given")
+    if problems:
+        raise DeckError(problems)
+    return cards
+
+
+def slot_counts(deck: Sequence[DeckCard]) -> dict[str, int]:
+    return {"evo": sum(c.form == FORM_EVO for c in deck), "hero": sum(c.form == FORM_HERO for c in deck),
+            "champion": sum(c.champion for c in deck)}
+
+
+def slot_warnings(deck: Sequence[DeckCard]) -> list[str]:
+    """The slot rules seen in 1,467 ladder decks (plan 1.10); warnings, since they are observed."""
+    n = slot_counts(deck)
+    out = []
+    if n["evo"] > 2:
+        out.append(f"{n['evo']} evolution slots; ladder decks show at most 2")
+    if n["hero"] + n["champion"] > 2:
+        out.append(f"{n['hero']} hero and {n['champion']} champion slots; ladder decks show at most 2 together")
+    if sum(n.values()) > 3:
+        out.append(f"{sum(n.values())} evolution, hero and champion slots; ladder decks show at most 3")
+    return out
+
+
+def deck_label_gaps(deck: Sequence[DeckCard], table: Any, labels: Iterable[str]) -> list[str]:
+    """Deck cards whose deployed unit (the class the card summons, in the slot's forms: an
+    evolution slot shows both) or spell has no detector label in `labels`: their plays cannot
+    be named until the registry has it. Units a card only spawns (MusketeerTurret, BalloonBomb)
+    are left out: the summoned unit decides the card, and classes.json does not say which form
+    spawns them. A spell's units (HealSpirit, the Spirit Empress forms) count as its look.
+    A missing evo or hero label whose base form is labelled is only a form gap: such tracks can
+    be labelled as the base, which still names the card (plan 1.8, 2.3)."""
+    have = set(labels)
+    out = []
+    for c in deck:
+        info = table.cards.get(c.card) or {}
+        spell = info.get("kind") == "spell"
+        forms = (FORM_BASE, FORM_EVO) if c.form == FORM_EVO else (c.form,)
+        missing, form_only = [], set()
+        for cls in info.get("classes") or ():
+            vc = table.get(cls)
+            if vc is None or (not spell and (c.card, "summon") not in vc.cards):
+                continue
+            for form in forms:
+                f = form if form in vc.forms else vc.base_form
+                key = table.detector_key(vc.id, f)
+                if key and key not in have and key not in missing:
+                    missing.append(key)
+                    if f != vc.base_form and table.detector_key(vc.id, vc.base_form) in have:
+                        form_only.add(key)
+        if spell:
+            if c.card in have or set(info.get("katacr") or ()) & have:
+                missing = []                    # the spell itself is labelled
+            elif not info.get("classes"):
+                missing.append(c.card)
+        if not missing:
+            continue
+        names = ", ".join(missing)
+        if set(missing) <= form_only:
+            out.append(f"{c.given}: no label for {names} yet; until it is appended to "
+                       "data/vision/detector_extra_labels.json, label those tracks as the base form")
+        else:
+            out.append(f"{c.given}: no detector label for {names}; append it to "
+                       "data/vision/detector_extra_labels.json before labelling, or those tracks can "
+                       "only be masked")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# sessions (N08)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SessionPaths:
+    """Where one session lives: its committed labels and its local store."""
+    sid: str
+    labels_dir: Path            # data/vision/owner_labels/<sid>
+    store_dir: Path             # reports/vision/autolabel/<sid>
+
+    @property
+    def session_file(self) -> Path:
+        return self.labels_dir / SESSION_FILE
+
+    @property
+    def tracks_file(self) -> Path:
+        return self.labels_dir / TRACKS_FILE
+
+    @property
+    def recording(self) -> Path:
+        """A record.py session: open_recording / VisionLogReader read it."""
+        return self.store_dir / RECORDING_DIR
+
+    @property
+    def frames(self) -> Path:
+        return self.recording / FRAMES_FILE
+
+    @property
+    def images(self) -> Path:
+        return self.recording / IMAGES_DIR
+
+
+def session_paths(sid: str, labels_root: str | os.PathLike | None = None,
+                  store: str | os.PathLike | None = None) -> SessionPaths:
+    sid = check_sid(sid)
+    return SessionPaths(sid, Path(labels_root or LABELS_ROOT) / sid, Path(store or STORE_ROOT) / sid)
+
+
+def load_session(sid: str, labels_root: str | os.PathLike | None = None) -> dict[str, Any]:
+    p = session_paths(sid, labels_root).session_file
+    doc = _read_json(p)
+    if not isinstance(doc, Mapping) or doc.get("schema") != SESSION_SCHEMA:
+        raise ValueError(f"{p} is not a {SESSION_SCHEMA} document")
+    return dict(doc)
+
+
+def session_ids(labels_root: str | os.PathLike | None = None) -> list[str]:
+    root = Path(labels_root or LABELS_ROOT)
+    if not root.is_dir():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and (d / SESSION_FILE).is_file())
+
+
+def session_deck(doc: Mapping[str, Any]) -> list[DeckCard]:
+    return [DeckCard.from_dict(d) for d in doc.get("deck") or ()]
+
+
+def deck_cards(doc: Mapping[str, Any]) -> list[str]:
+    """The session's deck as catalogue names (what ClassTable.deck_labels takes)."""
+    return [c.card for c in session_deck(doc)]
+
+
+def auto_role(sid: str, capture: str = CAPTURE_HARVEST) -> tuple[str, str]:
+    """(role, why) from a session id date_DECK_N (plan 4.4, 4.5, 6)."""
+    if capture in GOLD_ONLY_CAPTURES:
+        return ROLE_GOLD, f"{capture} captures are gold only"
+    m = HARVEST_SID_RE.match(str(sid))
+    if not m:
+        raise ValueError(f"--role auto reads a session id like 20261101_A_1 (date_deck_friendly), "
+                         f"not {sid!r}: pass --role train, gold or dev")
+    deck, n = m["deck"].upper(), int(m["n"])
+    if n == GOLD_FRIENDLY:
+        return ROLE_GOLD, f"friendly {n} of deck {deck} is gold (held out)"
+    if (deck, n) in DEV_FRIENDLIES:
+        return ROLE_DEV, f"friendly {n} of deck {deck} is dev (early stopping only)"
+    return ROLE_TRAIN, f"friendly {n} of deck {deck} trains"
+
+
+def choose_role(role: str, sid: str, capture: str = CAPTURE_HARVEST) -> tuple[str, str]:
+    if capture not in CAPTURES:
+        raise ValueError(f"--capture must be one of {', '.join(CAPTURES)}, not {capture!r}")
+    if role == ROLE_AUTO:
+        return auto_role(sid, capture)
+    if role not in ROLES:
+        raise ValueError(f"--role must be auto, {', '.join(ROLES)}; not {role!r}")
+    if capture in GOLD_ONLY_CAPTURES and role != ROLE_GOLD:
+        raise ValueError(f"a {capture} capture is gold only: it is never trained on (plan 6)")
+    return role, "given"
+
+
+def find_recording(path: str | os.PathLike) -> tuple[Path, str]:
+    """(session folder, default session id) for a recorded session, its frames.jsonl, or a
+    root holding exactly one session (the id is then the root's name)."""
+    p = Path(path)
+    if p.is_file() and p.name == FRAMES_FILE:
+        return p.parent, p.parent.name
+    if (p / FRAMES_FILE).is_file():
+        return p, p.name
+    if not p.is_dir():
+        raise FileNotFoundError(f"no recording at {p}")
+    sessions = sorted(d for d in p.iterdir() if d.is_dir() and (d / FRAMES_FILE).is_file())
+    if not sessions:
+        raise FileNotFoundError(f"no recorded session in {p} (need <session>/{FRAMES_FILE})")
+    if len(sessions) > 1:
+        raise FileExistsError(f"{p} holds {len(sessions)} sessions ({', '.join(d.name for d in sessions)}): "
+                              "pass the session folder and --sid")
+    return sessions[0], p.name
+
+
+def image_files(images_dir: Path) -> list[Path]:
+    """The recorder's image files in a session's images/ (record.py's names only)."""
+    if not images_dir.is_dir():
+        return []
+    return sorted(f for f in images_dir.iterdir() if IMAGE_NAME_RE.match(f.name) and f.is_file())
+
+
+@dataclass
+class FramesInfo:
+    """What a frames.jsonl holds, read with the standard library (as harvest.open_recording)."""
+    header: dict[str, Any] | None = None
+    frames: int = 0
+    listed: list[str] = field(default_factory=list)     # image file names, in frame order
+    bad_lines: int = 0
+    t_first: float | None = None
+    t_last: float | None = None
+    sha1: str = ""
+    size: int = 0
+
+    @property
+    def seconds(self) -> float | None:
+        if self.t_first is None or self.t_last is None:
+            return None
+        return round(self.t_last - self.t_first, 3)
+
+
+def _time_of(rec: Mapping[str, Any]) -> float | None:
+    frame = rec.get("frame") if isinstance(rec.get("frame"), Mapping) else {}
+    for value in (frame.get("t_capture"), rec.get("t_wall")):
+        try:
+            t = float(value)
+        except (TypeError, ValueError):
+            continue
+        if t == t and abs(t) != float("inf"):
+            return t
+    return None
+
+
+def read_frames(path: Path) -> FramesInfo:
+    info = FramesInfo()
+    sha = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for raw in fh:
+            sha.update(raw)
+            info.size += len(raw)
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line.decode("utf-8", errors="replace"))
+            except ValueError:
+                info.bad_lines += 1                # a line cut short by a crash
+                continue
+            if not isinstance(rec, dict):
+                info.bad_lines += 1
+                continue
+            kind = rec.get("kind")
+            if kind == "session" and info.header is None:
+                info.header = rec
+            elif kind == "frame":
+                info.frames += 1
+                t = _time_of(rec)
+                if t is not None:
+                    info.t_first = t if info.t_first is None else min(info.t_first, t)
+                    info.t_last = t if info.t_last is None else max(info.t_last, t)
+                image = rec.get("image")
+                if isinstance(image, str) and image:
+                    info.listed.append(Path(image).name)
+    info.sha1 = sha.hexdigest()
+    return info
+
+
+def _link(src: Path, dst: Path, allow_copy: bool) -> str:
+    """Hard-link src to dst ("linked"); "copied" when linking fails and copies are allowed."""
+    try:
+        os.link(src, dst)
+        return "linked"
+    except OSError:
+        if not allow_copy:
+            raise
+    tmp = dst.with_name(dst.name + ".part")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+    return "copied"
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+class IngestError(ValueError):
+    def __init__(self, problems: str | Iterable[str], code: int = EXIT_INPUT):
+        self.problems = [problems] if isinstance(problems, str) else list(problems)
+        self.code = code
+        super().__init__("; ".join(self.problems))
+
+
+@dataclass
+class IngestResult:
+    sid: str
+    paths: SessionPaths
+    session: dict[str, Any]
+    created: bool
+    counts: Counter
+    warnings: list[str]
+
+
+_COMPARED = ("role", "capture", "client")
+
+
+def _changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, list[Any]]:
+    out = {k: [old.get(k), new.get(k)] for k in _COMPARED if old.get(k) != new.get(k)}
+    old_deck = [(c.get("card"), c.get("form")) for c in old.get("deck") or ()]
+    new_deck = [(c.get("card"), c.get("form")) for c in new.get("deck") or ()]
+    if sorted(old_deck, key=str) != sorted(new_deck, key=str):
+        out["deck"] = [[c.get("given") for c in old.get("deck") or ()],
+                       [c.get("given") for c in new.get("deck") or ()]]
+    return out
+
+
+def ingest(recording: str | os.PathLike, deck: str | Sequence[str], *, client: str,
+           sid: str | None = None, role: str = ROLE_AUTO, capture: str = CAPTURE_HARVEST,
+           labels_root: str | os.PathLike | None = None, store: str | os.PathLike | None = None,
+           table: Any = None, registry: Registry | None = None,
+           key_map: Mapping[str, str] | None = None, event_cards: Mapping[str, Any] | None = None,
+           force: bool = False, allow_copy: bool = True,
+           clock: Any = time.time) -> IngestResult:
+    """Ingest one recorded friendly (see the module docstring). Everything is checked before
+    anything is written; IngestError (code 2 bad input, 1 a refused change) otherwise."""
+    warnings: list[str] = []
+    try:
+        session_dir, default_sid = find_recording(recording)
+    except (FileNotFoundError, FileExistsError) as exc:
+        raise IngestError(str(exc)) from None
+    client = str(client or "").strip()
+    if not client:
+        raise IngestError("--client is needed (the game client version, like 16.635.1)")
+    try:
+        sid = check_sid(sid or default_sid)
+        role, rule = choose_role(role, sid, capture)
+        parse_version(client)
+    except ValueError as exc:
+        raise IngestError(str(exc)) from None
+    table = load_table() if table is None else table
+    events = load_event_cards() if event_cards is None else event_cards
+    if key_map is None:
+        key_map, note = load_key_map()
+        if note:
+            warnings.append(note)
+    if registry is None:
+        try:
+            registry = Registry.load()
+        except RegistryError as exc:
+            warnings.append(f"label registry not read ({exc}); label gaps not checked")
+    try:
+        cards = parse_deck(deck, CardResolver(table, key_map, events))
+    except DeckError as exc:
+        raise IngestError(exc.problems) from None
+
+    paths = session_paths(sid, labels_root, store)
+    if _inside(paths.store_dir, session_dir) or _inside(session_dir, paths.store_dir):
+        raise IngestError(f"the store {paths.store_dir} and the recording {session_dir} overlap: "
+                          "pass a --store outside the recording")
+
+    new = {"role": role, "capture": capture, "client": client, "deck": [c.to_dict() for c in cards]}
+    old = None
+    if paths.session_file.is_file():
+        try:
+            old = load_session(sid, labels_root)
+        except (ValueError, OSError) as exc:
+            raise IngestError(f"{paths.session_file} cannot be read ({exc}); move it away first",
+                              EXIT_CHECK) from None
+    history = list((old or {}).get("history") or [])
+    if old is not None:
+        was = (old.get("recording") or {}).get("name")
+        problems = []
+        if was and was != session_dir.name:
+            problems.append(f"session {sid} was ingested from recording {was}, not {session_dir.name}")
+        changes = _changes(old, new)
+        for key, (a, b) in changes.items():
+            problems.append(f"session {sid} has {key} {a!r}; this ingest says {b!r}")
+        if problems and not force:
+            raise IngestError(problems + ["pass --force to change it"], EXIT_CHECK)
+        if changes.get("role") == [ROLE_TRAIN, ROLE_GOLD] or changes.get("role") == [ROLE_DEV, ROLE_GOLD]:
+            warnings.append("this session may already be in a training mix: build the mix again before "
+                            "trusting gold numbers")
+        if problems:
+            history.append({"at": datetime.fromtimestamp(clock()).isoformat(timespec="seconds"),
+                            "changed": changes, "recording": [was, session_dir.name]})
+
+    src_images = session_dir / IMAGES_DIR
+    files = image_files(src_images)
+    conflicts = []
+    for f in files:
+        dst = paths.images / f.name
+        try:
+            if dst.exists() and not _same_file(f, dst) and dst.stat().st_size != f.stat().st_size:
+                conflicts.append(f.name)
+        except OSError:
+            continue                           # pruned meanwhile: counted when linking
+    if conflicts:
+        raise IngestError(f"{len(conflicts)} image(s) in {paths.images} differ from the recording's "
+                          f"(first {conflicts[0]}): another recording under session id {sid}? "
+                          "Pass another --sid or move that store folder away", EXIT_CHECK)
+
+    # Writing starts here: the images first, the recorder may still prune.
+    counts: Counter = Counter()
+    paths.images.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        dst = paths.images / f.name
+        if dst.exists():
+            counts["present"] += 1
+            continue
+        try:
+            counts[_link(f, dst, allow_copy)] += 1
+        except FileNotFoundError:
+            counts["vanished"] += 1            # pruned between the listing and the link
+    src_frames = session_dir / FRAMES_FILE
+    tmp = paths.frames.with_name(FRAMES_FILE + ".part")
+    shutil.copy2(src_frames, tmp)
+    os.replace(tmp, paths.frames)
+    info = read_frames(paths.frames)
+    stored = {f.name for f in image_files(paths.images)}
+    listed = set(info.listed)
+    missing = len(listed - stored)
+    unlisted = len(stored - listed)
+
+    try:
+        age = clock() - src_frames.stat().st_mtime
+    except OSError:
+        age = None
+    if age is not None and age < RECENT_WRITE_S:
+        warnings.append(f"{FRAMES_FILE} was written {age:.0f} s ago: if the recording is still running, "
+                        "ingest again when it stops")
+    if missing:
+        warnings.append(f"{missing} image(s) listed in {FRAMES_FILE} were gone before ingest "
+                        "(pruned by the recorder's disk budget?)")
+    if counts["copied"]:
+        warnings.append(f"{counts['copied']} image(s) were copied, not hard-linked (the store is on "
+                        "another drive?): they take disk space twice")
+    if counts["vanished"]:
+        warnings.append(f"{counts['vanished']} image(s) vanished while linking (the recorder pruned them)")
+    if info.bad_lines:
+        warnings.append(f"{info.bad_lines} unreadable line(s) in {FRAMES_FILE}")
+    if not stored:
+        warnings.append("the recording has no images: record with --image-every")
+    warnings += slot_warnings(cards)
+    known = set(crosswalk_base(table).labels) | set(registry.labels if registry else ())
+    warnings += deck_label_gaps(cards, table, known)
+
+    now = datetime.fromtimestamp(clock()).isoformat(timespec="seconds")
+    header = info.header or {}
+    doc: dict[str, Any] = {
+        "schema": SESSION_SCHEMA,
+        "sid": sid,
+        "role": role,
+        "role_rule": rule,
+        "capture": capture,
+        "client": client,
+        "deck": new["deck"],
+        "slots": slot_counts(cards),
+        "recording": {
+            "name": session_dir.name, "source": shown_path(session_dir),
+            "created": header.get("created"), "image_every": header.get("image_every"),
+            "image_format": header.get("image_format"), "image_width": header.get("image_width"),
+            "frames": info.frames, "seconds": info.seconds, "images_listed": len(listed),
+            "images_missing": missing, "images_unlisted": unlisted, "bad_lines": info.bad_lines,
+            "frames_sha1": info.sha1, "frames_bytes": info.size},
+        "store": {"path": shown_path(paths.store_dir), "images": len(stored),
+                  "linked": counts["linked"], "copied": counts["copied"], "present": counts["present"]},
+        "classes_digest": getattr(table, "digest", None),
+        "registry_digest": registry.digest if registry else None,
+        "ingested": (old or {}).get("ingested") or now,
+        "updated": now,
+        "history": history,
+        "warnings": warnings,
+        "tool": "tools/vision_autolabel.py ingest",
+    }
+    write_json(paths.session_file, doc)
+    return IngestResult(sid, paths, doc, old is None, counts, warnings)
+
+
+# ---------------------------------------------------------------------------
+# status (N08)
+# ---------------------------------------------------------------------------
+
+def _count_images(images: Path) -> int:
+    return len(image_files(images))
+
+
+def stages_done(paths: SessionPaths) -> list[str]:
+    roots = {"labels": paths.labels_dir, "store": paths.store_dir}
+    return [name for name, where, rel in STAGES if (roots[where] / rel).exists()]
+
+
+def labelled_tracks(sids: Iterable[str], labels_root: str | os.PathLike | None = None) -> Counter:
+    """Labelled tracks per label over the sessions' tracks.json files (see TRACKS_FILE)."""
+    out: Counter = Counter()
+    for sid in sids:
+        p = session_paths(sid, labels_root).tracks_file
+        try:
+            doc = _read_json(p)
+        except (OSError, ValueError):
+            continue
+        for t in (doc.get("tracks") if isinstance(doc, Mapping) else None) or ():
+            if isinstance(t, Mapping) and isinstance(t.get("label"), str):
+                out[t["label"]] += 1
+    return out
+
+
+def _slot_shows(entry: ExtraLabel, slot: DeckCard) -> bool:
+    """Whether a deck slot can put `entry` on screen: any slot of the card shows its base-form
+    labels (an evolution card shows both forms in a match), the evo or hero slot its form."""
+    if entry.card != slot.card:
+        return False
+    return entry.form == FORM_BASE or entry.form == slot.form
+
+
+def coverage(registry: Registry, sessions: Mapping[str, Mapping[str, Any]],
+             tracks: Mapping[str, int] | None = None) -> list[dict[str, Any]]:
+    """Per registry label: the sessions per role whose declared deck can show it, and its
+    labelled training tracks."""
+    rows = []
+    for e in registry:
+        n = Counter()
+        for doc in sessions.values():
+            if any(_slot_shows(e, c) for c in session_deck(doc)):
+                n[str(doc.get("role"))] += 1
+        rows.append({"label": e.label, "card": e.card, "form": e.form_name,
+                     ROLE_TRAIN: n[ROLE_TRAIN], ROLE_GOLD: n[ROLE_GOLD], ROLE_DEV: n[ROLE_DEV],
+                     "tracks": None if tracks is None else int(tracks.get(e.label, 0))})
+    return rows
+
+
+def status(labels_root: str | os.PathLike | None = None, store: str | os.PathLike | None = None,
+           sids: Sequence[str] | None = None, registry: Registry | None = None) -> dict[str, Any]:
+    """The sessions, their stages and images, and the registry's coverage, as one document."""
+    all_sids = session_ids(labels_root)
+    chosen = list(sids) if sids else all_sids
+    sessions: dict[str, dict[str, Any]] = {}
+    rows, problems = [], []
+    for sid in chosen:
+        try:
+            doc = load_session(sid, labels_root)
+        except (OSError, ValueError) as exc:
+            problems.append(f"{sid}: {exc}")
+            continue
+        sessions[sid] = doc
+        paths = session_paths(sid, labels_root, store)
+        now = _count_images(paths.images)
+        had = int((doc.get("store") or {}).get("images") or 0)
+        notes = []
+        if doc.get("role") == ROLE_GOLD and now < had:
+            notes.append(f"{had - now} gold raw image(s) deleted: keep gold raws (plan 4.7)")
+        elif now < had:
+            notes.append(f"{had - now} raw image(s) deleted (fine once emitted)")
+        rows.append({"sid": sid, "role": doc.get("role"), "capture": doc.get("capture"),
+                     "client": doc.get("client"), "images": now, "images_ingested": had,
+                     "seconds": (doc.get("recording") or {}).get("seconds"),
+                     "stages": stages_done(paths), "deck": [c.get("given") for c in doc.get("deck") or ()],
+                     "notes": notes})
+    roles = Counter(str(d.get("role")) for d in sessions.values())
+    train = [sid for sid, d in sessions.items() if d.get("role") == ROLE_TRAIN]
+    tracks = labelled_tracks(train, labels_root)
+    cov = coverage(registry, sessions, tracks if tracks else None) if registry is not None else []
+    return {"sessions": rows, "roles": {r: roles[r] for r in ROLES}, "problems": problems,
+            "coverage": cov, "thin_tracks": registry.thin_tracks if registry else THIN_TRACKS,
+            "labels_root": str(Path(labels_root or LABELS_ROOT))}
+
+
+# ---------------------------------------------------------------------------
+# command line
+# ---------------------------------------------------------------------------
+
+def _print_problems(head: str, problems: Iterable[str]) -> None:
+    print(head)
+    for p in problems:
+        print(f"  - {p}")
+
+
+def _cmd_labels(args) -> int:
+    try:
+        registry = Registry.load(args.registry)
+        table = load_table(args.classes)
+    except (RegistryError, OSError, ValueError) as exc:
+        print(f"error: {exc}")
+        return EXIT_INPUT
+    print(f"registry {args.registry or REGISTRY_PATH}: {len(registry)} labels, digest {registry.digest[:12]}")
+    note = registry.table_note(table)
+    if note:
+        print(f"note: {note}")
+    problems = registry.validate(table)
+    if problems:
+        _print_problems("the registry does not match classes.json:", problems)
+        return EXIT_CHECK
+    print(f"every entry resolves through classes.json ({len(table)} classes, digest {table.digest[:12]})")
+    base_path = Path(args.base) if args.base else BASE_LABELS
+    preview = False
+    try:
+        base = load_label_set(base_path)
+    except RegistryError as exc:
+        if args.base or args.out:
+            print(f"error: {exc}")
+            return EXIT_INPUT
+        print(f"no base label set at {base_path}: the indices below follow a preview built from "
+              "classes.json's KataCR names, not the trained set")
+        base, preview = crosswalk_base(table), True
+    try:
+        ext = registry.extend(base)
+    except RegistryError as exc:
+        _print_problems("the registry cannot extend this base:", exc.problems)
+        return EXIT_CHECK
+    print(f"base {'(preview) ' if preview else ''}{len(base)} labels, {len(base.yolo_names())} YOLO classes, "
+          f"digest {base.digest}")
+    if not preview and base.classes_digest and base.classes_digest != table.digest:
+        print(f"note: the base was built from classes.json {base.classes_digest[:12]}, this is {table.digest[:12]}")
+    want = registry.base_pin.get("labels")
+    if not preview and isinstance(want, int) and want != len(base):
+        print(f"note: the registry was written against a {want}-label base; this one has {len(base)}, "
+              f"so the appended labels start at {len(base)}")
+    for label in registry.in_base(base):
+        print(f"note: {label} is already a label of the base set; it adds no class")
+    print(f"extended {len(ext)} labels, {len(ext.yolo_names())} YOLO classes, digest {ext.digest}; "
+          f"the base's {len(base.yolo_names())} names stay a prefix")
+    print(f"  {'label':>5}  {'yolo':>9}  {'name':34s} {'card':18s} {'form':5s} {'trains as':24s} valid from")
+    for e in registry:
+        i = ext.index(e.label)
+        yolo = f"{ext.yolo_index(e.label, 0)}/{ext.yolo_index(e.label, 1)}" if ext.joint_side else str(i)
+        rule = e.train_as or (f"{e.base} below {registry.thin_tracks} tracks" if e.base else "itself")
+        print(f"  {i:5d}  {yolo:>9}  {e.label:34s} {e.card:18s} {e.form_name:5s} {rule:24s} "
+              f"{e.valid_from_client or '-'}")
+    rc = EXIT_OK
+    if args.against:
+        try:
+            old = read_yolo_names(args.against)
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}")
+            return EXIT_INPUT
+        bad = check_prefix(old, ext.yolo_names())
+        if bad:
+            _print_problems(f"against {args.against}:", bad)
+            rc = EXIT_CHECK
+        else:
+            print(f"against {args.against}: its {len(old)} YOLO names stay a prefix")
+    if args.out and rc == EXIT_OK:
+        out = write_json(args.out, extended_doc(base, registry, ext))
+        print(f"extended label set -> {out}")
+    return rc
+
+
+def _cmd_ingest(args) -> int:
+    try:
+        table = load_table(args.classes)
+        registry = Registry.load(args.registry) if args.registry else None
+    except (RegistryError, OSError, ValueError) as exc:
+        print(f"error: {exc}")
+        return EXIT_INPUT
+    try:
+        res = ingest(args.recording, args.deck, client=args.client, sid=args.sid, role=args.role,
+                     capture=args.capture, labels_root=args.labels_root, store=args.store,
+                     table=table, registry=registry, force=args.force, allow_copy=not args.no_copy)
+    except IngestError as exc:
+        _print_problems("ingest refused, nothing written:" if exc.code == EXIT_INPUT else "ingest refused:",
+                        exc.problems)
+        return exc.code
+    except OSError as exc:
+        print(f"error: {exc}")
+        return EXIT_CHECK
+    s = res.session
+    rec, store = s["recording"], s["store"]
+    print(f"{'ingested' if res.created else 'updated'} {res.sid}: role {s['role']} ({s['role_rule']}), "
+          f"capture {s['capture']}, client {s['client']}")
+    shown = [c["card"] if c["form"] == FORM_BASE else f"{c['card']} {c['form_name']}" for c in s["deck"]]
+    print(f"  deck: {', '.join(shown)}")
+    print(f"  recording {rec['name']}: {rec['frames']} frames, {rec['seconds']} s, "
+          f"{rec['images_listed']} images listed, {rec['images_missing']} missing")
+    print(f"  store {res.paths.recording}: {store['images']} images "
+          f"({res.counts['linked']} linked, {res.counts['copied']} copied, {res.counts['present']} already there)")
+    print(f"  session -> {res.paths.session_file}")
+    for w in res.warnings:
+        print(f"  ! {w}")
+    return EXIT_OK
+
+
+def _cmd_status(args) -> int:
+    registry = None
+    try:
+        registry = Registry.load(args.registry)
+    except RegistryError as exc:
+        print(f"note: registry not read ({exc})")
+    doc = status(args.labels_root, args.store, args.sid or None, registry)
+    if args.json:
+        print(json.dumps(doc, indent=1))
+        return EXIT_CHECK if doc["problems"] else EXIT_OK
+    rows = doc["sessions"]
+    roles = doc["roles"]
+    print(f"{len(rows)} session(s) under {doc['labels_root']}: "
+          + ", ".join(f"{r} {roles[r]}" for r in ROLES))
+    if rows:
+        print(f"  {'sid':22s} {'role':5s} {'capture':8s} {'client':10s} {'images':>13s} {'seconds':>8s}  stages")
+    for r in rows:
+        images = f"{r['images']}/{r['images_ingested']}"
+        secs = "-" if r["seconds"] is None else f"{r['seconds']:.0f}"
+        print(f"  {r['sid']:22s} {str(r['role']):5s} {str(r['capture']):8s} {str(r['client']):10s} "
+              f"{images:>13s} {secs:>8s}  {','.join(r['stages'])}")
+        print(f"      deck: {','.join(str(x) for x in r['deck'])}")
+        for n in r["notes"]:
+            print(f"      ! {n}")
+    for p in doc["problems"]:
+        print(f"  ! {p}")
+    if doc["coverage"]:
+        print(f"registry labels by declared decks (sessions per role; labelled training tracks, "
+              f"forms train as their base below {doc['thin_tracks']}):")
+        print(f"  {'label':34s} {'card':18s} {'form':5s} {'train':>5s} {'gold':>4s} {'dev':>3s} {'tracks':>6s}")
+        for c in doc["coverage"]:
+            tracks = "-" if c["tracks"] is None else str(c["tracks"])
+            print(f"  {c['label']:34s} {c['card']:18s} {c['form']:5s} {c[ROLE_TRAIN]:5d} {c[ROLE_GOLD]:4d} "
+                  f"{c[ROLE_DEV]:3d} {tracks:>6s}")
+        need_train = [c["label"] for c in doc["coverage"] if not c[ROLE_TRAIN]]
+        need_gold = [c["label"] for c in doc["coverage"] if not c[ROLE_GOLD]]
+        if need_train:
+            print(f"to record next, no training session yet: {', '.join(need_train)}")
+        if need_gold:
+            print(f"to record next, no gold session yet: {', '.join(need_gold)}")
+    return EXIT_CHECK if doc["problems"] else EXIT_OK
+
+
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--classes", default=None, help="the class list (default data/vision/classes.json)")
+    p.add_argument("--registry", default=None,
+                   help="the label registry (default data/vision/detector_extra_labels.json)")
+
+
+def _add_session_roots(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--labels-root", default=None,
+                   help="where session.json and the labels go (default data/vision/owner_labels, committed)")
+    p.add_argument("--store", default=None,
+                   help="where the images are linked (default reports/vision/autolabel, never committed)")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="tools/vision_autolabel.py",
+                                 description="Auto-label recorded friendlies (docs/NEW_CARDS_PLAN.md).")
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("labels", help="check the label registry and show the indices it appends")
+    _add_common(p)
+    p.add_argument("--base", default=None,
+                   help="the label set to extend (default tmp/yolo/detector_labels.json; without it "
+                        "a preview from classes.json is shown)")
+    p.add_argument("--against", default=None,
+                   help="an older extended detector_labels.json (or JSON list of YOLO names) that must "
+                        "stay a prefix")
+    p.add_argument("--out", default=None, help="write the extended detector_labels.json here")
+    p.set_defaults(func=_cmd_labels)
+
+    p = sub.add_parser("ingest", help="hard-link one recorded friendly into the store and write session.json")
+    _add_common(p)
+    _add_session_roots(p)
+    p.add_argument("recording", help="the --record root of one session, or the session folder")
+    p.add_argument("--deck", required=True,
+                   help="the 8 cards the recorded opponent (the top player) played, comma-separated: "
+                        "RoyaleAPI keys (cannon-ev1, ronin-hero) or catalogue names (MinionGiant)")
+    p.add_argument("--client", required=True, help="the game client version, like 16.635.1")
+    p.add_argument("--sid", default=None, help="session id (default: the folder's name), like 20261101_A_1")
+    p.add_argument("--role", default=ROLE_AUTO, choices=(ROLE_AUTO,) + ROLES,
+                   help="auto (from the session id: friendly 2 gold, deck A's friendly 4 dev, the rest "
+                        "train), train, gold or dev")
+    p.add_argument("--capture", default=CAPTURE_HARVEST, choices=CAPTURES,
+                   help="harvest (a scripted friendly, default), natural (Round 0) or field (a "
+                        "clanmate friendly); natural and field are gold only")
+    p.add_argument("--force", action="store_true",
+                   help="change the deck, role, client or capture of a session ingested before")
+    p.add_argument("--no-copy", action="store_true",
+                   help="fail instead of copying when an image cannot be hard-linked")
+    p.set_defaults(func=_cmd_ingest)
+
+    p = sub.add_parser("status", help="list the ingested sessions and what to record next")
+    _add_common(p)
+    _add_session_roots(p)
+    p.add_argument("sid", nargs="*", help="only these sessions")
+    p.add_argument("--json", action="store_true", help="print the status as JSON")
+    p.set_defaults(func=_cmd_status)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
