@@ -16,7 +16,8 @@ every command taken) with tiny TokenPolicies (d16, one layer, CPU):
     log-probabilities recomputed from the stored rows within 1e-5 (ppo's recompute, dropout off,
     and rs_decide's numpy draw); the same seed the same files, another seed other draws
   - a battle cut at max_ticks has no done row; a failing battle is logged and skipped, and
-    max_errors stops the worker; bench rows
+    max_errors stops the worker; a worker stops when the collection is aborted or its parent is
+    gone; bench rows
   - the worker task is plain data and run_worker pickles by reference (Windows spawn)
   - the delay, noise and memory settings; the CLI end to end (collect and bench)
 Engine-marked: one battle on RoyaleSim, in this process and in one spawn worker.
@@ -531,6 +532,34 @@ def test_a_failing_battle_is_logged_and_skipped(tools, monkeypatch, tmp_path):
         R.collect([], settings)
 
 
+def test_a_worker_stops_when_aborted_or_orphaned(tools, monkeypatch, tmp_path):
+    """A spawn worker checks every round: the collection's abort event (collect sets it when a
+    worker fails) and its parent's liveness (a killed parent's children must not play on)."""
+    pytest.importorskip("torch")
+    import threading
+    R = tools.rollout
+    fake_engine(monkeypatch, states=script)
+    assert R._ABORT is None and R._stop_reason() is None          # the parent, inline
+    stop = threading.Event()
+    monkeypatch.setattr(R, "_ABORT", stop)
+    assert R._stop_reason() is None
+    stop.set()
+    assert "aborted" in R._stop_reason()
+    with pytest.raises(R.Aborted, match="1 battle"):
+        collect(tools, tmp_path, ids=("idle",))
+    assert not list((tmp_path / "out").glob("*.npz"))
+    assert not (tmp_path / "out" / "summary.json").exists()
+    monkeypatch.setattr(R, "_ABORT", None)
+    gone = types.SimpleNamespace(is_alive=lambda: False)
+    monkeypatch.setattr(R.multiprocessing, "parent_process", lambda: gone)
+    assert "parent process is gone" in R._stop_reason()
+    alive = types.SimpleNamespace(is_alive=lambda: True)
+    monkeypatch.setattr(R.multiprocessing, "parent_process", lambda: alive)
+    assert R._stop_reason() is None
+    R._init_pool(None, 0, stop)                    # the initializer hands the event over
+    assert R._ABORT is stop
+
+
 def test_bench_rows_without_files(tools, monkeypatch, tmp_path):
     pytest.importorskip("torch")
     R = tools.rollout
@@ -601,8 +630,8 @@ def test_delay_noise_and_memory_settings(tools, monkeypatch, tmp_path):
         assert R.noise_entry(off) is None, off
     assert R.noise_entry("default") == R.PN.NoiseProfile.load("default").to_dict()
     assert R.noise_entry(NOISE)["opponent_plays"]["late_ticks"] == 4
-    assert R.worker_mb(16, 20_000) == 787                       # 600 + 128 + 58.6
-    assert R.worker_mb(1, 1024) == 611
+    assert R.worker_mb(16, 20_000) == 845                       # 600 + 128 + 117.2
+    assert R.worker_mb(1, 1024) == 614                          # 600 + 8 + 6
     assert R.ram_check(8, per_worker_mb=900, budget_gb=8, available=16_000)[0] == 8
     got, why = R.ram_check(12, per_worker_mb=900, budget_gb=8, available=16_000)
     assert got == 9 and "budget 9" in why and "not 12" in why       # 8192 // 900

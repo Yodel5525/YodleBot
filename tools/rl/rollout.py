@@ -88,6 +88,12 @@ ProcessPoolExecutor(mp_context=spawn, max_tasks_per_child=1), the pool initializ
 sets the engine config (rs_engine.set_active) and the BLAS thread variables before torch loads,
 and the task is plain data (Settings.to_dict, BattlePlan.to_dict: JSON-ready), run by the
 module-level run_worker. Workers load their own checkpoints: models never cross processes.
+Each worker task is a whole share of the collection, so a worker checks every round whether
+it should stop (_stop_reason): the collection's abort event, which collect sets as soon as one
+worker fails (or the parent is interrupted), and whether its parent process is still alive. A
+parent killed on Windows (the driver's kill of the collect process, a closed console) leaves
+its spawn children running otherwise: whole tasks played as orphans, their RAM held, their
+parts written into a folder a retry has already cleared. A stopped worker raises Aborted.
 
 MEMORY (16 GB PC). Each worker holds torch, royalesim, the learner, up to Settings.max_models
 opponent models (LRU), K battles and at most flush_rows transition rows: worker_mb() estimates
@@ -112,7 +118,8 @@ import sys
 import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ProcessPoolExecutor
+from concurrent.futures import wait as wait_futures
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +142,7 @@ from tools.rl import league as LG  # noqa: E402
 from tools.rl import ppo as PPO  # noqa: E402  (the rollout format, written with its helpers)
 
 __all__ = [
-    "BattlePlan", "BattleSlot", "Brain", "DEFAULT_DELAY", "FORMAT", "Heads", "Request",
+    "Aborted", "BattlePlan", "BattleSlot", "Brain", "DEFAULT_DELAY", "FORMAT", "Heads", "Request",
     "RolloutWriter", "Seat", "Settings", "Worker", "bench_row", "collect", "default_noise",
     "main", "noise_entry", "plan_battles", "ram_check", "resolve_delay", "rss_mb", "run_worker",
     "worker_mb",
@@ -157,12 +164,14 @@ DEFAULT_FLUSH_ROWS = 20_000
 DEFAULT_MAX_MODELS = 6
 MAX_ERRORS = 10
 #: Memory: the workers' budget, what is kept free for the parent and the system, and the
-#: per-worker estimate's parts (torch + royalesim + models; a battle; a buffered row).
+#: per-worker estimate's parts (torch + royalesim + models; a battle; a buffered row). A row is
+#: held as a dict of about 30 small numpy arrays until its part is written: ~1.5 KB of data
+#: and ~3.5 KB of array and dict headers.
 RAM_BUDGET_GB = 8.0
 RESERVE_MB = 2048
 BASE_WORKER_MB = 600
 BATTLE_MB = 8
-ROW_KB = 3.0
+ROW_KB = 6.0
 #: Generator streams: a seat's decisions, the plan's league and deck draws, a battle's deals.
 SEAT_STREAM, PLAN_STREAM, DEAL_STREAM = 31, 32, 33
 MEASURED_NOISE = ROOT / "data" / "noise" / "measured.json"
@@ -1010,6 +1019,31 @@ class Settings:
         return cls(**dict(data))
 
 
+#: In a spawn worker: the collection's abort event (a multiprocessing Event, set by _init_pool);
+#: None in the parent and in an inline collection.
+_ABORT: Any = None
+
+
+class Aborted(RuntimeError):
+    """A worker stopped before its battles were played (module doc, WINDOWS)."""
+
+
+def _stop_reason() -> str | None:
+    """Why this worker should stop now, or None: the collection's abort event is set (another
+    worker failed, or the parent was interrupted), or this process was started by
+    multiprocessing and its parent is gone. Both checks are a non-blocking wait on a handle."""
+    if _ABORT is not None:
+        try:
+            if _ABORT.is_set():
+                return "the collection was aborted (another worker failed or it was interrupted)"
+        except (OSError, EOFError, ValueError):
+            return "the collection's abort event is gone"
+    parent = multiprocessing.parent_process()
+    if parent is not None and not parent.is_alive():
+        return "its parent process is gone"
+    return None
+
+
 def _set_threads(threads: int) -> None:
     import torch
     torch.set_num_threads(int(threads))
@@ -1136,6 +1170,10 @@ class Worker:
         queue = deque(BattlePlan.from_dict(p) for p in plans)
         active: list[BattleSlot] = []
         while queue or active:
+            why = _stop_reason()
+            if why is not None:
+                raise Aborted(f"worker {self.id} stopped with {len(queue) + len(active)} "
+                              f"battle(s) unfinished: {why}")
             while queue and len(active) < self.settings.battles:
                 slot = self._open(queue.popleft())
                 if slot is not None:
@@ -1203,9 +1241,11 @@ def run_worker(task: Mapping[str, Any]) -> dict:
     return worker.summary(time.perf_counter() - t0)
 
 
-def _init_pool(engine: Any, threads: int) -> None:
-    """The pool initializer: the parent's engine config, and the BLAS threads set before torch
-    loads (the worker sets torch's own once it does)."""
+def _init_pool(engine: Any, threads: int, abort: Any = None) -> None:
+    """The pool initializer: the parent's engine config, the BLAS threads set before torch
+    loads (the worker sets torch's own once it does) and the collection's abort event."""
+    global _ABORT
+    _ABORT = abort
     if engine is not None:
         rs_engine.set_active(engine)
     if int(threads) > 0:
@@ -1259,10 +1299,24 @@ def collect(plans: Iterable[Any], settings: Any, *, workers: int = 0, out: Any =
         parts = [run_worker(task) for task in tasks]
     else:
         ctx = multiprocessing.get_context("spawn")
+        abort = ctx.Event()
         with ProcessPoolExecutor(n, mp_context=ctx, initializer=_init_pool,
-                                 initargs=(settings.engine, settings.threads),
+                                 initargs=(settings.engine, settings.threads, abort),
                                  max_tasks_per_child=1) as pool:
-            parts = list(pool.map(run_worker, tasks))
+            futures = [pool.submit(run_worker, task) for task in tasks]
+            try:
+                # The first failure is the collection's: the other workers stop within a
+                # round (module doc, WINDOWS) instead of playing their whole tasks first.
+                done, _ = wait_futures(futures, return_when=FIRST_EXCEPTION)
+                for f in futures:
+                    if f in done and f.exception() is not None:
+                        f.result()
+                parts = [f.result() for f in futures]
+            except BaseException:
+                abort.set()
+                for f in futures:
+                    f.cancel()
+                raise
     summary = _merge(parts, time.perf_counter() - t0, workers)
     summary["settings"] = {k: v for k, v in settings.to_dict().items() if k != "meta"}
     summary["meta"] = settings.meta
