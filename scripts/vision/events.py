@@ -51,10 +51,16 @@ lag from our own landings. Ticks are battle ticks (20 per second).
 
 TABLES. EventTables holds, per RoyaleSim card id, the classes one play puts
 down (with counts) or, for a spell, the classes that show it; and the
-parent -> child class map. Build it from:
+parent -> child class map. A spell that deploys a troop has a composition, not
+spell classes (Heal -> HealSpirit). A card with forms (the Spirit Empress
+MergeMaiden: MergeMaiden_Normal below 6 elixir, MergeMaiden_Mounted at 6 or more)
+holds its forms' classes, so their units name the card; the forms' own ids are
+aliases of it, and play_cost(card, classes) gives the form's cost (3 or 6). Build
+it from:
 * EventTables.from_names(load_spawn_children(), card_ids,
   class_of=unit_class_map(classes), ignore=cardless_classes(classes)):
-  data/vision/spawn_children.json, generated from RoyaleSim's cards.json by
+  data/vision/spawn_children.json, generated from RoyaleSim's card tables (the
+  16.402.22 one data/engine.json selects, then 15.535's) by
   tools/vision_spawn_children.py (names; card_ids from Battle.catalogue_json;
   classes = data/vision/classes.json, E16);
 * EventTables.for_engine(spawn_primary_json, class_of=...): E06's
@@ -170,18 +176,29 @@ class EventTables:
     """What a play puts on the board, per RoyaleSim card id.
 
     compositions  troop/building card -> {class: units one play deploys}
-                  (Skeletons {Skeleton: 3}, Goblin Gang {Goblin: 3, SpearGoblin: 3}).
+                  (Skeletons {Skeleton: 3}, Goblin Gang {Goblin: 3, SpearGoblin: 3}); also
+                  a spell that deploys a troop (Heal {HealSpirit: 1}) and a card with
+                  forms, which holds every form's classes (aliases).
     spells        spell card -> the classes that show it (a projectile, an area).
     children      class -> classes it creates later while alive or as it dies
                   (Witch -> Skeleton, Golem -> Golemite, a Goblin Barrel's class
                   -> Goblin); WILDCARD explains any class.
     ignore        classes never counted (towers, tower troops, effects).
+    aliases       card id of a FORM -> the card a play of it is reported as (the
+                  Spirit Empress's MergeMaiden_Normal and _Mounted -> MergeMaiden). The
+                  form's classes are in the card's composition; a form has no
+                  composition or spell of its own.
+    variant_costs card -> {class: elixir of the form that puts it down}, for a card
+                  whose forms cost differently (MergeMaiden: MergeMaiden_Normal 3,
+                  MergeMaiden_Mounted 6); play_cost reads it.
     Mapping keys may be strings (JSON); values may be lists, sets or count dicts.
     """
     compositions: Mapping[int, Mapping[str, int]]
     spells: Mapping[int, Iterable[str]] = field(default_factory=dict)
     children: Mapping[str, Iterable[str]] = field(default_factory=dict)
     ignore: Iterable[str] = frozenset()
+    aliases: Mapping[int, int] = field(default_factory=dict)
+    variant_costs: Mapping[int, Mapping[str, int]] = field(default_factory=dict)
     _unit_by: dict = field(init=False, repr=False, compare=False)
     _spell_by: dict = field(init=False, repr=False, compare=False)
 
@@ -219,10 +236,39 @@ class EventTables:
         clash = sorted(set(unit_by) & set(spell_by))
         if clash:
             raise ValueError(f"classes both a unit and a spell: {clash}")
+        aliases: dict[int, int] = {}
+        for form, card in dict(self.aliases).items():
+            form, card = _card_id(form), _card_id(card)
+            if form == card:
+                raise ValueError(f"card {card} cannot be a form of itself")
+            if form in comps or form in spells:
+                raise ValueError(f"card {form} is a form of card {card}: it has no composition "
+                                 "or spell of its own")
+            aliases[form] = card
+        chained = sorted(set(aliases) & set(aliases.values()))
+        if chained:
+            raise ValueError(f"cards both a form and a card with forms: {chained}")
+        costs: dict[int, dict[str, int]] = {}
+        for card, by_cls in dict(self.variant_costs).items():
+            card = _card_id(card)
+            if card not in comps:
+                raise ValueError(f"variant costs for card {card}, which has no composition")
+            cc: dict[str, int] = {}
+            for cls, cost in dict(by_cls).items():
+                cls, cost = str(cls), int(cost)
+                if cls not in comps[card]:
+                    raise ValueError(f"card {card}: no form of it puts down {cls}")
+                if cost < 0:
+                    raise ValueError(f"card {card}: {cls} costs {cost} < 0")
+                cc[cls] = cost
+            if cc:
+                costs[card] = cc
         object.__setattr__(self, "compositions", comps)
         object.__setattr__(self, "spells", spells)
         object.__setattr__(self, "children", children)
         object.__setattr__(self, "ignore", frozenset(self.ignore))
+        object.__setattr__(self, "aliases", aliases)
+        object.__setattr__(self, "variant_costs", costs)
         object.__setattr__(self, "_unit_by", {k: tuple(v) for k, v in unit_by.items()})
         object.__setattr__(self, "_spell_by", {k: tuple(v) for k, v in spell_by.items()})
 
@@ -248,9 +294,31 @@ class EventTables:
         return frozenset(self.compositions.get(card, ()))
 
     def units_per_play(self, card: int) -> int | None:
-        """Units one play deploys (3 for Skeletons); None for a spell or unknown card."""
+        """Units one play deploys (3 for Skeletons); None for a spell, an unknown card or a
+        card with forms (which form a play puts down is not known before it lands)."""
         comp = self.compositions.get(card)
-        return None if comp is None else sum(comp.values())
+        if comp is None or card in self.variant_costs:
+            return None
+        return sum(comp.values())
+
+    def reported_card(self, card: int) -> int:
+        """The card a play of `card` is reported as: a form's card (MergeMaiden_Normal ->
+        MergeMaiden, the card the deck, the hand and our rows' memory name), else `card`."""
+        card = int(card)
+        return self.aliases.get(card, card)
+
+    def play_cost(self, card: int, classes: Iterable[str] | str = ()) -> int | None:
+        """The elixir one play of `card` cost when the classes it showed tell its form
+        (variant_costs): the Spirit Empress as MergeMaiden_Normal 3, as MergeMaiden_Mounted
+        6 (the engine charges the form's own cost, royalesim state.rs resolve_play); the
+        dearer one when both show. None for a card every play of which costs the
+        catalogue's price, or when no class shown names a form."""
+        costs = self.variant_costs.get(int(card))
+        if not costs:
+            return None
+        shown = [classes] if isinstance(classes, str) else list(classes)
+        found = [costs[c] for c in shown if c in costs]
+        return max(found) if found else None
 
     def explains(self, parent_cls: str, child_cls: str) -> bool:
         kids = self.children.get(parent_cls, ())
@@ -287,27 +355,65 @@ class EventTables:
         unit; a mapping keeps unlisted names). spell_classes: spell card name -> its
         vision classes; by default the card's name, its RoyaleSim projectile / area
         names and (katacr=True) its KataCR names. A spell class that is also a unit
-        class is dropped from the spell.
+        class is dropped from the spell. A spell card with a composition (Heal ->
+        HealSpirit, a spell that deploys a troop) is a unit card, not a spell.
+
+        VARIANTS ("variants": card -> {form card: elixir}; the Spirit Empress). When
+        card_ids has the card, its forms' compositions become ITS composition (each class
+        at the most any one form deploys: a play shows one form), every form card_ids
+        has becomes an alias of it, and each class that only one form puts down gets that
+        form's cost (variant_costs, play_cost). Without the card's id the forms stay
+        cards of their own, as in a table without "variants".
         """
         cmap = _class_mapper(class_of)
-        comps: dict[int, dict[str, int]] = {}
-        for name, comp in table.get("compositions", {}).items():
-            cid = card_ids.get(name)
-            if cid is None:
-                continue
+
+        def mapped(comp: Any) -> dict[str, int]:
             cc: dict[str, int] = {}
             for unit, n in _counts(comp).items():
                 c = cmap(unit)
                 if c:
                     cc[c] = cc.get(c, 0) + int(n)
+            return cc
+
+        variants = {str(name): {str(f): int(cost) for f, cost in dict(forms).items()}
+                    for name, forms in (table.get("variants") or {}).items()
+                    if card_ids.get(name) is not None}
+        form_of = {form: name for name, forms in variants.items() for form in forms}
+        compositions = table.get("compositions", {})
+        comps: dict[int, dict[str, int]] = {}
+        for name, comp in compositions.items():
+            cid = card_ids.get(name)
+            if cid is None or name in form_of:
+                continue
+            cc = mapped(comp)
             if cc:
                 comps[int(cid)] = cc
+        aliases: dict[int, int] = {}
+        variant_costs: dict[int, dict[str, int]] = {}
+        for name, forms in sorted(variants.items()):
+            cid = int(card_ids[name])
+            merged = dict(comps.get(cid, {}))
+            cost_of: dict[str, set[int]] = {}
+            for form, cost in sorted(forms.items()):
+                for c, n in mapped(compositions.get(form, {})).items():
+                    merged[c] = max(merged.get(c, 0), n)
+                    cost_of.setdefault(c, set()).add(cost)
+            if not merged:
+                continue
+            comps[cid] = merged
+            for form in forms:
+                fid = card_ids.get(form)
+                if fid is not None and int(fid) != cid:
+                    aliases[int(fid)] = cid
+            costs = {c: next(iter(s)) for c, s in cost_of.items() if len(s) == 1}
+            if costs:
+                variant_costs[cid] = costs
         unit_classes = {c for comp in comps.values() for c in comp}
         spells: dict[int, set[str]] = {}
         objects = table.get("spell_objects", {})
         for name, kind in table.get("kinds", {}).items():
             cid = card_ids.get(name)
-            if kind != "spell" or cid is None:
+            if kind != "spell" or cid is None or int(cid) in comps:
                 continue
             if spell_classes is not None:
                 classes = set(spell_classes.get(name, ()))
@@ -335,7 +441,8 @@ class EventTables:
             cid = card_ids.get(name)
             for sc in spells.get(cid, ()) if cid is not None else ():
                 children.setdefault(sc, set()).add(WILDCARD)
-        return cls(comps, spells, children, frozenset(ignore))
+        return cls(comps, spells, children, frozenset(ignore), aliases=aliases,
+                   variant_costs=variant_costs)
 
     @classmethod
     def from_spawn_primary(cls, raw: Mapping[str, Any], *,
@@ -356,10 +463,12 @@ class EventTables:
         spawn settled), except, with `base`, units the card's base composition deploys with
         it: a Goblin Gang's spear goblins are not children of its goblins, or a later Spear
         Goblins play next to a living goblin would be explained away. Spells come from
-        base only (spawn_primary has none).
+        base only (spawn_primary has none). A card base holds as a form (base.aliases:
+        MergeMaiden_Normal) counts as its card, so its units still name MergeMaiden.
         """
         cmap = _class_mapper(class_of)
         names = list(unit_names if unit_names is not None else raw.get("unit_types") or ())
+        aliases = dict(base.aliases) if base is not None else {}
 
         def unit_class(u: Any) -> str | None:
             if isinstance(u, int) and not isinstance(u, bool) or (isinstance(u, str) and u.isdigit()):
@@ -373,11 +482,12 @@ class EventTables:
         children: dict[str, set[str]] = (
             {p: set(k) for p, k in base.children.items()} if base is not None else {})
         for key, unit in (raw.get("primary") or {}).items():
-            cid = _card_id(key)
+            own = _card_id(key)
+            cid = aliases.get(own, own)          # a form's units are its card's
             pc = unit_class(unit)
             if not pc:
                 continue
-            listed = allm.get(cid, ())
+            listed = allm.get(own, ())
             if isinstance(listed, (str, int)):
                 listed = [listed]
             pairs = listed.items() if isinstance(listed, Mapping) else ((u, 1) for u in listed)
@@ -400,7 +510,8 @@ class EventTables:
         unit_classes = {c for comp in comps.values() for c in comp}
         spells = {c: s - unit_classes for c, s in spells.items() if c not in comps and s - unit_classes}
         ignore = base.ignore if base is not None else frozenset()
-        return cls(comps, spells, children, ignore)
+        costs = base.variant_costs if base is not None else {}
+        return cls(comps, spells, children, ignore, aliases=aliases, variant_costs=costs)
 
     @classmethod
     def for_engine(cls, spawn_primary: Mapping[str, Any], *,

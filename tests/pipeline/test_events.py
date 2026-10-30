@@ -501,7 +501,10 @@ IDS = {"Skeletons": 6, "SkeletonArmy": 21, "Witch": 20, "Golem": 22, "Log": 7, "
 
 def test_tables_from_the_generated_spawn_table():
     table = EV.load_spawn_children()
-    assert table["source"]["file"].endswith("cards.json")
+    # N01: generated from the 16.402.22 table data/engine.json selects; 15.535 only adds
+    assert table["source"]["version"] == "cards-160402017-20261019.1"
+    assert [t["version"] for t in table["source"]["tables"]] == ["cards-160402017-20261019.1",
+                                                                  "cards-15535.1"]
     tb = EV.EventTables.from_names(table, IDS)
     assert set(tb.compositions) == {2, 6, 20, 21, 22, 23, 24}         # cards IDS lacks are skipped
     assert tb.compositions[6] == {"Skeleton": 3} and tb.compositions[21] == {"Skeleton": 15}
@@ -533,6 +536,244 @@ def test_tables_with_the_vision_class_list():
             katacr_spells.setdefault(entry["card"], set()).add(name)
     for card, names in EV.KATACR_SPELL_CLASSES.items():
         assert set(names) <= katacr_spells.get(card, set()), card
+
+
+# ---------------------------------------------------------------------------
+# N01 (docs/NEW_CARDS_PLAN.md 1.7, 2.1): Heal Spirit, the Spirit Empress's forms, the
+# Goblin Barrel's goblins, and the generator that writes them
+# ---------------------------------------------------------------------------
+HEAL, EMPRESS, EMPRESS_NORMAL, EMPRESS_MOUNTED, GOBLIN_BARREL = 40, 41, 42, 43, 30
+N01_IDS = {**IDS, "Heal": HEAL, "MergeMaiden": EMPRESS, "MergeMaiden_Normal": EMPRESS_NORMAL,
+           "MergeMaiden_Mounted": EMPRESS_MOUNTED}
+
+
+def started(tb: EV.EventTables) -> EV.EventDeriver:
+    d = EV.EventDeriver(tb)
+    d.update([], 0)            # the battle starts on an empty board
+    return d
+
+
+def without_n01(table: dict) -> dict:
+    """The shipped spawn table as the 15.535 extraction had Heal and the Spirit Empress."""
+    old = json.loads(json.dumps(table))
+    del old["compositions"]["Heal"], old["variants"]
+    return old
+
+
+def test_a_heal_spirit_track_is_a_heal_play():
+    table = EV.load_spawn_children()
+    assert table["compositions"]["Heal"] == {"HealSpirit": 1}
+    tb = EV.EventTables.from_names(table, N01_IDS)
+    assert tb.compositions[HEAL] == {"HealSpirit": 1} and HEAL not in tb.spells
+    assert (tb.kind_of(HEAL), tb.unit_cards("HealSpirit"), tb.units_per_play(HEAL)) == ("unit", (HEAL,), 1)
+    d = started(tb)
+    ev = d.update([tk(1, "HealSpirit", E, 9000, 12000, 100, 101)], 101)
+    assert [(p.card, p.kind, p.tick, p.exec_tick, p.uids) for p in ev.opp_plays] == [
+        (HEAL, "unit", 100, 100, [1])]
+    assert d.card_of(1) == HEAL and d.opp_stats.unknown == {}
+    # before N01 the only Heal class was the card's name, which no detector label is
+    tb_old = EV.EventTables.from_names(without_n01(table), N01_IDS)
+    assert tb_old.spells[HEAL] == frozenset({"Heal"}) and tb_old.unit_cards("HealSpirit") == ()
+    d = started(tb_old)
+    assert d.update([tk(1, "HealSpirit", E, 9000, 12000, 100, 101)], 101).opp_plays == []
+    assert d.opp_stats.unknown == {"HealSpirit": 1}
+
+
+def test_spirit_empress_forms_are_reported_as_the_card_at_their_cost():
+    table = EV.load_spawn_children()
+    assert table["variants"] == {"MergeMaiden": {"MergeMaiden_Mounted": 6, "MergeMaiden_Normal": 3}}
+    tb = EV.EventTables.from_names(table, N01_IDS)
+    assert tb.compositions[EMPRESS] == {"MergeMaiden_Mounted": 1, "MergeMaiden_Normal": 1}
+    assert EMPRESS_NORMAL not in tb.compositions and EMPRESS_MOUNTED not in tb.compositions
+    assert EMPRESS not in tb.spells and tb.kind_of(EMPRESS) == "unit"
+    assert tb.aliases == {EMPRESS_NORMAL: EMPRESS, EMPRESS_MOUNTED: EMPRESS}
+    assert (tb.reported_card(EMPRESS_MOUNTED), tb.reported_card(EMPRESS), tb.reported_card(HEAL)) == (
+        EMPRESS, EMPRESS, HEAL)
+    assert tb.unit_cards("MergeMaiden_Mounted") == tb.unit_cards("MergeMaiden_Normal") == (EMPRESS,)
+    assert tb.variant_costs == {EMPRESS: {"MergeMaiden_Mounted": 6, "MergeMaiden_Normal": 3}}
+    assert (tb.play_cost(EMPRESS, "MergeMaiden_Mounted"), tb.play_cost(EMPRESS, ["MergeMaiden_Normal"])) == (6, 3)
+    assert tb.play_cost(EMPRESS, {"MergeMaiden_Normal", "MergeMaiden_Mounted"}) == 6   # both: the dearer
+    assert tb.play_cost(EMPRESS) is None and tb.play_cost(HEAL, "HealSpirit") is None
+    assert tb.units_per_play(EMPRESS) is None             # one form, which one unknown before it lands
+    assert tb.card_guess("MergeMaiden_Normal") == EMPRESS
+
+    d = started(tb)
+    ev = d.update([tk(1, "MergeMaiden_Mounted", E, 9000, 9000, 200, 201)], 201)
+    (play,) = ev.opp_plays
+    assert (play.card, play.kind, play.tick, play.uids) == (EMPRESS, "unit", 200, [1])
+    assert tb.play_cost(play.card, ["MergeMaiden_Mounted"]) == 6
+    ev = d.update([tk(2, "MergeMaiden_Normal", E, 3500, 9000, 600, 601)], 601)
+    assert [(p.card, p.tick, tb.play_cost(p.card, "MergeMaiden_Normal")) for p in ev.opp_plays] == [
+        (EMPRESS, 600, 3)]
+    assert [d.card_of(u) for u in (1, 2)] == [EMPRESS, EMPRESS]
+
+    # a catalogue without the card itself: the forms stay cards of their own, as before N01
+    ids = {k: v for k, v in N01_IDS.items() if k != "MergeMaiden"}
+    tb2 = EV.EventTables.from_names(table, ids)
+    assert tb2.compositions[EMPRESS_MOUNTED] == {"MergeMaiden_Mounted": 1} and tb2.aliases == {}
+    assert tb2.unit_cards("MergeMaiden_Mounted") == (EMPRESS_MOUNTED,) and tb2.variant_costs == {}
+
+
+def test_spirit_empress_forms_stay_her_on_the_engine_tables():
+    # E06's spawn_primary.json lists the forms as TROOP cards with primary units of their own
+    names = [row[0] for row in DEFAULT_CATALOGUE] + [f"Card{i}" for i in range(len(DEFAULT_CATALOGUE), 44)]
+    for name, cid in (("Heal", HEAL), ("MergeMaiden", EMPRESS), ("MergeMaiden_Normal", EMPRESS_NORMAL),
+                      ("MergeMaiden_Mounted", EMPRESS_MOUNTED)):
+        names[cid] = name
+    raw = {"card_names": names,
+           "primary": {str(EMPRESS_NORMAL): "MergeMaiden_Normal", str(EMPRESS_MOUNTED): "MergeMaiden_Mounted",
+                       str(HOG): "HogRider"},
+           "all": {str(EMPRESS_NORMAL): ["MergeMaiden_Normal"], str(EMPRESS_MOUNTED): ["MergeMaiden_Mounted"],
+                   str(HOG): ["HogRider"]}}
+    tb = EV.EventTables.for_engine(raw)                 # + data/vision/spawn_children.json
+    assert EMPRESS_NORMAL not in tb.compositions and EMPRESS_MOUNTED not in tb.compositions
+    assert tb.compositions[EMPRESS] == {"MergeMaiden_Mounted": 1, "MergeMaiden_Normal": 1}
+    assert tb.unit_cards("MergeMaiden_Normal") == (EMPRESS,) and tb.compositions[HEAL] == {"HealSpirit": 1}
+    assert tb.aliases == {EMPRESS_NORMAL: EMPRESS, EMPRESS_MOUNTED: EMPRESS}
+    assert tb.play_cost(EMPRESS, "MergeMaiden_Normal") == 3 and tb.compositions[HOG] == {"HogRider": 1}
+    d = started(tb)
+    ev = d.update([tk(1, "MergeMaiden_Normal", E, 14500, 9000, 300, 301)], 301)
+    assert [(p.card, p.kind) for p in ev.opp_plays] == [(EMPRESS, "unit")]
+    # without base tables nothing is known of forms: each is its own card, as before
+    plain = EV.EventTables.from_spawn_primary(raw)
+    assert plain.unit_cards("MergeMaiden_Normal") == (EMPRESS_NORMAL,) and plain.aliases == {}
+
+
+def test_goblin_barrel_goblins_are_its_children_on_screen_and_in_the_engine():
+    table = EV.load_spawn_children()
+    assert table["spell_children"]["GoblinBarrel"] == ["BarrelGoblin", "Goblin"]
+    tb = EV.EventTables.from_names(table, N01_IDS)
+    for cls in ("goblin-barrel", "GoblinBarrelSpell", "GoblinBarrel"):
+        assert tb.explains(cls, "Goblin") and tb.explains(cls, "BarrelGoblin"), cls
+    d = started(tb)
+    ev = d.update([tk(1, "goblin-barrel", E, 9000, 26000, 300, 301)], 301)
+    assert [(p.card, p.kind) for p in ev.opp_plays] == [(GOBLIN_BARREL, "spell")]
+    # KataCR boxes the 16.402 BarrelGoblin as `goblin`; an engine state names it BarrelGoblin
+    landed = [tk(2 + i, cls, E, 8500 + 500 * i, 26500, 322, 323)
+              for i, cls in enumerate(["Goblin", "Goblin", "BarrelGoblin"])]
+    assert d.update([tk(1, "goblin-barrel", E, 9000, 26000, 300, 320)] + landed, 323).opp_plays == []
+    assert [d.card_of(u) for u in (2, 3, 4)] == [GOBLIN_BARREL] * 3
+    assert d.opp_stats.children == 3 and d.opp_stats.unknown == {}
+
+
+@pytest.mark.parametrize("vision_classes", [False, True])
+def test_n01_changes_nothing_else_in_the_tables(vision_classes):
+    path = ROOT / "data" / "vision" / "classes.json"
+    if vision_classes and not path.exists():
+        pytest.skip("data/vision/classes.json (E16) is not there")
+    kw = {}
+    if vision_classes:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        kw = {"class_of": EV.unit_class_map(doc), "ignore": EV.cardless_classes(doc)}
+    new = EV.load_spawn_children()
+    ids = {name: i for i, name in enumerate(sorted(new["kinds"]))}     # every card of the table
+    a = EV.EventTables.from_names(new, ids, **kw)
+    b = EV.EventTables.from_names(without_n01(new), ids, **kw)
+    n01 = {ids[n] for n in ("Heal", "MergeMaiden", "MergeMaiden_Normal", "MergeMaiden_Mounted")}
+
+    def but_n01(m):
+        return {k: v for k, v in m.items() if k not in n01}
+
+    assert but_n01(a.compositions) == but_n01(b.compositions)
+    assert but_n01(a.spells) == but_n01(b.spells)
+    assert a.children == {k: v for k, v in b.children.items() if k != "Heal"}   # Heal: no spell now
+    assert a.ignore == b.ignore and b.aliases == {} and b.variant_costs == {}
+    assert a.aliases == {ids["MergeMaiden_Normal"]: ids["MergeMaiden"],
+                         ids["MergeMaiden_Mounted"]: ids["MergeMaiden"]}
+
+
+def test_aliases_and_variant_costs_are_checked():
+    tb = EV.EventTables({41: {"MergeMaiden_Normal": 1, "MergeMaiden_Mounted": 1}}, aliases={"42": "41"},
+                        variant_costs={"41": {"MergeMaiden_Normal": 3}})          # JSON-shaped
+    assert tb.aliases == {42: 41} and tb.variant_costs == {41: {"MergeMaiden_Normal": 3}}
+    assert tb.play_cost(41, "MergeMaiden_Mounted") is None                         # no cost given
+    assert EV.EventTables({1: {"A": 1}}) == EV.EventTables({1: {"A": 1}}, aliases={}, variant_costs={})
+    with pytest.raises(ValueError):
+        EV.EventTables({41: {"A": 1}, 42: {"B": 1}}, aliases={42: 41})   # a form with a composition
+    with pytest.raises(ValueError):
+        EV.EventTables({41: {"A": 1}}, aliases={41: 41})
+    with pytest.raises(ValueError):
+        EV.EventTables({40: {"A": 1}}, aliases={42: 41, 41: 40})         # a form of a form
+    with pytest.raises(ValueError):
+        EV.EventTables({41: {"A": 1}}, variant_costs={41: {"B": 3}})     # a class it does not deploy
+    with pytest.raises(ValueError):
+        EV.EventTables({41: {"A": 1}}, variant_costs={42: {"A": 3}})     # a card with no composition
+
+
+def mini_table(version: str, *, barrel_spawns: str = "BarrelGoblin", old: bool = False) -> dict:
+    """A card table in RoyaleSim's cards.json layout, just big enough for the generator."""
+    projectile = "GoblinBarrelSpellOld" if old else "GoblinBarrelSpell"
+    units = {"Witch": {"spawner": {"character": "Skeleton"}}, "Skeleton": {}, "Goblin": {},
+             "BarrelGoblin": {}, "HealSpirit": {}, "RageBottle": {}, "MergeMaiden_Normal": {},
+             "MergeMaiden_Mounted": {}}
+    if old:
+        units["Boost"] = {"death_spawn": {"character": "Skeleton"}}       # gone from the new table
+    cards = [
+        {"name": "Witch", "kind": "troop", "elixir": 5, "summon_character": "Witch", "count": 2 if old else 1},
+        {"name": "GoblinBarrel", "kind": "spell", "elixir": 3, "projectile": {"name": projectile}},
+        {"name": "Heal", "kind": "spell", "elixir": 1,
+         "spell": {"spell_as_deploy": True, "summon": {"character": "HealSpirit", "count": 1}}},
+        {"name": "Rage", "kind": "spell", "elixir": 2,
+         "spell": {"spell_as_deploy": False, "summon": {"character": "RageBottle", "count": 1}}},
+        {"name": "MergeMaiden", "kind": "spell", "elixir": 6,
+         "spell": {"variant": {"options": [{"trigger_milli": 6000, "card": "MergeMaiden_Mounted"},
+                                           {"trigger_milli": 3000, "card": "MergeMaiden_Normal"}]}}},
+        {"name": "MergeMaiden_Normal", "kind": "troop", "elixir": 3, "summon_character": "MergeMaiden_Normal"},
+        {"name": "MergeMaiden_Mounted", "kind": "troop", "elixir": 6, "summon_character": "MergeMaiden_Mounted"},
+    ]
+    return {"version": version, "cards": cards, "units": units, "hero_forms": [],
+            "projectiles": {projectile: {"spawn_character": barrel_spawns}}, "area_effect_objects": {}}
+
+
+def test_generator_reads_heal_the_variants_and_the_barrel_goblin():
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    doc = VSC.build(mini_table("cards-new.1"), files=["new.json"])
+    assert doc["source"] == {"file": "new.json", "version": "cards-new.1", "package": "royalesim==0.1.42"}
+    assert doc["kinds"]["Heal"] == "spell" and doc["compositions"]["Heal"] == {"HealSpirit": 1}
+    assert "Rage" not in doc["compositions"] and doc["spell_children"]["Rage"] == ["RageBottle"]
+    assert doc["variants"] == {"MergeMaiden": {"MergeMaiden_Mounted": 6, "MergeMaiden_Normal": 3}}
+    assert "MergeMaiden" not in doc["compositions"]
+    assert doc["compositions"]["MergeMaiden_Normal"] == {"MergeMaiden_Normal": 1}
+    assert doc["spell_objects"]["GoblinBarrel"] == ["GoblinBarrelSpell"]
+    assert doc["spell_children"]["GoblinBarrel"] == ["BarrelGoblin", "Goblin"]      # LOOKS_LIKE
+    assert doc["children"] == {"Witch": ["Skeleton"]}
+    # what the generator writes is what the deriver needs
+    tb = EV.EventTables.from_names(doc, {"Heal": HEAL, "MergeMaiden": EMPRESS, "GoblinBarrel": GOBLIN_BARREL})
+    assert tb.unit_cards("HealSpirit") == (HEAL,) and tb.unit_cards("MergeMaiden_Mounted") == (EMPRESS,)
+    assert tb.play_cost(EMPRESS, "MergeMaiden_Mounted") == 6 and tb.explains("goblin-barrel", "Goblin")
+
+
+def test_generator_keeps_what_an_older_table_has_and_the_newer_lacks():
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    new = mini_table("cards-new.1")
+    old = mini_table("cards-old.1", barrel_spawns="Goblin", old=True)
+    doc = VSC.build([new, old], files=["new.json", "old.json"])
+    assert doc["source"]["version"] == "cards-new.1" and doc["source"]["file"] == "new.json"
+    assert doc["source"]["tables"] == [{"version": "cards-new.1", "file": "new.json"},
+                                       {"version": "cards-old.1", "file": "old.json"}]
+    assert doc["compositions"]["Witch"] == {"Witch": 1}                  # the first table's
+    assert doc["children"] == {"Boost": ["Skeleton"], "Witch": ["Skeleton"]}   # kept from the old
+    assert doc["spell_objects"]["GoblinBarrel"] == ["GoblinBarrelSpell", "GoblinBarrelSpellOld"]
+    assert doc["spell_children"]["GoblinBarrel"] == ["BarrelGoblin", "Goblin"]
+    assert VSC.build(old)["spell_children"]["GoblinBarrel"] == ["Goblin"]        # 15.535-like alone
+
+
+def test_generator_finds_a_table_in_derived_or_in_the_extension(tmp_path):
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    pkg = tmp_path / "royalesim"
+    derived = pkg / "data" / "derived"
+    derived.mkdir(parents=True)
+    (derived / "cards.json").write_text(json.dumps({"version": "cards-15535.1", "cards": []}), encoding="utf-8")
+    (derived / "cards-x.json").write_text(json.dumps({"version": "cards-x.1", "cards": []}), encoding="utf-8")
+    doc, where = VSC.find_table("cards-x.1", pkg)
+    assert doc["version"] == "cards-x.1" and where == "royalesim/data/derived/cards-x.json"
+    # a wheel ships no JSON copy of 16.402.22; its extension carries it as text
+    text = json.dumps({"version": "cards-160402017-20261019.1", "cards": [1]}).encode("utf-8")
+    (pkg / "royalesim.pyd").write_bytes(b"MZ\x00\x01binary{x}" + text + b"\x00\xffmore")
+    doc, where = VSC.find_table("cards-160402017-20261019.1", pkg)
+    assert doc["cards"] == [1] and where == "royalesim/royalesim.pyd (its compiled-in copy)"
+    with pytest.raises(SystemExit):
+        VSC.find_table("cards-none.1", pkg)
 
 
 def test_events_imports_only_the_standard_library_and_its_package():
