@@ -55,10 +55,10 @@ an existing best.pt or args.json in DIR needs --force.
 RESET-COLD: the named cards' card_emb rows (and, --live-compat, their unit_emb rows; --units
 for named unit tokens otherwise) become the unknown row; every other row is unchanged, which
 the same probe checks on rows without them. It fixes a card no row ever trained, such as
-Minion Giant (no IL_Replay key reaches it), whose row is its random N(0, 1) start (6.2). Hog
-2.6 cards, which every row trains, are refused unless --allow-deck; the record says what each
-reset row was (the unknown row, marked cold, or its own row), and the command line names the
-cards that had their own row and no cold mark.
+Minion Giant (no IL_Replay row trains it: no corpus deck checked has the card), whose row is
+its random N(0, 1) start (6.2). Hog 2.6 cards, which every row trains, are refused unless
+--allow-deck; the record says what each reset row was (the unknown row, marked cold, or its
+own row), and the command line names the cards that had their own row and no cold mark.
 
 CHECK: REFUSED when rs_checkpoint refuses it (the fix: grow when every name it knows is still
 in the engine, which added or moved some, as rs_checkpoint's refusal says; else rebuild and

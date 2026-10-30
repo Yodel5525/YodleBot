@@ -2,10 +2,15 @@
   "_comment": [
     "IL_Replay card keys that data/cards/replay_cards.json (royaleimitate 0.2.15, vendored unchanged) lacks. tools/rs_cards.py load() adds them to it.",
     "key: the IL_Replay (RoyaleAPI) card key without its -ev1 / -hero form suffix. name: the RoyaleSim catalogue name, which is row[0] of catalogue_json().",
-    "verified: false until `tools/rs_cards.py --coverage` finds the key in the IL_Replay corpus decks. Set it to true then. The keys come from the RoyaleAPI deck strings in data/ladder/. The names come from the engine: the catalogue has DarkMagic, GiantBuffer and MergeMaiden (tools/rs_cards.py --catalogue, and the engine-marked test in tests/pipeline/test_rs_cards.py).",
+    "verified: false until `tools/rs_cards.py --coverage` finds the key in the IL_Replay corpus decks. Set it to true then. The keys come from the RoyaleAPI deck strings in data/ladder/. The names come from the engine: the catalogue has DarkMagic, GiantBuffer, MergeMaiden and MinionGiant (tools/rs_cards.py --catalogue, and the engine-marked test in tests/pipeline/test_rs_cards.py).",
     "An extra may not give a key that the vendored file already maps to a different name. HASTYCR_CARD_EXTRAS=0 leaves all of them out."
   ],
   "cards": {
+    "minion-giant": {
+      "name": "MinionGiant",
+      "verified": false,
+      "evidence": "Minion Giant, released 2026-09-07 (data/game_versions.json). Key: RoyaleAPI's key for the card, what tools/cr_api.py slug('Minion Giant') gives; `tools/game_update.py check` on the owner's PC proposed exactly \"minion-giant\": {\"name\": \"MinionGiant\", \"verified\": false} as its auto match from the official /cards roster (exactly one catalogue name equals the display name in CamelCase, at the same elixir). Name: MinionGiant, a 4-elixir Rare troop in every royalesim 0.1.42 card table but cards-2018 (table index 144 in cards-15535.1, 101 in the 16.402 tables; its catalogue id depends on the engine's table). Not verified: the 20,000 matches `tools/rs_cards.py --coverage --parts 4` read on 2026-10-29 (4 of the 104 parts) all mapped without a minion-giant key, so none of them has the card. The corpus is believed to predate it, but it was downloaded about 2026-10-09, after the release, and the other parts are unchecked. A full --coverage run settles it: its line 'extra minion-giant: in N decks'; N > 0 means set verified true, and rs_rows / deck_stats then keep the matches with the card that they skipped before."
+    },
     "rune-giant": {
       "name": "GiantBuffer",
       "verified": true,

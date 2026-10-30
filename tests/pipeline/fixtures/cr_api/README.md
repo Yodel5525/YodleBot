@@ -34,7 +34,7 @@ what `evolutionLevel` on a battle-log card means. U03's `probe` checks them on t
 
 | File | What |
 |---|---|
-| `cards.json` | `/v1/cards`: 8 cards (Minion Giant has no key in `data/cards`) and 1 support item |
+| `cards.json` | `/v1/cards`: 8 cards (Minion Giant is the unmapped card once the test removes the `minion-giant` extra of `data/cards`) and 1 support item |
 | `pol_page1.json`, `pol_page2.json` | the Path of Legends board in two pages, players A and B, then C |
 | `battlelog_a.json` | player A: a ranked win over B, a friendly, a ranked loss to D (not on the board) |
 | `battlelog_b.json` | player B: the same battle with A, seen from B's side, and a 2v2 |

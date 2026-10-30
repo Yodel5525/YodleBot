@@ -275,7 +275,7 @@ def test_ready_pc_passes_every_check_and_exits_0(sc, world, capsys):
     assert royal["fingerprint"]["catalogue"] == len(CATALOGUE)
     assert royal["fingerprint"]["id"] == world.engine_id
     assert royal["sources"]["card_table"] == "data/engine.json"
-    assert checks["cards"]["data"]["entries"] == 122
+    assert checks["cards"]["data"]["entries"] == 123
     assert checks["data"]["data"]["spawn_table"]["current"] is True
     assert checks["game"]["data"]["version_code"] == 160635001
     assert checks["game"]["data"]["version_name"] == "16.635.1"
@@ -501,10 +501,10 @@ def test_card_map_has_the_vendored_hash_and_the_extras(sc, world, monkeypatch):
     assert check.data["vendored"] == "data/cards/replay_cards.json"
     assert check.data["vendored_sha256"] == VENDORED_SHA256
     assert check.data["vendored_entries"] == 119
-    assert check.data["entries"] == 122
-    assert check.data["extras"] == ["rune-giant", "spirit-empress", "void"]
+    assert check.data["entries"] == 123
+    assert check.data["extras"] == ["minion-giant", "rune-giant", "spirit-empress", "void"]
     assert check.detail.startswith("data/cards/replay_cards.json: 119 keys at the vendored SHA-256")
-    assert "card map 122 keys (extras: rune-giant, spirit-empress, void)" in check.detail
+    assert "card map 123 keys (extras: minion-giant, rune-giant, spirit-empress, void)" in check.detail
     monkeypatch.setenv("HASTYCR_CARD_EXTRAS", "0")
     alone = sc.check_cards()
     assert alone.status == "PASS"

@@ -37,7 +37,54 @@ kept, so a regeneration never loses an entry. Names are RoyaleSim card and unit 
                     ability creates, by the champion's unit (ability.effect.unit, unless the
                     card deploys that unit itself, as Goblinstein's tether names its doctor):
                     LittlePrince -> ChampionGuard, SkeletonKing -> SkeletonKingSkeleton,
-                    MightyMiner -> MightyMinerBomb
+                    MightyMiner -> MightyMinerBomb. Then (SPAWNERS below) the newer spawner
+                    fields, the evolution records, the hero forms' abilities, and each
+                    unit's descendants.
+    child_reach     unit -> {child unit: millitiles}: how far from it a child its attack
+                    projectile spawns can land (REACH below): Mortar_EV1 {Goblin: 13600},
+                    WitchMother {VoodooHog: 7500}. EventTables reads it per parent and child
+                    class, a reach beyond events.EventConfig.child_radius_mt for that child
+                    only (the Witch's skeletons and bats keep the radius).
+
+SPAWNERS (16.402's newer data). A unit record's fields interval_spawner (the reworked
+Furnace's Fire Spirits every 5 s for its whole life, the evolved Goblin Giant's Goblins below
+half HP), life_state_spawner (the Goblin Hut's thrower), transform_at_hp (the Goblin
+Demolisher's kamikaze form, the Cannon Cart's broken cannon), stage_schedule (the Goblin Rocket
+Silo's stages; "into" names the unit) and action_graph (its "spawns": "CharacterType:X" is a
+unit, "ProjectileType:X" / "AreaEffectType:X" an object followed for what it spawns) are read
+like the older ones. EVOLUTIONS ("evolutions"): the engine builds an evolved unit from its
+evolution record (royalesim card.rs load_evolution), so each record is read by the unit it
+summons, its own unit fields (GoblinGiant_EV1's interval spawner and spear goblin riders,
+Witch_EV1's skeleton spawner, Wallbreaker_EV1's death spawn exist only there) and its evo_*
+blocks' EVO_UNIT_KEYS (evo_soul_drain.unit, evo_army.spectral, evo_ghost.left / .right, ...),
+EVO_RECORD_KEYS (the evolved Skeleton Barrel's dropped barrels) and projectile; an evolved
+spell's units are its card's spell_children (the evolved Goblin Barrel's decoy GoblinDummy).
+Left out, as units the evolution does not create: form_of, cloned_version, evo_ghost.clone (the
+copy a Clone spell makes), evo_army.general (deployed with the play: a composition's, not a
+child) and evo_fall.grounded (the evolved Royal Hog itself once it lands: a child of the same
+vision class would explain a second Royal Hogs play away). HEROES: the units a hero form's
+ability creates (ABILITY_UNIT_KEYS anywhere in ability.effect: the hero Musketeer's turret, the
+hero Balloon's trooper, the hero Dark Prince's walking form and mount; a spell hero's go to
+its card's spell_children), unless it is the hero's own unit. RECORDS: a troop or building
+record a hero form (tables.units) or an evolution (evo_barrel.extra) carries inside its own is
+a unit as well (the hero Balloon's death spawn BalloonHero_Bomb), with children of its own (the
+dropped barrels' Skeletons); data/vision/classes.json counts the same records
+(tools/vision_classes.table_unit_records). DESCENDANTS: each unit also lists what its children
+create, at unit level (SkeletonBalloon -> SkeletonContainerNew -> Skeleton gives SkeletonBalloon
+-> Skeleton: the falling barrel has no detector label, so on screen the skeletons' parent is the
+balloon); a spell's spawns list theirs too. REACH: a child created by its parent's attack
+projectile lands where the shot does, not next to the parent: the evolved Mortar's shell drops
+a Goblin up to its range (11.5 tiles) away, every shot of its 30 s life, and the Mother Witch's
+cursed victim turns into a hog where it dies. child_reach gives such a parent, for each
+shot-borne child (and what that child creates in turn, and its look-alike), its range_milli +
+its collision_radius_milli + REACH_SLACK_MT. merge() takes each (parent, child) reach from the
+first table that has it, and works out the descendants (and the reach's) again over the merged
+relations, so a chain split across tables keeps its indirect relation. Not read: an evolved or
+hero spell's own projectile and area names (spell_objects keeps the base card's: the detector
+names an evolved spell by its KataCR label, zap-evolution, and StateTracks an engine spell by
+its card, whose least class name DummyZap_EV1_Visual would change), and summon_members (the Three Musketeers deploy C1, C2 and
+C3 once each, but compositions keeps summon_character x count + second_summon, {C1: 3, C2: 1}:
+changing an entry is for its own change, docs/NEW_CARDS_PLAN.md 1.7; this one only adds).
 
 VISION LOOK-ALIKES (LOOKS_LIKE). A unit the detector can only box as another unit's class
 is listed with that unit wherever it is created. 16.402's Goblin Barrel spawns BarrelGoblin
@@ -50,10 +97,11 @@ is boxed as GiantSkeletonBomb, so they create it too. (ram-rider's "also" RamRid
 look-alike: it rides the Ram the label already names, and a Ram creating Ram would explain
 a second Ram Rider away.)
 
-Not read: what hero abilities and evolution blocks create (the hero Musketeer's turret, the
-evolved Skeleton Army's General); no detector label exists for those units yet, and some
-name their own hero's unit (the hero Dark Prince's walking form), which as a child would
-explain a second play of the same card away.
+Most of the units heroes and evolutions create have no detector label yet (the hero
+Musketeer's turret, the evolved Wall Breaker's runner); their entries explain them once one
+exists. tests/pipeline/test_events_spawners.py checks that no entry is a child of its own
+parent's vision class (data/vision/classes.json), which would explain a second play of the
+same card away.
 """
 from __future__ import annotations
 
@@ -61,7 +109,7 @@ import argparse
 import importlib.util
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -80,11 +128,33 @@ LOOKS_LIKE: dict[str, str] = {"BarrelGoblin": "Goblin", "BalloonBomb": "GiantSke
 EXTENSION_SUFFIXES = (".so", ".pyd", ".dylib")
 
 UNIT_KEYS = {"character", "character2", "spawn_character", "death_spawn_character",
-             "summon_character", "attached_character", "spawns", "spawn", "morph"}
+             "summon_character", "attached_character", "spawns", "spawn", "morph", "into"}
 SKIP = {"raw", "defaults_applied", "level_scaling", "overlays", "source_table"}
 UNIT_FIELDS = ("spawner", "death_spawn", "death_spawn_projectile", "spawn_area_object",
                "death_area_effect", "projectile", "attached_character", "area_effect_on_hit",
-               "spawn_pathfind")
+               "spawn_pathfind",
+               # SPAWNERS (module doc): 16.402's newer fields
+               "interval_spawner", "life_state_spawner", "transform_at_hp", "stage_schedule",
+               "action_graph")
+#: Action-graph type prefixes ("CharacterType:FireSpirits") -> what the name is: a unit, a
+#: projectile or an area-effect object.
+TYPE_PREFIXES = {"CharacterType:": "unit", "ProjectileType:": "projectile",
+                 "AreaEffectType:": "area"}
+#: Keys of an evolution's evo_* block naming a unit the evolved unit creates (evo_soul_drain.unit,
+#: evo_drill.goblin, evo_army.spectral, evo_ghost.left / .right, evo_rage_ghost.ghost,
+#: evo_furnace.character); not clone, general or grounded (module doc).
+EVO_UNIT_KEYS = frozenset({"unit", "goblin", "spectral", "left", "right", "ghost", "character"})
+#: ... holding the record of a unit it creates (evo_barrel.extra / .death, the dropped barrels).
+EVO_RECORD_KEYS = frozenset({"extra", "death"})
+#: Keys anywhere in a hero's ability.effect naming a unit the ability creates (effect.unit,
+#: .air_unit, .mount, .active, cube.unit, spawns[].unit).
+ABILITY_UNIT_KEYS = frozenset({"unit", "air_unit", "mount", "active"})
+#: Source tables of a troop or building record (its "source_table"), as tools/vision_classes reads.
+RECORD_TABLES = ("characters", "buildings")
+#: child_reach (module doc, REACH) beyond a shooter's range and its own collision radius: its
+#: target's collision radius (a princess tower's 1000, a king tower's 1400) and the error of a
+#: birth point the detector reads.
+REACH_SLACK_MT = 1500
 
 
 def package_dir() -> Path:
@@ -134,6 +204,47 @@ def find_table(version: str, pkg: str | Path | None = None) -> tuple[dict, str]:
                      f"royalesim's extension in {pkg}; pass --cards PATH")
 
 
+def _is_record(obj: Any) -> bool:
+    """A troop or building record: a mapping with a RECORD_TABLES source_table and a name."""
+    return (isinstance(obj, Mapping) and obj.get("source_table") in RECORD_TABLES
+            and isinstance(obj.get("name"), str) and bool(obj["name"]))
+
+
+def _records_in(obj: Any):
+    """Every troop or building record inside `obj` (obj included), depth first: what
+    tools/vision_classes._embedded_records finds in a hero form or an evolution."""
+    if isinstance(obj, Mapping):
+        if _is_record(obj):
+            yield obj
+        for v in obj.values():
+            yield from _records_in(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _records_in(v)
+
+
+def embedded_records(data: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """name -> the troop or building records hero forms and evolutions carry inside their own
+    (module doc, RECORDS) that the units table lacks: BalloonHero_Bomb, MusketeerTurret,
+    SkeletonBalloonEvoDummyAeO_EXTRA. The first record of a name is kept."""
+    units = data.get("units") or {}
+    out: dict[str, Mapping[str, Any]] = {}
+    for group in ("evolutions", "hero_forms"):           # tools/vision_classes' order
+        for form in data.get(group) or ():
+            for rec in _records_in(form):
+                if rec["name"] not in units:
+                    out.setdefault(rec["name"], rec)
+    return out
+
+
+def _typed(name: str) -> tuple[str | None, str]:
+    """("unit" | "projectile" | "area" | None, the name without its TYPE_PREFIXES prefix)."""
+    for prefix, kind in TYPE_PREFIXES.items():
+        if name.startswith(prefix):
+            return kind, name[len(prefix):]
+    return None, name
+
+
 class Walker:
     """Collects the unit names an object spawns, following projectile and area names."""
 
@@ -141,10 +252,11 @@ class Walker:
         self.units = data["units"]
         self.heroes = {h["summon_character"]: h for h in data.get("hero_forms", [])
                        if h.get("summon_character")}
+        self.records = embedded_records(data)
         self.tables = (("p", data["projectiles"]), ("a", data["area_effect_objects"]))
 
     def is_unit(self, name: str) -> bool:
-        return name in self.units or name in self.heroes
+        return name in self.units or name in self.heroes or name in self.records
 
     def walk(self, obj, found: set, seen: set, key: str | None = None):
         if isinstance(obj, dict):
@@ -159,14 +271,18 @@ class Walker:
             for v in obj:
                 self.walk(v, found, seen, key)
         elif isinstance(obj, str):
-            s = obj.split(":", 1)[1] if obj.startswith("CharacterType:") else obj
-            if key in UNIT_KEYS and self.is_unit(s):
+            kind, s = _typed(obj)
+            if kind in (None, "unit") and key in UNIT_KEYS and self.is_unit(s):
                 found.add(s)
             else:
-                self.follow(s, found, seen)
+                self.follow(s, found, seen, kind)
 
-    def follow(self, name, found: set, seen: set) -> None:
+    def follow(self, name, found: set, seen: set, kind: str | None = None) -> None:
+        """Walk the projectile and the area-effect object named `name` (only the one a
+        "ProjectileType:" / "AreaEffectType:" prefix said, `kind`), once each per walk."""
         for tag, table in self.tables:
+            if kind == "projectile" and tag != "p" or kind == "area" and tag != "a":
+                continue
             if isinstance(name, str) and name in table and (tag, name) not in seen:
                 seen.add((tag, name))
                 self.walk(table[name], found, seen)
@@ -202,17 +318,70 @@ def morph_of(unit: Mapping[str, Any] | None) -> str | None:
     return str(into) if into else None
 
 
-def ability_units(card: Mapping[str, Any], deployed: Mapping[str, Any]) -> set[str]:
-    """Units a champion card's ability creates (ability.effect.unit): the Little Prince's
-    ChampionGuard, the Skeleton King's SkeletonKingSkeleton, the Mighty Miner's
-    MightyMinerBomb. Not a unit the card deploys itself (`deployed`): Goblinstein's tether
-    names its doctor, which is part of the play."""
+def _effect_units(obj: Any, key: str | None = None) -> set[str]:
+    """The strings under ABILITY_UNIT_KEYS anywhere in an ability effect."""
+    if isinstance(obj, Mapping):
+        return set().union(*(_effect_units(v, str(k)) for k, v in obj.items()))
+    if isinstance(obj, (list, tuple)):
+        return set().union(*(_effect_units(v, key) for v in obj))
+    return {obj} if isinstance(obj, str) and obj and key in ABILITY_UNIT_KEYS else set()
+
+
+def ability_units(card: Mapping[str, Any], deployed: Mapping[str, Any] | Iterable[str]) -> set[str]:
+    """Units a champion card's or a hero form's ability creates (ABILITY_UNIT_KEYS in
+    ability.effect): the Little Prince's ChampionGuard, the Skeleton King's
+    SkeletonKingSkeleton, the Mighty Miner's MightyMinerBomb; the hero Musketeer's
+    MusketeerTurret, the hero Dark Prince's DarkPrinceHero_Walking and DarkPrinceHero_Mount, the
+    hero Ice Wizard's IceWizardHero_IceCube (effect.cube.unit). Not a unit the card deploys
+    itself (`deployed`): Goblinstein's tether names its doctor, which is part of the play."""
     ab = card.get("ability")
     effect = ab.get("effect") if isinstance(ab, Mapping) else None
-    unit = effect.get("unit") if isinstance(effect, Mapping) else None
-    if not isinstance(unit, str) or not unit or unit in deployed:
+    if not isinstance(effect, Mapping):
         return set()
-    return {unit}
+    return _effect_units(effect) - set(deployed)
+
+
+def evo_block_units(w: "Walker", evo: Mapping[str, Any]) -> set[str]:
+    """Units the evo_* blocks of evolution record `evo` create (module doc, EVOLUTIONS): an
+    EVO_UNIT_KEYS name (Witch_EV1_Skeleton_Interval, Ghost_EV1_Summon_Left, Wallbreaker_mini),
+    an EVO_RECORD_KEYS record (SkeletonBalloonEvoDummyAeO_EXTRA) and what a block's projectile
+    spawns (the evolved Goblin Barrel's decoy: GoblinDummy)."""
+    found: set = set()
+    seen: set = set()
+    for k, block in evo.items():
+        if not str(k).startswith("evo_") or not isinstance(block, Mapping):
+            continue
+        for kk, v in block.items():
+            if kk in EVO_UNIT_KEYS and isinstance(v, str) and w.is_unit(v):
+                found.add(v)
+            elif kk in EVO_RECORD_KEYS and _is_record(v):
+                found.add(v["name"])
+            elif kk == "projectile" and isinstance(v, str):
+                w.follow(_typed(v)[1], found, seen)
+    return found
+
+
+def _add(table: dict[str, list[str]], name: str, kids: Iterable[str]) -> None:
+    kids = set(kids) - {name}
+    if kids:
+        table[name] = sorted(set(table.get(name, ())) | kids)
+
+
+def with_descendants(children: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
+    """Each unit's children plus everything they create in turn (module doc, DESCENDANTS),
+    at unit level, never the unit itself (a respawn loop)."""
+    out: dict[str, list[str]] = {}
+    for name, kids in children.items():
+        reach: set = set()
+        stack = list(kids)
+        while stack:
+            c = stack.pop()
+            if c not in reach:
+                reach.add(c)
+                stack.extend(children.get(c, ()))
+        reach.discard(name)
+        out[name] = sorted(reach)
+    return out
 
 
 def card_variants(card: Mapping[str, Any], elixir: Mapping[str, Any]) -> dict[str, int]:
@@ -285,9 +454,75 @@ def build_one(data: dict) -> dict:
                                + sorted(n for t, n in seen if t == "a"))
         if found:
             spell_children[name] = sorted(found)
+    # module doc, SPAWNERS: the embedded records, the heroes' abilities, the evolutions
+    for name, rec in sorted(w.records.items()):
+        _add(children, name, w.unit_children(name, rec))
+    for name, hero in sorted(w.heroes.items()):
+        _add(children, name, {u for u in ability_units(hero, {name}) if w.is_unit(u)})
+    spell_forms: dict[str, set] = {}
+    for evo in data.get("evolutions") or ():
+        unit = evo.get("summon_character")
+        if unit:
+            _add(children, unit, w.unit_children(unit, evo) | evo_block_units(w, evo))
+        elif evo.get("form_of") in kinds:                 # an evolved spell: its card's spawns
+            spell_forms.setdefault(evo["form_of"], set()).update(
+                form_spell_units(w, evo) | evo_block_units(w, evo))
+    for hero in data.get("hero_forms") or ():
+        if not hero.get("summon_character") and hero.get("form_of") in kinds:     # a spell hero
+            spell_forms.setdefault(hero["form_of"], set()).update(
+                form_spell_units(w, hero) | {u for u in ability_units(hero, ()) if w.is_unit(u)})
+    for name, units in sorted(spell_forms.items()):
+        _add(spell_children, name, units)
+    # REACH: a shooter's shot-borne spawns land where its shots do
+    child_reach: dict[str, dict[str, int]] = {}
+    shooters = [*w.units.items(), *w.records.items(), *w.heroes.items(),
+                *((e["summon_character"], e) for e in data.get("evolutions") or ()
+                  if e.get("summon_character"))]
+    for name, rec in shooters:
+        got = shot_reach(w, name, rec)
+        if got is not None:
+            mt, kids = got
+            have = child_reach.setdefault(name, {})
+            for kid in kids:
+                have[kid] = max(have.get(kid, 0), mt)
+    # DESCENDANTS: what a unit's (or a spell's) children create counts as its own
+    children = with_descendants(children)
+    for name, kids in spell_children.items():
+        spell_children[name] = sorted(set(kids).union(*(children.get(k, ()) for k in kids)))
     return {"kinds": kinds, "compositions": compositions, "variants": variants,
             "spell_objects": spell_objects, "spell_children": spell_children,
-            "children": children}
+            "children": children, "child_reach": dict(sorted(child_reach.items()))}
+
+
+def shot_reach(w: Walker, name: str, rec: Mapping[str, Any]) -> tuple[int, set[str]] | None:
+    """(reach, the units its shot spawns) of unit `name` (module doc, REACH): when what its
+    attack projectile spawns includes a unit (the evolved Mortar's shell -> Goblin, the Mother
+    Witch's curse -> VoodooHog), the farthest such a child lands from it, its range_milli, its
+    own collision_radius_milli and REACH_SLACK_MT, with those units; else None."""
+    proj, reach = rec.get("projectile"), rec.get("range_milli")
+    if not proj or isinstance(reach, bool) or not isinstance(reach, (int, float)) or reach <= 0:
+        return None
+    found: set = set()
+    w.walk(proj, found, set(), None)
+    found.discard(name)
+    if not found:
+        return None
+    return int(reach) + int(rec.get("collision_radius_milli") or 0) + REACH_SLACK_MT, found
+
+
+def form_spell_units(w: Walker, form: Mapping[str, Any]) -> set[str]:
+    """Units an evolved or hero spell's own record spawns (GoblinBarrel_EV1's projectile ->
+    BarrelGoblin, the hero Barbarian Barrel's re-roll -> BarbLogBarbarianHero), walked like a
+    spell card but for the names of what it is a form of, its embedded tables and its ability
+    (ability_units reads that). Its objects are not spell_objects (module doc, Not read)."""
+    found: set = set()
+    seen: set = set()
+    for k, v in form.items():
+        if k in SKIP or k in ("name", "display_name", "kind", "rarity", "form_of", "cloned_version",
+                              "tables", "ability"):
+            continue
+        w.walk(v, found, seen, k)
+    return found
 
 
 def _with_lookalikes(created: Sequence[str]) -> list[str]:
@@ -296,11 +531,15 @@ def _with_lookalikes(created: Sequence[str]) -> list[str]:
 
 def merge(parts: Sequence[Mapping[str, Any]]) -> dict:
     """build_one sections of several tables, the first first: kinds, compositions and
-    variants per card from the first table that has the card; spell objects, spell
-    children and children the union over all tables (the first table's objects in its
-    order, then the others'); then LOOKS_LIKE on every list of created units."""
+    variants per card (child_reach per unit and child) from the first table that has it;
+    spell objects, spell children and children the union over all tables (the first table's
+    objects in its order, then the others'); then the descendants over the union (a chain
+    split across tables: X -> A in one, A -> B in another gives X -> B), a shot-borne child's
+    descendants with its parent's reach; then LOOKS_LIKE on every list of created units and
+    on child_reach's children."""
     out: dict[str, dict] = {k: {} for k in ("kinds", "compositions", "variants", "spell_objects",
                                             "spell_children", "children")}
+    reach: dict[str, dict[str, int]] = {}
     for part in parts:
         for sec in ("kinds", "compositions", "variants"):
             for name, value in part.get(sec, {}).items():
@@ -313,8 +552,26 @@ def merge(parts: Sequence[Mapping[str, Any]]) -> dict:
         for sec in ("spell_children", "children"):
             for name, kids in part.get(sec, {}).items():
                 out[sec][name] = sorted(set(out[sec].get(name, ())) | set(kids))
+        for name, kids in part.get("child_reach", {}).items():
+            have = reach.setdefault(name, {})
+            for kid, mt in kids.items():
+                have.setdefault(kid, mt)
+    # DESCENDANTS again, over the union (build_one closed each table on its own)
+    children = out["children"] = with_descendants(out["children"])
+    out["spell_children"] = {name: sorted(set(kids).union(*(children.get(k, ()) for k in kids)))
+                             for name, kids in out["spell_children"].items()}
+    for name, kids in reach.items():                # what a shot-borne child creates lands by it
+        for kid, mt in list(kids.items()):
+            for grand in children.get(kid, ()):
+                if grand != name:
+                    kids[grand] = max(kids.get(grand, 0), mt)
     for sec in ("spell_children", "children"):
         out[sec] = {name: _with_lookalikes(kids) for name, kids in out[sec].items()}
+    for name, kids in reach.items():
+        for kid, mt in list(kids.items()):
+            if kid in LOOKS_LIKE:
+                kids[LOOKS_LIKE[kid]] = max(kids.get(LOOKS_LIKE[kid], 0), mt)
+    out["child_reach"] = {name: dict(sorted(kids.items())) for name, kids in sorted(reach.items()) if kids}
     return out
 
 

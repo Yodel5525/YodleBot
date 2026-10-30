@@ -6,7 +6,7 @@ IL_Replay names each card by its RoyaleAPI key, such as `hog-rider` or `the-log`
 |---|---|
 | `replay_cards.json` | `royaleimitate/replay_cards.json` from the royaleimitate 0.2.15 wheel, byte for byte. It has 119 keys. SHA-256 `aeca8fdf8eebafadbe3b1f4dba6eebb6132715e935bfe1db63f5968670c039ee`. The wheel's RECORD gives the same digest. |
 | `LICENSE-royaleimitate.txt` | royaleimitate's MIT license, copied unchanged from the wheel's `royaleimitate-0.2.15.dist-info/licenses/LICENSE`. |
-| `replay_cards_extra.json` | Keys the vendored file lacks: `void` → `DarkMagic`, `rune-giant` → `GiantBuffer`, `spirit-empress` → `MergeMaiden`. Each has `"verified": false` until the coverage check below finds it in the corpus. |
+| `replay_cards_extra.json` | Keys the vendored file lacks: `void` → `DarkMagic`, `rune-giant` → `GiantBuffer`, `spirit-empress` → `MergeMaiden`, `minion-giant` → `MinionGiant`. Each has `"verified": false` until the coverage check below finds it in the corpus. Minion Giant (released 2026-09-07) stays unverified: no match of the 4 parts checked so far has it, and the corpus is believed, not shown, to predate it; a full `--coverage` run settles it. |
 | `.gitattributes` | Keeps git from rewriting `replay_cards.json`'s line ends. |
 
 `rs_cards.load()` does three things:
@@ -15,7 +15,7 @@ IL_Replay names each card by its RoyaleAPI key, such as `hog-rider` or `the-log`
 - It refuses either file if a key appears twice in it.
 - It refuses an extra that gives a key already in the vendored file a different name.
 
-It returns the 122-key merged map. Set `HASTYCR_CARD_EXTRAS=0` to get the vendored map alone, exactly what the tools read from royaleimitate before. Use it to compare a run with older runs on the same matches. `tools/rs_rows.py` writes the map it used to `vocab.json` under `"card_map"`: the entry count, the SHA-256 of its canonical JSON, and the extras.
+It returns the 123-key merged map. Set `HASTYCR_CARD_EXTRAS=0` to get the vendored map alone, exactly what the tools read from royaleimitate before. Use it to compare a run with older runs on the same matches. `tools/rs_rows.py` writes the map it used to `vocab.json` under `"card_map"`: the entry count, the SHA-256 of its canonical JSON, and the extras.
 
 ```powershell
 .venvs\royalegym\Scripts\python.exe tools\rs_cards.py                 # check the files, list the extras

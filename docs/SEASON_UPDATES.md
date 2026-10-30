@@ -48,8 +48,8 @@ Facts are cited as `file:line` on the `sparring` branch at 00343a6. The RoyaleSi
 | Client build | versionCode 160635001 (16.635.1), read by `scripts/selfcheck.py` | Builds change every 1-2 weeks. Server-side content can change with no new build. | `judge_game` (`scripts/selfcheck.py:665-677`) PASSes 160635001 and WARNs on any other build. Nothing compares the client with the table. |
 | Fidelity | `tools/rs_fidelity_grid.py` runs `tools/royalesim_redrive.py` per cell on IL_Replay val matches | 62.6% / 49.0% were measured on royalesim 0.1.22 with the 15.535 table (`docs/PROGRESS_2026-10-09.md:72-83`). The grid has never run on the PC. | none |
 | Vision classes | `data/vision/classes.json` (299 classes, digest `dc897910…`), from `tools/vision_classes.py --engine` | A new unit or form needs a regenerated file. Ids are kept and new classes appended. | `digest` is written into rows (`tools/rs_rows.py:2312`) and label sets. No loader compares it. |
-| Spawn relations | `data/vision/spawn_children.json`, from `tools/vision_spawn_children.py` | **Already stale.** Its `source.version` is `cards-15535.1`, not the pinned table. | none; `docs/NEW_CARDS_PLAN.md` item N01 fixes it |
-| Card map | `data/cards/replay_cards.json` (119 keys, SHA-pinned at `tools/rs_cards.py:63`) plus `replay_cards_extra.json` (3 keys) = 122 keys | A new card has no key. Minion Giant already has none. | A match with an unmapped key is skipped whole and counted (`tools/rs_rows.py:1376-1402`, `:1849-1851`). |
+| Spawn relations | `data/vision/spawn_children.json`, from `tools/vision_spawn_children.py` | Current: `cards-160402017-20261019.1` first, then `cards-15535.1` (N01; the newer spawner data since 2026-10-30, section 8.1). A new table's spawners need a regeneration. | `tests/pipeline/test_events_spawners.py` pins the regenerated table; nothing compares its source with `data/engine.json` |
+| Card map | `data/cards/replay_cards.json` (119 keys, SHA-pinned at `tools/rs_cards.py:63`) plus `replay_cards_extra.json` (4 keys) = 123 keys | A new card has no key until an extra gives it one (Minion Giant: `minion-giant`, unverified). | A match with an unmapped key is skipped whole and counted (`tools/rs_rows.py:1376-1402`, `:1849-1851`). |
 | Form suffixes | `base_key` knows `-ev1` and `-hero` only (`tools/deck_stats.py:80-85`, copied verbatim from `tools/royalesim_redrive.py`); `tools/rs_presses.py:61` | A new suffix makes the card unmapped and skips the match. | none |
 | Self-healing table | `data/rs_rows/spawn_primary.json` (`tools/rs_spawn_table.py`) | Regenerates itself when the engine fingerprint changes (`ensure`, `:353`). | good as is |
 | Rows and checkpoints | `vocab.json` and checkpoint meta: card names, unit names, card table, engine fingerprint | Any arm change refuses every checkpoint, even with identical ids (`tools/rs_checkpoint.py:239`). | `rs_checkpoint.load_policy`, used live at `scripts/vision_play.py:1377` |
@@ -67,7 +67,7 @@ Facts are cited as `file:line` on the `sparring` branch at 00343a6. The RoyaleSi
   - The owner judged that nothing major changed since the 2026-10-19 balance update (`docs/SPARRING_PLAN.md:23-27`).
 - **Not yet measured.** Fidelity of 0.1.42 and of the 16.402.22 table. The grid code is done (batch 4) but has not run.
 - **Stale files.**
-  - `data/vision/spawn_children.json` was built from `cards-15535.1`. N01 fixes it.
+  - `data/vision/spawn_children.json` was built from `cards-15535.1`. N01 fixed it; section 8.1 has what it now covers.
   - The `classes.json` source note quotes sha256 `71c118f4…` for the 16.402.22 bytes. The sdist file hashes to `813bc904…`.
     - The note says its bytes were extracted from the `.so`, so the extraction boundary may explain the difference. That is unproven.
     - U07 records the engine's own `card_table_fnv1a64()` instead.
@@ -75,7 +75,7 @@ Facts are cited as `file:line` on the `sparring` branch at 00343a6. The RoyaleSi
   - The 20261019 table has no `Giant_EV1` or `Mirror_EV1`. Its giant evolutions are ElectroGiant, GoblinGiant and RoyalGiant only.
   - In `classes.json`, Mirror has forms `[0]` and Giant `[0, 2]`.
   - So both evolutions will be simulated as base forms until RoyaleSim ships them.
-- **Minion Giant** (released 2026-09-07) is in the engine catalogue (`MinionGiant`, id 132) and in the visible card pool (`docs/NEW_CARDS_PLAN.md` 1.1). No key in the card map reaches it, so no IL_Replay row trains its embedding.
+- **Minion Giant** (released 2026-09-07) is in the engine catalogue (`MinionGiant`, id 132) and in the visible card pool (`docs/NEW_CARDS_PLAN.md` 1.1). Since 2026-10-30 the `minion-giant` extra maps it (unverified). None of the 20,000 IL_Replay matches checked so far (`rs_cards --coverage --parts 4`) has the card, and the corpus is believed to predate it, so no row is known to train its embedding; a full `--coverage` run settles it (the catalogue id 132 is unconfirmed: it depends on the engine's table).
 
 ## 3. How updates arrive
 
@@ -533,6 +533,30 @@ The daily check compares it with a baseline and flags a drift. That catches card
 **HUD templates** (`data/vision/templates/`): after any client change, play one dry-run friendly (runbook section 17) and run `python -m scripts.vision.templates list`.
 
 **Royal Chef** has no KataCR class (`docs/NEW_CARDS_PLAN.md` 1.6), and RoyaleSim does not simulate tower troops other than the Princess. Both are reported, not fixed, here.
+
+### 8.1 Event tables: what they cover (2026-10-30)
+
+A unit another unit creates must be its parent's child in `data/vision/spawn_children.json`, or `scripts/vision/events.py` reports it as an opponent play of the wrong card at the wrong elixir.
+
+**Covered now.** `tools/vision_spawn_children.py` reads RoyaleSim's newer spawner data: interval spawners, life-state spawners, transforms, stage schedules, action graphs, evolution records, hero abilities and the records hero forms and evolutions carry, and each unit's descendants. The regenerated table only adds 93 relations to the one before. Those that today's detector labels box, so that they were phantom plays before:
+- the reworked Furnace's Fire Spirits, for its whole life;
+- the evolved Goblin Giant's Goblins, and its riders' Spear Goblins when it dies;
+- the Skeleton Barrel's skeletons, through the falling barrel, which has no label;
+- the evolved Mortar's Goblin where its shell lands. `child_reach` (per parent and child) lets it be up to 13.6 tiles away. It applies only when no other new unit of a goblin card was born next to it, so a Goblin Gang near a Mortar stays a Goblin Gang (rule 3, FAR CHILD).
+
+The other new relations wait for detector labels: the evolved Witch's interval skeletons, `Wallbreaker_mini`, the evolved Skeleton Army's spectral units, the Ghost evolution's summons, the Goblin Demolisher's kamikaze form, `BrokenCannon`, the Rocket Silo stages, the hero ability units, `GoblinDummy`, `BarbLogBarbarianHero` and the event units.
+
+**Costs** (the rule 3 doc in `events.py`). A real play of a child's card that lands next to a living parent is absorbed: Fire Spirits by a Furnace, goblin cards by any Goblin Giant, Skeletons by a Skeleton Barrel. A lone Goblin within a Mortar's reach is absorbed too. In the clan data's battle sides only the Skeleton Barrel case is common (Skeletons in 47 of its 301 sides, Skeleton Army in 42), besides the Mortar's Goblin Gangs (80 of 178 sides), which the FAR CHILD rule keeps.
+
+**Still open:**
+- **Three Musketeers.** The composition should come from `summon_members` (each musketeer once), but the table keeps `{C1: 3, C2: 1}`, because fixing it changes an existing entry. The class alias waits for deck C frames.
+- **Goblin Curse goblins.** They spawn for the caster (`death_spawn.is_enemy`), where our cursed units die, perhaps after the curse area is gone. They need a curse label (N11), or a just-gone curse area as parent with a reach that covers where the victims die.
+- **A child of its parent's own class.** The evolved Skeletons' copies, and `Wallbreaker_mini` or the spectral units if the detector boxes them with the base label, need a form-gated rule. As plain children they would explain a second play of the card away.
+- **Far spawns that are not shot-borne.** The hero Balloon's troopers and the hero Ice Wizard's cube have no labels yet.
+- **Hero and champion abilities.** Their elixir is never charged.
+- **The evolved Goblin Barrel's decoy.** It is explained only when its flight is detected.
+- **Spawns RoyaleSim's extractor drops:** the Dragon Egg's extra death spawns and `GoblinPartyHut` -> `GoblinBrawler`.
+- **The Lumberjack's bottle**, boxed as Rage. Check it on frames first.
 
 ## 9. Fidelity
 

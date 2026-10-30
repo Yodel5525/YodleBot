@@ -130,7 +130,7 @@ def test_slug_leaves_the_card_map_keys_as_they_are(api):
     extras = json.loads((ROOT / "data" / "cards" / "replay_cards_extra.json").read_text(
         encoding="utf-8"))["cards"]
     keys = [*vendored, *extras]
-    assert len(keys) >= 122             # 119 + 3 today; confirmed entries (minion-giant) add more
+    assert len(keys) >= 123             # 119 + 4 extras (minion-giant the fourth); more may come
     for key in keys:
         for form in ("", "-ev1", "-hero"):
             assert api.slug(key + form) == key + form
@@ -607,8 +607,8 @@ def test_make_transport(api):
 def test_cards_report_on_the_fixture(api, monkeypatch):
     rs_cards = importlib.import_module("rs_cards")
     payload = json.loads(fixture("cards.json"))
-    # Minion Giant has no key today; the set below keeps it so after the owner confirms the
-    # proposed "minion-giant" entry into data/cards/replay_cards_extra.json (section 4.6)
+    # the map without the "minion-giant" extra (data/cards/replay_cards_extra.json, added from
+    # this very proposal), so the fixture's Minion Giant is still the unmapped card it was
     rep = api.cards_report(payload, set(rs_cards.load()) - {"minion-giant"})
     assert rep["items"] == 8 and rep["support_items"] == 1
     assert rep["max_evolution_level"] == {"1": 2, "2": 1, "3": 1}

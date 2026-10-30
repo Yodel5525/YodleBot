@@ -20,10 +20,34 @@ team is decided (or after ``team_wait_ticks``, by a fallback). In order:
    spells the window chains from the play's LAST sighting (a rolling Log
    re-acquired downstream; a Poison seen for 8 s).
 3. Child. A living or just-dead parent of the same team (seen at most
-   ``just_dead_ticks`` before the child, within ``child_radius_mt``) whose
-   class creates this class (EventTables.children: spawners, death spawns,
+   ``just_dead_ticks`` before the child, within ``child_radius_mt``) whose class
+   creates this class (EventTables.children: spawners, death spawns,
    projectile and area spawns; "*" for Clone): a Witch's skeletons, a Golem's
-   golemites, a Goblin Barrel's goblins.
+   golemites, a Goblin Barrel's goblins, a Furnace's Fire Spirits for as long as
+   it lives. FAR CHILD: a child its parent's shot drops where the shot lands
+   (EventTables.child_reach, per parent and child class: an evolved Mortar's
+   goblin up to 13.6 tiles away, the Mother Witch's cursed hog) may be that far
+   from the parent, but only when no other new track of its team (one waiting,
+   or a play's unit) of a class that a card putting the child's class down
+   deploys was born within ``merge_radius_mt`` and ``play_window_ticks`` of it:
+   a shell drops one Goblin, a Goblin Gang puts down 3 Goblins and 3 Spear
+   Goblins. With min_play_age_ticks an enemy unit's far parent waits for that
+   age (rules 1-3 are tried again on every update), so the play's other units
+   have been seen by then. A class no card puts down (the cursed hogs, which come
+   several at once) takes its far parent at once.
+   Cost: a real play of a child's class is taken for children when it lands
+   within child_radius_mt of a living or just-dead parent: Fire Spirits by a
+   Furnace, Goblins / Goblin Gang / Spear Goblins by any Goblin Giant (the base
+   one too: its evolution's goblins and its riders' drop share its class),
+   Skeletons by a Skeleton Barrel (its falling barrel has no label) or a Witch.
+   Farther, within a Mortar's reach (every Mortar: the evolved one shares its
+   class), a lone Goblin is taken for the shell's: a real one seen alone, or a
+   Goblin Gang's goblin with the rest of its play unseen. With the rules config
+   (no age guard) a gang's goblin seen a frame before the rest of its play can
+   be. In the clan data's 2,572 battle sides (one deck each), Furnace and Fire
+   Spirits never share a deck, nor Goblin Giant and a goblin card; Skeleton Barrel
+   has Skeletons in 47 of its 301 sides and Skeleton Army in 42; Mortar (178
+   sides, 170 evolved) has Goblin Gang in 80 and Goblins in 9.
 4. Own tap (our team only). The oldest pending tap of a card that puts this
    class down, sent ``tap_min_lag_ticks``..``tap_max_lag_ticks`` before the
    first sighting and (units) landed within ``landing_radius_mt`` of the aim;
@@ -129,7 +153,8 @@ showed (the Spirit Empress: 3 or 6), and for an UNKNOWN play (rule 6).
 
 TABLES. EventTables holds, per RoyaleSim card id, the classes one play puts
 down (with counts) or, for a spell, the classes that show it; and the
-parent -> child class map. A spell that deploys a troop has a composition, not
+parent -> child class map, with child_reach for the parents whose shots drop
+their children far away. A spell that deploys a troop has a composition, not
 spell classes (Heal -> HealSpirit). A card with forms (the Spirit Empress
 MergeMaiden: MergeMaiden_Normal below 6 elixir, MergeMaiden_Mounted at 6 or more)
 holds its forms' classes, so their units name the card; the forms' own ids are
@@ -288,6 +313,11 @@ class EventTables:
     variant_costs card -> {class: elixir of the form that puts it down}, for a card
                   whose forms cost differently (MergeMaiden: MergeMaiden_Normal 3,
                   MergeMaiden_Mounted 6); play_cost reads it.
+    child_reach   parent class -> {child class: millitiles}: how far from it a child its
+                  attack projectile spawns can land (the evolved Mortar's shell drops a
+                  Goblin up to 11.5 tiles away: Mortar {Goblin: 13600}). Rule 3 takes such
+                  a child that far (module doc, FAR CHILD); every other parent and child
+                  class keeps EventConfig.child_radius_mt.
     Mapping keys may be strings (JSON); values may be lists, sets or count dicts.
     """
     compositions: Mapping[int, Mapping[str, int]]
@@ -296,6 +326,7 @@ class EventTables:
     ignore: Iterable[str] = frozenset()
     aliases: Mapping[int, int] = field(default_factory=dict)
     variant_costs: Mapping[int, Mapping[str, int]] = field(default_factory=dict)
+    child_reach: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     _unit_by: dict = field(init=False, repr=False, compare=False)
     _spell_by: dict = field(init=False, repr=False, compare=False)
 
@@ -360,6 +391,21 @@ class EventTables:
                 cc[cls] = cost
             if cc:
                 costs[card] = cc
+        reach: dict[str, dict[str, float]] = {}
+        for parent, kids in dict(self.child_reach).items():
+            if not isinstance(kids, Mapping):
+                raise ValueError(f"child_reach of {parent} must map child classes to distances, "
+                                 f"got {kids!r}")
+            for kid, value in kids.items():
+                try:
+                    mt = math.nan if isinstance(value, (bool, str, bytes)) else float(value)
+                except (TypeError, ValueError):
+                    mt = math.nan
+                if not (math.isfinite(mt) and mt >= 0):
+                    raise ValueError(f"child_reach of {parent} -> {kid} must be a distance >= 0, "
+                                     f"got {value!r}")
+                reach.setdefault(str(parent), {})[str(kid)] = mt
+        object.__setattr__(self, "child_reach", reach)
         object.__setattr__(self, "compositions", comps)
         object.__setattr__(self, "spells", spells)
         object.__setattr__(self, "children", children)
@@ -420,6 +466,10 @@ class EventTables:
     def explains(self, parent_cls: str, child_cls: str) -> bool:
         kids = self.children.get(parent_cls, ())
         return child_cls in kids or WILDCARD in kids
+
+    def reach_of(self, parent_cls: str, child_cls: str) -> float:
+        """child_reach of a `child_cls` child of `parent_cls` (millitiles), 0.0 when it has none."""
+        return self.child_reach.get(parent_cls, {}).get(child_cls, 0.0)
 
     def spell_class(self, card: int) -> str | None:
         """One class standing for spell `card` (StateTracks uses it for engine spells)."""
@@ -538,8 +588,21 @@ class EventTables:
             cid = card_ids.get(name)
             for sc in spells.get(cid, ()) if cid is not None else ():
                 children.setdefault(sc, set()).add(WILDCARD)
+        reach: dict[str, dict[str, float]] = {}  # "child_reach": unit -> {child unit: mt}
+        for unit, kids in (table.get("child_reach") or {}).items():
+            if not isinstance(kids, Mapping):
+                raise ValueError(f"child_reach of {unit} must map child units to distances, "
+                                 f"got {kids!r}")
+            p = cmap(unit)
+            if not p or p not in children:
+                continue
+            for kid, mt in kids.items():
+                c = cmap(kid)
+                if c and c in children[p]:      # the farthest of the units mapped to one class
+                    have = reach.setdefault(p, {})
+                    have[c] = max(have.get(c, 0.0), float(mt))
         return cls(comps, spells, children, frozenset(ignore), aliases=aliases,
-                   variant_costs=variant_costs)
+                   variant_costs=variant_costs, child_reach=reach)
 
     @classmethod
     def from_spawn_primary(cls, raw: Mapping[str, Any], *,
@@ -608,7 +671,9 @@ class EventTables:
         spells = {c: s - unit_classes for c, s in spells.items() if c not in comps and s - unit_classes}
         ignore = base.ignore if base is not None else frozenset()
         costs = base.variant_costs if base is not None else {}
-        return cls(comps, spells, children, ignore, aliases=aliases, variant_costs=costs)
+        reach = base.child_reach if base is not None else {}
+        return cls(comps, spells, children, ignore, aliases=aliases, variant_costs=costs,
+                   child_reach=reach)
 
     @classmethod
     def for_engine(cls, spawn_primary: Mapping[str, Any], *,
@@ -1465,9 +1530,40 @@ class EventDeriver:
             if not self.tables.explains(r.cls, rec.cls):
                 continue
             d = _dist(r.x, r.y, rec.bx, rec.by)
-            if d <= cfg.child_radius_mt and d < best_d:
+            reach = max(cfg.child_radius_mt, self.tables.reach_of(r.cls, rec.cls))
+            if d <= reach and d < best_d:
                 best, best_d = r, d
+        if best is not None and best_d > cfg.child_radius_mt and not self._far_child(rec, team):
+            return None                          # the nearest is far: no parent within child_radius_mt
         return best
+
+    def _far_child(self, rec: _Rec, team: int) -> bool:
+        """Rule 3, FAR CHILD (module doc): whether `rec` of `team`, farther than child_radius_mt
+        from its nearest parent but within that parent's child_reach, is that parent's child.
+        Yes for a class no card puts down; not yet while min_play_age_ticks holds an enemy unit
+        back; else yes unless another new track of `team` (waiting, or a play's unit) whose class
+        a card putting rec's class down deploys was born within merge_radius_mt and
+        play_window_ticks of it (a Goblin Gang's other goblins and spear goblins: a play, not
+        the one Goblin a Mortar shell drops)."""
+        cfg = self.config
+        cards = self.tables.unit_cards(rec.cls)
+        if not cards:
+            return True
+        if (cfg.min_play_age_ticks and team == self.enemy_team
+                and rec.last_tick - rec.first_tick < cfg.min_play_age_ticks):
+            return False
+        kin = frozenset().union(*(self.tables.classes_of(c) for c in cards))
+        for r in self._recs.values():
+            if r is rec or r.cls not in kin or r.uid in rec.fragments:
+                continue
+            if not (r.state == PENDING or r.how in ("play", "merged")):
+                continue
+            if (r.seen_team if r.state == PENDING else r.team) != team:
+                continue
+            if (abs(r.first_tick - rec.first_tick) < cfg.play_window_ticks
+                    and _dist(r.bx, r.by, rec.bx, rec.by) <= cfg.merge_radius_mt):
+                return False
+        return True
 
     def _match_tap(self, rec: _Rec, spell: bool) -> OwnTap | None:
         cfg = self.config

@@ -36,7 +36,7 @@ own table, as this tool did before rs_engine.
 
 Cards: IL_Replay card keys map to RoyaleSim names through tools/rs_cards.py
 (data/cards/: royaleimitate 0.2.15's replay_cards.json, vendored and hash-checked,
-plus void, rune-giant and spirit-empress). Matches with an unmapped card are
+plus void, rune-giant, spirit-empress and minion-giant). Matches with an unmapped card are
 skipped. HASTYCR_CARD_EXTRAS=0 gives the 119-key map this tool used before.
 vocab.json records the map under "card_map".
 

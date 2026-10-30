@@ -46,11 +46,13 @@ rs_cards = _load("rs_cards")
 rs_engine = _load("rs_engine")
 
 SHA256 = "aeca8fdf8eebafadbe3b1f4dba6eebb6132715e935bfe1db63f5968670c039ee"
-EXTRAS = {"void": "DarkMagic", "rune-giant": "GiantBuffer", "spirit-empress": "MergeMaiden"}
+EXTRAS = {"void": "DarkMagic", "rune-giant": "GiantBuffer", "spirit-empress": "MergeMaiden",
+          "minion-giant": "MinionGiant"}
 #: The conftest opponent deck with its unplayed Zap swapped for Void.
 VOID_DECK = tuple("void" if key == "zap" else key for key in OPPONENT_KEYS)
-#: An opponent deck with all three extras, in slots the default plays do not use.
-EXTRA_DECK = ("knight", "archers", "rune-giant", "arrows", "spirit-empress", "mini-pekka",
+#: An opponent deck with all four extras, in slots the default plays do not use (the
+#: conftest opponent plays only knight and arrows).
+EXTRA_DECK = ("knight", "minion-giant", "rune-giant", "arrows", "spirit-empress", "mini-pekka",
               "baby-dragon", "void")
 
 
@@ -112,10 +114,10 @@ def test_mit_notice_ships_with_the_file():
     assert SHA256 in readme
 
 
-def test_load_merges_the_three_extras_into_122_keys():
+def test_load_merges_the_four_extras_into_123_keys():
     vendored = rs_cards.read_vendored()
     names = rs_cards.load(env={})
-    assert len(names) == 122
+    assert len(names) == 123
     assert {k: names[k] for k in EXTRAS} == EXTRAS
     assert set(names) - set(vendored) == set(EXTRAS)
     assert vendored.items() <= names.items()
@@ -229,9 +231,9 @@ def test_empty_extras_add_nothing(tmp_path):
 def test_extras_switch(value, on):
     env = {rs_cards.EXTRAS_ENV: value}
     assert rs_cards.extras_enabled(env) is on
-    assert len(rs_cards.load(env=env)) == (122 if on else 119)
+    assert len(rs_cards.load(env=env)) == (123 if on else 119)
     # an explicit argument wins over the variable
-    assert len(rs_cards.load(extras=True, env=env)) == 122
+    assert len(rs_cards.load(extras=True, env=env)) == 123
     assert len(rs_cards.load(extras=False, env=env)) == 119
 
 
@@ -244,7 +246,7 @@ def test_extras_switch_reads_the_process_environment(monkeypatch):
     monkeypatch.setenv(rs_cards.EXTRAS_ENV, "0")
     assert rs_cards.load() == rs_cards.read_vendored()
     monkeypatch.delenv(rs_cards.EXTRAS_ENV)
-    assert len(rs_cards.load()) == 122
+    assert len(rs_cards.load()) == 123
 
 
 # ---------------------------------------------------------------------------
@@ -254,13 +256,13 @@ def test_extras_switch_reads_the_process_environment(monkeypatch):
 def test_describe_records_the_map():
     names, vendored = rs_cards.load(extras=True), rs_cards.read_vendored()
     d = rs_cards.describe(names)
-    assert d["entries"] == 122 and d["extras"] == ["rune-giant", "spirit-empress", "void"]
+    assert d["entries"] == 123 and d["extras"] == ["minion-giant", "rune-giant", "spirit-empress", "void"]
     assert d["vendored_sha256"] == SHA256 and "0.2.15" in d["vendored"]
     assert len(d["sha256"]) == 64
     assert d["sha256"] == rs_cards.map_sha256(dict(reversed(list(names.items()))))
     plain = rs_cards.describe(vendored, vendored)
     assert plain["entries"] == 119 and plain["extras"] == [] and plain["sha256"] != d["sha256"]
-    assert "122 keys (extras: rune-giant, spirit-empress, void)" in rs_cards.summary(names)
+    assert "123 keys (extras: minion-giant, rune-giant, spirit-empress, void)" in rs_cards.summary(names)
     assert "extras: none, HASTYCR_CARD_EXTRAS=0" in rs_cards.summary(vendored)
 
 
@@ -281,7 +283,8 @@ def test_coverage_counts_unmapped_keys_and_extras(monkeypatch):
     watch = rs_cards.read_extras()
     cov = rs_cards.coverage(payloads, rs_cards.load(extras=True), watch=watch)
     assert cov == {"matches": 2, "mapped": 2, "not_1v1": 1, "blocked": {},
-                   "watched": {"rune-giant": 0, "spirit-empress": 0, "void": 1}, "keys": 17}
+                   "watched": {"minion-giant": 0, "rune-giant": 0, "spirit-empress": 0, "void": 1},
+                   "keys": 17}
     cov = rs_cards.coverage(payloads, rs_cards.load(extras=False), watch=watch)
     assert (cov["mapped"], cov["blocked"]) == (1, {"void": 1})
     assert cov["watched"]["void"] == 1
@@ -377,7 +380,7 @@ def test_cli_checks_and_lists(monkeypatch, capsys):
     monkeypatch.syspath_prepend(str(TOOLS))
     assert rs_cards.main([]) == 0
     out = capsys.readouterr().out
-    assert "119 keys, sha256 ok" in out and "card map 122 keys" in out
+    assert "119 keys, sha256 ok" in out and "card map 123 keys" in out
     for key, name in EXTRAS.items():
         assert f"{key} -> {name}" in out
 
@@ -433,7 +436,7 @@ def test_every_name_is_a_catalogue_name_under_the_card_table(which):
 
 @pytest.mark.engine
 @pytest.mark.parametrize("which", ["configured", "legacy"])
-def test_the_engine_plays_a_match_with_the_three_extras(which, monkeypatch):
+def test_the_engine_plays_a_match_with_the_four_extras(which, monkeypatch):
     import royalesim
     monkeypatch.syspath_prepend(str(TOOLS))
     redrive = importlib.import_module("royalesim_redrive")

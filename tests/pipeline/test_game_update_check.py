@@ -16,11 +16,12 @@ The tiny RoyaleSim sdists, worked by hand:
   So: arms added [client160635001_20261102]; statuses same, same, same, bytes changed, new;
   the newest table is 16.635.4.
 * The /v1/cards fixtures: on 2026-10-30 every card's forms match data/vision/classes.json
-  (no gap), Minion Giant has no card-map key and matches the catalogue's MinionGiant at 4
-  elixir (auto). On 2026-11-02 Giant (2 -> 3) and Mirror (0 -> 1) gain an evolution, which
-  classes.json lacks (Giant [0, 2], Mirror [0]) and 0.1.43's newest table has; The Log is
-  renamed "Log" (slug "log" has no key, so the official id 28000011 finds "the-log" through
-  data/royaleapi/cards.json); Fixture Golem (26000999) is new and in no table.
+  (no gap), Minion Giant has no card-map key (the world fixture removes the minion-giant
+  extra) and matches the catalogue's MinionGiant at 4 elixir (auto). On 2026-11-02 Giant
+  (2 -> 3) and Mirror (0 -> 1) gain an evolution, which classes.json lacks (Giant [0, 2],
+  Mirror [0]) and 0.1.43's newest table has; The Log is renamed "Log" (slug "log" has no
+  key, so the official id 28000011 finds "the-log" through data/royaleapi/cards.json);
+  Fixture Golem (26000999) is new and in no table.
 * Calendar: the check of 2026-11-03 05:47 after one on 2026-10-30 05:47 has Season 89
   (2026-11-02) since the last check, and is 1 day behind (no table has it).
 """
@@ -262,8 +263,8 @@ def world(gu, gv, rs_engine, tmp_path, monkeypatch):
     ledger.write_text(json.dumps(data), encoding="utf-8")
     web = Web(gu)
     monkeypatch.setattr(gu, "fetch", web)
-    # Minion Giant has no card-map key today; the radar tests keep it that way, so they still
-    # hold after the owner confirms the proposed "minion-giant" entry (section 4.6)
+    # the radar tests run without the "minion-giant" extra (added from the proposal they check),
+    # so the fixtures' Minion Giant is still the unmapped card that makes it
     rs_cards = importlib.import_module("rs_cards")
     live_load = rs_cards.load
     monkeypatch.setattr(rs_cards, "load", lambda *a, **kw: {

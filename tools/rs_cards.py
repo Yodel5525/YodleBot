@@ -17,13 +17,14 @@ royaleimitate only to read its replay_cards.json. The map now lives in the repo 
                                       MIT, with the notice in data/cards/LICENSE-royaleimitate.txt.
                                       load() refuses it unless its SHA-256 is VENDORED_SHA256.
   data/cards/replay_cards_extra.json  keys that file lacks: void -> DarkMagic, rune-giant ->
-                                      GiantBuffer, spirit-empress -> MergeMaiden. Matches with an
-                                      unmapped card are skipped, so before this every match with
-                                      or against Void, Rune Giant or Spirit Empress was dropped.
+                                      GiantBuffer, spirit-empress -> MergeMaiden, minion-giant ->
+                                      MinionGiant. Matches with an unmapped card are skipped, so
+                                      before this every match with or against Void, Rune Giant or
+                                      Spirit Empress was dropped.
                                       Each extra is "verified": false until --coverage finds its
                                       key in the corpus.
 
-load() merges the two into 122 keys. Either file is refused if it has a key twice, and an extra
+load() merges the two into 123 keys. Either file is refused if it has a key twice, and an extra
 may not give an already-mapped key a different name, so no key maps to two names.
 HASTYCR_CARD_EXTRAS=0 (or --no-extras here) leaves the extras out. That gives exactly the
 119-key map the tools read from royaleimitate 0.2.15 before, so a run can be compared with older

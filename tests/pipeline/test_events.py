@@ -669,7 +669,8 @@ def test_spirit_empress_forms_stay_her_on_the_engine_tables():
 
 def test_goblin_barrel_goblins_are_its_children_on_screen_and_in_the_engine():
     table = EV.load_spawn_children()
-    assert table["spell_children"]["GoblinBarrel"] == ["BarrelGoblin", "Goblin"]
+    # (+ the evolved barrel's decoy goblins, GoblinDummy: test_events_spawners.py)
+    assert table["spell_children"]["GoblinBarrel"] == ["BarrelGoblin", "Goblin", "GoblinDummy"]
     tb = EV.EventTables.from_names(table, N01_IDS)
     for cls in ("goblin-barrel", "GoblinBarrelSpell", "GoblinBarrel"):
         assert tb.explains(cls, "Goblin") and tb.explains(cls, "BarrelGoblin"), cls
@@ -850,7 +851,7 @@ def test_a_goblin_drill_building_is_a_goblin_drill_play():
     table, ids, tb = vision_tables()
     drill = ids["GoblinDrill"]
     assert table["compositions"]["GoblinDrill"] == {"GoblinDrill": 1, "GoblinDrillDig": 1}
-    assert table["children"]["GoblinDrillDig"] == ["GoblinDrill"]
+    assert table["children"]["GoblinDrillDig"] == ["Goblin", "GoblinDrill"]      # + the drill's goblins
     assert tb.unit_cards("GoblinDrill") == (drill,) and tb.explains("GoblinDrillDig", "GoblinDrill")
     d = started(tb)
     # the dig is KataCR's `dirt`, an object no track follows: the building is the first track
@@ -922,7 +923,8 @@ def test_the_generator_reads_morphs_champion_abilities_and_the_bomb_lookalikes()
     assert doc["compositions"]["Miner"] == {"Miner": 1}                  # its dig turns into nothing
     assert doc["compositions"]["Goblinstein"] == {"goblinstein": 1, "goblinstein_doctor": 1}
     assert doc["children"] == {"Balloon": ["BalloonBomb", "GiantSkeletonBomb"], "GoblinDrill": ["Goblin"],
-                               "GoblinDrillDig": ["GoblinDrill"], "LittlePrince": ["ChampionGuard"]}
+                               "GoblinDrillDig": ["Goblin", "GoblinDrill"],      # + its descendants
+                               "LittlePrince": ["ChampionGuard"]}
 
 
 def test_every_katacr_lookalike_is_one_of_the_generators():
