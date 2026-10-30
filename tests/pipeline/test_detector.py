@@ -398,6 +398,58 @@ def test_precision_kwargs_follow_the_ultralytics_config(monkeypatch):
     assert D.precision_kwargs(True) == {"quantize": 16} and D.precision_kwargs(False) == {"quantize": None}
 
 
+def test_the_installed_ultralytics_takes_the_predict_kwargs_without_a_warning():
+    """The real ultralytics (the GPU venv's pinned 8.4.192; skipped where it is not installed),
+    no model loaded: the detector reads that ultralytics' own config, and the kwargs it sends
+    predict() go through predict()'s deprecation step (cfg._handle_deprecation) and the
+    predictor's get_cfg with nothing logged, into the same config as the deprecated half= gave:
+    quantize 16 (AutoBackend fp16 = quantize == 16) for FP16, None for FP32."""
+    pytest.importorskip("ultralytics")
+    from ultralytics.cfg import _handle_deprecation, get_cfg
+    from ultralytics.utils import DEFAULT_CFG_DICT
+
+    assert D._ultralytics_cfg_defaults() is DEFAULT_CFG_DICT
+    has_quantize = "quantize" in DEFAULT_CFG_DICT          # 8.4.80 and later
+    seen: list[str] = []
+
+    class Record(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+
+    # ultralytics' LOGGER does not propagate (caplog cannot see it), and YOLO_VERBOSE=False sets
+    # it to ERROR: record on it directly, at WARNING, for this test only.
+    logger = logging.getLogger("ultralytics")
+    handler, level = Record(logging.DEBUG), logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        for half in (True, False):
+            model = FakeModel(joint_names())
+            det = D.Detector(model, geometry=GEOM, table=TABLE, config=D.DetectorConfig(half=half),
+                             device="0")
+            det.detect(frame())
+            kw = dict(model.calls[0][1])
+            assert det.info()["half"] is half
+            if has_quantize:
+                assert kw["quantize"] == (16 if half else None) and "half" not in kw
+            else:
+                assert kw["half"] is half and "quantize" not in kw
+            seen.clear()
+            new = get_cfg(overrides=_handle_deprecation(dict(kw)))
+            assert seen == []                              # no warning: nothing printed per frame
+            legacy = {k: v for k, v in kw.items() if k != "quantize"} | {"half": half}
+            old = get_cfg(overrides=_handle_deprecation(legacy))
+            assert vars(new) == vars(old)                  # the same predictor config as half= gave
+            if has_quantize:
+                assert new.quantize == (16 if half else None)
+                assert any("'half' is deprecated" in m for m in seen)   # what half= logs, every call
+            else:
+                assert new.half is half
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+
+
 def test_detector_maps_filters_and_places_the_scene():
     model = FakeModel(joint_names(), scene_rows())
     det = detector(model)
