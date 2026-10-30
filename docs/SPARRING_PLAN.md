@@ -140,24 +140,30 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V11 (partial): the latency probe (`tools/latency_probe.py`, the decision-to-board delay D) and offline perception replay with precision and recall (`tools/vision_replay.py`). The noise-profile fit waits for E17's format (batch 5).
 - V12: takeover toggle (F8, an always-on-top control window, a MANUAL file), wired into the runner. The runner starts in MANUAL.
 
-**Batch 4: training-row correctness**
-- E03: fidelity grid.
-- E09: trust cut when the simulation diverges from the recording.
-- E10: replay hero and champion ability presses.
-- E11: decision-time rows.
-- E12: hide invisible units.
+**Batch 4: training-row correctness and evaluation** (code done 2026-10-30, not yet run on the PC)
+- E03: fidelity grid (`tools/rs_fidelity_grid.py`) and robust re-drive.
+- E09: trust cut when the simulation diverges from the recording (`--trust v2`).
+- E10: replay hero and champion ability presses (`--presses on`). Hold off on using it in training until the model has an ability head (E15).
+- E11: decision-time rows (`--obs-delay 24 --obs-delay-jitter 3 --opp-lag 1`).
+- E12: hide invisible units (`--visibility public`).
+- Moved forward from batches 5 and 6:
+  - E17: the perception-noise model core;
+  - L02: the general match runner (`tools/rs_match.py`);
+  - L03: the league evaluation and promotion gate (`tools/rs_league_eval.py`).
+- Next on the PC: `scripts/second_model.ps1` (runbook section 19) trains a decision-time model and compares it fairly with the first one at the 21-tick delay.
 
 **Batch 5: model and data**
 - E14: observation v2.
 - E15: model v2 with an ability head and a critic.
-- E17: perception-noise model.
 - E18: full-corpus memory-mapped training with mirroring.
 - Upgrading V06 to the v2 model.
 - V11 (rest): fit the perception-noise profile from replay errors and the bot's own taps.
+- Wiring left from batch 4:
+  - `--noise` in rows and `rs_eval`;
+  - visibility in `rs_selfplay`;
+  - own-pending and press inputs in `RSAgent` and the live runner.
 
-**Batch 6: evaluation and RL**
-- L02: general match runner.
-- L03: league evaluation and promotion gate.
+**Batch 6: RL**
 - R01: vectorised rollouts.
 - R02: PPO.
 - R04: RL driver.
