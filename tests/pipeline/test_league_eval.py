@@ -667,8 +667,13 @@ def test_evaluate_logs_and_retries_errors(tools, tmp_path):
 
     rep = small_eval(tools, tmp_path, flaky)
     c = rep["gates"]["C"]
-    assert (c["decision"], c["missing"], c["turned_on"]) == ("incomplete", {"beats_champion": 1},
-                                                             "beats_champion")
+    # C is one champion game short, so (stop_early) it played no anchor games: the decision
+    # turns on beats_champion, and anchor:A, not settled, still lacks all 4 of its games
+    # (Condition.missing); the rerun below plays them.
+    assert (c["decision"], c["missing"], c["turned_on"]) == (
+        "incomplete", {"beats_champion": 1, "anchor:A": 4}, "beats_champion")
+    a = c["conditions"]["anchor:A"]
+    assert (a["n"], a["skipped"], a["incomplete"]) == (0, False, True)
     assert rep["phases"]["champion"] == {"planned": 16, "skipped": 0, "played": 15, "errors": 1}
     assert rep["phases"]["anchors"]["planned"] == 0 and rep["errors"] == 1
     (err,) = [x for x in lines(tmp_path / "dev.jsonl") if x["kind"] == "league_error"]
