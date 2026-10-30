@@ -5,7 +5,8 @@ r"""The public view of a state: only what the acting side's screen shows (S02).
     elixir = PV.OppElixir(catalogue, law=law, start_tick=ctx.start_tick)   # live: on ctx.memory
     reading = elixir.view(team, mem_view, tick)
     view = PV.public_view(seen, team, mem_view, fields=RR.F, opp_elixir=reading,
-                          sent=seat.sent, unran=seat.unran, mirror=PV.mirror_ids(catalogue))
+                          sent=seat.sent, unran=seat.unran, mirror=PV.mirror_ids(catalogue),
+                          tick=true_tick)             # seat.sent's clock (THE CLOCK)
     keep = PV.Permanence(fields=RR.F, team=team, hiders=PV.card_ids(PV.HIDER_NAMES, names))
     view = keep.apply(view)                           # every decision of the battle, in tick order
     PV.CardCycle.from_view(view, 1 - team)            # the opponent's hand and queue
@@ -57,10 +58,13 @@ the simulator either seat, live always team 1):
                  own_cycle, opp_cycle   CardCycle.to_json() of each side (below)
                  own_inflight     [[exec tick, card, x, y], ...] of `sent` (rs_match seat.sent,
                                   rs_match.py:961: our plays, engine subtiles) still to run at
-                                  `tick` (exec tick >= tick: a command that runs at t runs in the
-                                  step from t, so the state at t does not show it; rs_memory)
+                                  the cut (exec tick >= tick: a command that runs at t runs in
+                                  the step from t, so the state at t does not show it;
+                                  rs_memory), less the ones the engine refused (UNRAN), dated
+                                  on the view's clock (THE CLOCK)
                  own_sent         the same for exec tick >= tick - recent_ticks: our own recent
                                   aims, for spells already flying (plan 4.4)
+                 sent_shift       what was added to their exec ticks (THE CLOCK; 0 by default)
                  dropped          {reason: count}: "unseen", "dead", "team", "projectiles"
                  kept             uids Permanence added (empty here)
   Live (live=True): the state is already public (PublicStateBuilder's), so the view is the state
@@ -68,9 +72,21 @@ the simulator either seat, live always team 1):
   not public. public_view is idempotent: the view of a view is the view.
 
 UNRAN. rs_match gives a MatchAgent `unran`, a Counter of (team, card token, tick) memory entries
-whose play the engine refused (rs_match.py:477-479, 908-913): a play that never ran never showed
+whose play the engine refused (rs_match.py:477-479, 905-910): a play that never ran never showed
 on a screen, so each entry takes one equal play out of that team's plays here, for both sides
-(MatchAgent.opp_elixir does the same for the opponent, rs_match.py:505-523).
+(MatchAgent.opp_elixir does the same for the opponent, rs_match.py:505-523). rs_match appends a
+command to seat.sent before the step says whether it was taken (rs_match.py:961, 993-995), so our
+own entries also take one equal play (card, exec tick) out of `sent` (sent_rows): the rebuild
+must not replay a play that never runs. (A legacy-memory match dates the entries at the send
+tick, not the exec tick, and they then match no sent play.)
+
+THE CLOCK. The view's tick is the observer's clock (in the simulator the noised one: perception
+noise's clock, + N(0, sigma) ticks). `sent` must be on the clock of `tick`: by default the view's
+own (live: taps are dated by the perceived tick; a simulator seat that logs its own sends at the
+tick it was given plus its delay). rs_match's seat.sent is on the TRUE clock (exec = true tick +
+delay): pass tick= the true tick, and the cut is made there and every row is moved onto the
+view's clock (exec + view tick - tick), so the rebuild's start tick, our replays and our aims
+share one clock (public["tick"] is always the view's tick).
 
 CARD CYCLES (CardCycle.from_plays, the same rule for both sides; plan section 5). With shuffle 0
 a played card goes to the back of the queue and returns to the hand four plays later, so the
@@ -150,7 +166,8 @@ import rs_elixir  # noqa: E402  (pure Python: the elixir law and counter)
 import rs_engine  # noqa: E402  (ENTITY_FIELDS_EXPECTED; royalesim only on demand, never here)
 import rs_memory  # noqa: E402  (pure Python: tokens, empty_view)
 
-__all__ = ["PublicViewError", "public_view", "is_public", "seen_by", "plays_of", "CardCycle",
+__all__ = ["PublicViewError", "public_view", "is_public", "seen_by", "plays_of", "sent_rows",
+           "CardCycle",
            "ElixirReading", "OppElixir", "SeatOppElixir", "make_opp_elixir", "Permanence",
            "card_ids", "mirror_ids", "spell_ids", "lifetimes_from_card_table",
            "PUBLIC_FIELDS", "PUBLIC_STATUS", "ENTITY_DEFAULTS", "SPELL_FIELDS_FALLBACK",
@@ -797,12 +814,17 @@ def public_view(state: Mapping[str, Any], team: int, mem_view: Mapping[str, Any]
                   simulator, our own run plays (our cycle); None: no plays
     fields, spell_fields  royalesim.ENTITY_FIELDS / SPELL_FIELDS (names or name -> index)
     opp_elixir    an ElixirReading (OppElixir / SeatOppElixir .view) or (milli, exact); None
-    sent          our plays sent, (exec tick, card, x, y) engine subtiles (rs_match seat.sent)
+    sent          our plays sent, (exec tick, card, x, y) engine subtiles (rs_match seat.sent),
+                  dated on the clock of `tick` (module doc, THE CLOCK); one sent play per
+                  `unran` entry of our own (team, card token, exec tick) is left out: the engine
+                  refused it, so it never runs (module doc, UNRAN)
     unran         the seat's Counter of memory entries the engine refused (module doc, UNRAN)
     mirror        the Mirror card ids (mirror_ids): a Mirror play makes a cycle inexact
     own_cycle, opp_cycle  cycles given instead of derived (live: our HUD's, CardCycle.from_known)
-    tick          the tick of the in-flight cut (default the state's: a noised clock reads it a
-                  little off; the simulator seat may pass the true tick)
+    tick          now on the clock `sent` is dated by, where the in-flight cut is made (default
+                  the view's own tick: `sent` is on the view's clock, as live). Given (the
+                  simulator seat's true tick: seat.sent is on the true clock), the rows are cut
+                  there and moved onto the view's clock by view tick - tick
     live          the state is already public (PublicStateBuilder.state): asserted (is_public),
                   then copied unchanged
     """
@@ -827,19 +849,40 @@ def public_view(state: Mapping[str, Any], team: int, mem_view: Mapping[str, Any]
     if opp_cycle is None:
         opp_cycle = CardCycle.from_plays([c for c, _ in opp_plays], mirror=mirror,
                                          missed=bool(reading is not None and reading.missed))
-    t = int(out.get("tick") or 0) if tick is None else int(tick)
-    rows = sorted(tuple(int(v) for v in s[:4]) for s in sent or ())
+    now = int(out.get("tick") or 0)
+    t = now if tick is None else int(tick)
+    shift = now - t
+    rows = sent_rows(sent, team, unran)
     out["public"] = {
-        "team": team, "tick": t,
+        "team": team, "tick": now,
         "opp_elixir": None if reading is None else [int(reading.milli), bool(reading.exact)],
         "opp_missed": bool(reading is not None and reading.missed),
         "opp_plays": [[c, int(w)] for c, w in opp_plays],
         "own_cycle": own_cycle.to_json(), "opp_cycle": opp_cycle.to_json(),
-        "own_inflight": [list(r) for r in rows if r[0] >= t],
-        "own_sent": [list(r) for r in rows if r[0] >= t - int(recent_ticks)],
+        "own_inflight": [[r[0] + shift, *r[1:]] for r in rows if r[0] >= t],
+        "own_sent": [[r[0] + shift, *r[1:]] for r in rows if r[0] >= t - int(recent_ticks)],
+        "sent_shift": shift,
         "dropped": dict(sorted(dropped.items())),
         "kept": [],
     }
+    return out
+
+
+def sent_rows(sent: Iterable[Sequence[int]] | None, team: int,
+              unran: Mapping[tuple, int] | None = None) -> list[tuple[int, int, int, int]]:
+    """Our sent plays (exec tick, card, x, y), sorted, less one play of each of `unran`'s entries
+    of our own (team, card token, exec tick): a play the engine refused at send or when it was
+    due never runs (rs_match never_ran puts the seat's own entry of it in its unran)."""
+    team = _team(team)
+    drop = Counter({(int(c) - rs_memory.TOKEN_OFFSET, int(t)): int(n)
+                    for (who, c, t), n in (unran or {}).items() if int(who) == team and int(n) > 0})
+    out = []
+    for r in sorted(tuple(int(v) for v in s[:4]) for s in sent or ()):
+        key = (r[1], r[0])
+        if drop[key] > 0:
+            drop[key] -= 1
+            continue
+        out.append(r)
     return out
 
 

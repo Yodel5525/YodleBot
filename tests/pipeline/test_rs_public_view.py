@@ -194,9 +194,27 @@ def test_refused_plays_are_left_out_and_the_winner_shows_only_at_the_end():
     assert PV.public_view(state_dict(tick=500, winner=0), 1, fields=FIELD)["winner"] == -1
     assert PV.public_view(state_dict(tick=500, game_over=True, winner=1), 1,
                           fields=FIELD)["winner"] == 1
-    # the in-flight cut follows `tick` when given
+    # `tick` is now on the clock of `sent` (the true one, say): the cut is made there and the
+    # rows move onto the view's clock (300); public["tick"] stays the view's
     cut = PV.public_view(noised_state(), 1, mem, fields=FIELD, sent=SENT, tick=320)
-    assert cut["public"]["tick"] == 320 and cut["public"]["own_inflight"] == []
+    assert cut["public"]["tick"] == 300 and cut["public"]["own_inflight"] == []
+    assert cut["public"]["sent_shift"] == -20
+    assert cut["public"]["own_sent"] == [[200, LOG, 9000 * SUB, 15000 * SUB],
+                                         [290, SKELS, 5000 * SUB, 20000 * SUB]]
+    behind = PV.public_view(noised_state(), 1, mem, fields=FIELD, sent=SENT, tick=296)
+    assert behind["public"]["own_inflight"] == [[314, SKELS, 5000 * SUB, 20000 * SUB]]
+    assert PV.public_view(noised_state(), 1, mem, fields=FIELD, sent=SENT)["public"][
+        "sent_shift"] == 0
+    # our own play the engine refused (rs_match: seat.sent keeps it, unran gets our entry)
+    # never runs: it is neither in flight nor among our recent aims
+    refused = Counter({(1, SKELS + rs_memory.TOKEN_OFFSET, 310): 1})
+    pub = PV.public_view(noised_state(), 1, mem, fields=FIELD, sent=SENT, unran=refused)["public"]
+    assert pub["own_inflight"] == [] and pub["own_sent"] == [[220, LOG, 9000 * SUB, 15000 * SUB]]
+    twice = SENT + [(310, SKELS, 5000 * SUB, 20000 * SUB)]       # one of two equal plays
+    assert PV.sent_rows(twice, 1, refused) == [(150, HOG, 3500 * SUB, 14500 * SUB),
+                                               (220, LOG, 9000 * SUB, 15000 * SUB),
+                                               (310, SKELS, 5000 * SUB, 20000 * SUB)]
+    assert PV.sent_rows(SENT, 0, refused) == sorted(SENT)        # another team's entry: kept
 
 
 def test_an_unreported_status_has_no_public_view():

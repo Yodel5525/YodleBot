@@ -6,9 +6,11 @@ TokenPolicyAdapter and sim/model_tokens' own forward within 1e-5, for one row an
 in one pass; heads(b) and four tiles(b, slot) run the encoder once (a forward hook counts the
 passes); tiles_for / tiles_cards give each pair's logits from one tile-head call; values() reads
 the value head's column 0 ("swing") or tanh(z / 2) of the critic ("critic"), and the teacher's
-policy_values reads the same V through it; rs_decide.decide gives the same decision, draw for
-draw (the same Decision and the same generator state after it), in the legacy, live and sampling
-presets, while the adapter runs one pass per slot tried. Also: as_batched, the training-mode
+policy_values reads the same V through it (values(rows) is the critic's, refused for a model
+without one, as the teacher's adapter path refuses it); an empty hand slot is masked and tiled as
+the adapter has it; rs_decide.decide gives the same decision, draw for draw (the same Decision
+and the same generator state after it), in the legacy, live and sampling presets, while the
+adapter runs one pass per slot tried. Also: as_batched, the training-mode
 refusal, mixed widths, the identity cache, and that importing rs_search imports no torch.
 
 Needs numpy; torch via importorskip; the CUDA test is gpu-marked. No engine or data.
@@ -284,14 +286,24 @@ def test_values_read_the_value_head_or_the_critic(kind):
         v = bp.values(rows, SR.VALUE_SWING)
     assert seen == [5] and v.dtype == np.float64 and v.shape == (5,)
     close(v, swing)
-    assert bp.values([]).shape == (0,)
+    assert bp.values([], SR.VALUE_SWING).shape == (0,)
     if kind == "legacy":
         assert bp.value_kind == SR.VALUE_SWING
-        close(bp.values(rows), swing)
+        close(bp.values(rows, bp.value_kind), swing)            # the search's V
+        close(bp.encode_rows(rows).values(), swing)
+        # values(rows) is the teacher's protocol, the critic's V: a model without a critic is
+        # refused, as the teacher's adapter path refuses it, never given the swing instead
+        with pytest.raises(SR.BatchedPolicyError, match="critic"):
+            bp.values(rows)
+        with pytest.raises(SR.BatchedPolicyError, match="critic"):
+            T.policy_values(bp, rows)
+        with pytest.raises(T.TeacherError, match="critic"):
+            T.policy_values(adapter, rows)
         with pytest.raises(SR.BatchedPolicyError, match="critic"):
             bp.values(rows, SR.VALUE_CRITIC)
         with pytest.raises(SR.BatchedPolicyError, match="critic"):
             SR.BatchedPolicy(model, value_kind=SR.VALUE_CRITIC)
+        close(SR.BatchedPolicy(model, value_kind=SR.VALUE_SWING).values(rows), swing)
         return
     critic = np.tanh(np.asarray(z) / 2)
     got = bp.values(rows)
@@ -303,6 +315,32 @@ def test_values_read_the_value_head_or_the_critic(kind):
     # the teacher calls values(rows) first: the V of its own batched adapter path
     close(T.policy_values(bp, rows), got, atol=1e-6)
     close(T.policy_values(adapter, rows), got, atol=1e-6)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_empty_hand_slot_is_masked_and_tiled_as_the_adapter_does(kind):
+    """A row with an empty slot (token 0) in a batch of full hands: the gate masks that slot
+    (MASK_LOGIT) and its tiles read the padding card, both as the adapter has them row by row;
+    the other rows are untouched."""
+    model = make_model(kind, seed=8)                      # torch, or the test skips
+    from sim import model_tokens as mt
+    adapter, bp = RD.TokenPolicyAdapter(model), SR.BatchedPolicy(model)
+    rng = np.random.default_rng(8)
+    rows = [make_row(rng, schema_of(kind)) for _ in range(3)]
+    rows[1]["hand"][2] = 0
+    enc = bp.encode_rows(rows)
+    for i, row in enumerate(rows):
+        b = adapter.batch(row)
+        ga, va = adapter.heads(b)
+        g, v = enc.head(i)
+        close(g, ga)
+        if va is not None:
+            assert list(v) == pytest.approx(list(va), abs=ATOL)
+        for s in range(RD.HAND_SIZE):
+            close(enc.tiles(i, s), adapter.tiles(b, s))
+    assert enc.gate[1, 1 + 2] == pytest.approx(mt.MASK_LOGIT)
+    assert enc.gate[0, 1 + 2] > mt.MASK_LOGIT / 2 and enc.gate[2, 1 + 2] > mt.MASK_LOGIT / 2
+    close(enc.tiles_for([(1, 2), (0, 2)])[0], enc.tiles(1, 2))
 
 
 # ---------------------------------------------------------------------------

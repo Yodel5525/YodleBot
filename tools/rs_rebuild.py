@@ -1,7 +1,7 @@
 r"""The rebuilder: one reused RoyaleSim Battle reset from a public view (S04).
 
     from tools import rs_rebuild as RB              # or `import rs_rebuild` (tools/ on sys.path)
-    rb = RB.Rebuilder(cfg, royalesim, spawn_table, settings=RB.RebuildSettings.from_report())
+    rb = RB.Rebuilder(cfg, royalesim, spawn_table, settings=settings)   # pinned (S08: SearchConfig)
     view = keep.apply(PV.public_view(seen, team, mem, ...))   # S02: public view + Permanence
     spec = rb.spec(view, land_tick=B, seed=seed)    # a RootSpec: pure, picklable, spec.key
     built = rb.root(spec)                           # a Built at B, or None (rb.last_error.reason)
@@ -29,33 +29,37 @@ LEVELS (plan 4.8; RebuildSettings.level, or spec(level=)):
   R2  R1 plus deploy-timer recasts and spell recasts (below).
 
 THE SPEC (RootSpec, build_spec / Rebuilder.spec). Everything a reset needs, decided before any
-engine call but the two pure queries it caches (building_placement for the snap, formation_preview
-for a card's deploy time): seed, both decks in deal order (shuffle 0: hand = deck[0:4], queue =
-deck[4:8]), elixir, tower hp, the spawns (team, card, x, y, hp) with each one's view uid and
-creating card, the recasts, our plays in flight (replays: exec tick < B; later: exec tick >= B,
-for the trials), and the bookkeeping fidelity reads. A frozen dataclass of tuples, so it pickles
-(the procs backend, plan 6.3) and spec.key is the sha1 of its canonical JSON: two views that differ
-only in what no screen shows give one key (the S08 leak test).
+engine call but two pure queries (building_placement for the snap; formation_preview for a card's
+members, deploy time and tap point): seed, both decks in deal order (shuffle 0: hand =
+deck[0:4], queue = deck[4:8]), elixir, tower hp, the spawns (team, card, x, y, hp) with each one's
+view uid and creating card, the recasts, our plays in flight (replays: exec tick < B; later: exec
+tick >= B, for the trials), and the bookkeeping fidelity reads. A frozen dataclass of tuples, so it
+pickles (the procs backend, plan 6.3) and spec.key is the sha1 of its canonical JSON: two views that
+differ only in what no screen shows give one key (the S08 leak test).
 
 THE DEAL (deal()). Each side's target is its hand H and queue Q at t (CardCycle, S02; the
 opponent's open slots filled from `opp_fill`, a deck prior's draw, then its seen deck padded with
 Hog 2.6 filler; ours from our own deck). Some cards must be PLAYED by the rebuild before the hand
 reads H: the recast cards and our in-flight cards (replays, then later ones), in play order R. A
-card of R that is in H (our in-flight card while the engine still holds it: it pays and cycles
-when it runs, Battle docstring of set_command_delay_ticks) is played from its slot as it is. A card
-of R that is in Q (a recast's card, already cycled; or our in-flight card when the HUD already
-cycled it, live) is re-dealt: |R in Q| hand slots C are given to those cards, and the C cards go
-to the head of the queue in that order, so each play of R[i] from C[i]'s slot brings C[i] back:
+card of R that is in H (our in-flight card while the hand still holds it: the engine and the live
+client both pay and cycle a play when it runs, Battle docstring of set_command_delay_ticks,
+rs_decide.prune_pending) is played from its slot as it is. A card of R that is in Q (a recast's
+card, already cycled; or our in-flight card when the hand already shows it cycled, an engine that
+cycles at send, probe P16) is re-dealt: |R in Q| hand slots C are given to those cards, and the C
+cards go to the head of the queue in that order, so each play of R[i] from C[i]'s slot brings
+C[i] back:
   pre-hand = H with slot(C[i]) := R[i];   pre-queue = C + (Q minus R)
 After the plays the hand is H, slot for slot, and the queue is (Q minus R) + R: Q itself when R
 is Q's tail in play order (the most recent plays; else the flag "queue_reordered"). C prefers
 Mirror and Elixir Collector (calibration economy.OMIT_FROM_STARTING_HAND swaps them out of a
 starting hand; probe P14): one left in the pre-hand is flagged "omit_in_hand".
 
-ELIXIR (plan 4.2). Ours: the view's (the HUD's), plus the cost of our in-flight plays when the
-caller's elixir has already paid them (RebuildSettings.inflight_paid: live, the client charges at
-the tap; in the simulator the engine charges when the play runs, probe P16). The opponent's: the
-counted reading in view["public"]["opp_elixir"] (S02; 0 and inexact when absent). Each side's
+ELIXIR (plan 4.2, 4.3). Ours: the view's (the HUD's), plus the cost of our in-flight plays when
+the caller's elixir has already paid them (RebuildSettings.inflight_paid: only for an engine that
+charges at send, probe P16; the engine's docstring and the live client charge when the play runs,
+so a live HUD has not paid them: public_state's pending_cost, rs_decide._spendable, and
+RebuildSettings.live() keeps inflight_paid False). The opponent's: the counted reading in
+view["public"]["opp_elixir"] (S02; 0 and inexact when absent). Each side's
 recast costs are added, so the count is right once they have run; the sum is clamped to
 [0, 10000] (flag "elixir_clamped").
 
@@ -63,18 +67,33 @@ SPAWNS (plan 4.2). sanitize_for_rebuild clamps units into the arena, moves groun
 water, caps hp, pads decks and keeps each king at 1 hp or more. One spec per unit (or per
 formation, probe P1: RebuildSettings.spec_per), card = public_state.rebuild_card (a Witch's
 skeleton spawns as Skeletons), at the sanitized point, hp = the unit's hp fraction x the card's own
-hit points at the rebuild battle's level (the E06 spawn table's "hp", unit_hitpoints' own row),
-clamped to [1, that]. A building is snapped to where Battle.building_placement says a tap there
-lands (asked on a blank board, cached), so its footprint is a real deploy's. Units no card makes
-(Golemite, Lava Pup, death bombs: sanitize's "no spawn card") are lost.
+hit points at the rebuild battle's level (the E06 spawn table's "hp", unit_hitpoints' own row;
+with forms on, a card reset in its evolved / hero form scales by that form's max_hp as the view
+shows it), clamped to [1, that]. A building is snapped to where Battle.building_placement says a
+tap there lands (asked on a blank board, cached), so its footprint is a real deploy's. Units no
+card makes (Golemite, Lava Pup, death bombs: sanitize's "no spawn card") are lost.
+A spec that lays more than its own unit (the spawn table's "all" lists every unit type one reset
+spec of the card put down; probe P17): a member of such a card is spawned as a card whose spec
+lays only that unit when there is one (a Goblin Gang goblin as Goblins, flag "spec_substituted",
+relabelled to Goblin Gang), and a unit such a card's spec brings along (a Ram Rider's rider, a
+Goblin Giant's Spear Goblins) is not spawned again while a primary unit of its card is in the
+view (flag "carried"; not lost).
 
 RECASTS (R2; plan 4.4). A spawn starts deployed (probe P2) and fires no deploy blow, so:
-  deploy   a group of one side's units of one card that is that unit's own card (not a child: a
-           Witch's skeletons are never recast as a Witch), with deploy ticks within
-           deploy_group_ticks of each other, that has at least recast_min_left of the card's deploy
-           time left (formation_preview's longest member, else DEFAULT_DEPLOY_TICKS) is not spawned:
-           its card is played at t, ours at our exact aim (seat.sent / own_sent), the opponent's
-           at the group's centroid (a building at its snapped centre). One group per side and card.
+  deploy   one side's deploying members of one play: the units whose creating card (the view's
+           card_id) is a troop or building card and that are its members (its own unit, or a unit
+           formation_preview lists for it: a Goblin Gang's Spear Goblins; never a child: a Witch's
+           skeletons are not recast as a Witch). A play is recast only when it is whole: as many
+           members as formation_preview lays (else the catalogue count), their deploy timers
+           spread no more than the formation's own stagger (calibration
+           formation.DEPLOY_STAGGER: member k waits k x SummonDeployDelay) plus
+           deploy_group_ticks, and at least recast_min_left of the card's deploy time (the
+           longest member's, else DEFAULT_DEPLOY_TICKS) left on the youngest. Anything else
+           (a member dead or unseen, two plays of one card) is spawned as it is (flag
+           "recast_partial"): a recast lays the whole formation, so a part recast would double
+           units. Its card is played at t, ours at our exact aim (seat.sent / own_sent), the
+           opponent's at the formation's tap point (formation_preview's offset from the members'
+           centroid, else the centroid; a building at its snapped centre).
   spell    (SPELL cards only; a troop's effect is dropped, flag "effect_dropped") our spell in
            flight at our known aim (own_sent); an enemy projectile (PROJECTILE_NAMES) at the aim
            infer_aim finds; a rolling one (ROLLING_NAMES) at its first sighting (SpellSightings;
@@ -114,24 +133,31 @@ FIDELITY AND REFUSALS (plan 4.6). fidelity = the hp share of the view's units th
 or recast (lost: dropped by sanitize, or a recast refused when it ran) x inexact_elixir (0.8) when
 the opponent count is not exact, 0 when refused. Below min_fidelity (0.7) the search plays d0
 (usable()). root() returns None, with last_error = Refusal(reason, detail), for: the spec's own
-"units_dropped" (more than max_dropped_share of the visible units dropped) and "overtime_crowns"
-(overtime with unequal crowns: the game would be over, probe P7), "reset_refused" (one bad spec
-fails the whole reset), "game_over_at_reset", "delayed_battle" (the battle reports a command delay)
-and "error" (any other exception, so the caller can count them: three in a battle turn search off).
+"units_dropped" (more than max_dropped_share of the visible units dropped), "towers_unknown" (a
+side's tower_hp is not [king, left, right]: a reset without it would put every tower at full hp)
+and "overtime_crowns" (overtime with unequal crowns: the game would be over, probe P7),
+"reset_refused" (one bad spec fails the whole reset), "game_over_at_reset", "delayed_battle" (the
+battle reports a command delay) and "error" (any other exception, so the caller can count them:
+three in a battle turn search off).
 
-PROBE-DRIVEN SETTINGS (RebuildSettings.from_report: the newest reports/search_bench/engine_*.json
-of tools/rs_search_bench.py engine, S01; without one the safe defaults, which are the plan's):
+PROBE-DRIVEN SETTINGS (RebuildSettings.from_report: a report, or the newest
+reports/search_bench/engine_*.json of tools/rs_search_bench.py engine that has probes, S01;
+without one the safe defaults, which are the plan's). Asked for, never implied: a Rebuilder
+without settings uses RebuildSettings() (the defaults), so a report written later cannot change
+an arm between gate runs; S08 pins the settings it uses (to_json, key) in its config.
   spec_per        "unit"    P1 FAIL (one Skeletons spec makes several): "formation"
   deploy_recasts  True      P2 FAIL (spawns carry deploy timers), or P13's played HogRider showing
                             no deploy timer: False
-  inflight_paid   False     P16: the elixir is charged when the play is SENT: True (live callers
-                            pass RebuildSettings.live(): the client charges at the tap)
+  inflight_paid   False     P16: the elixir is charged when the play is SENT: True (the
+                            simulator only; RebuildSettings.live() keeps it False: the live
+                            client charges when the play runs)
   omit_rule       True      P14 FAIL (Mirror / Elixir Collector stay in the first four): False
   forms           False     P5 PASS (reset forms reach spawns): True, each side's cards seen
                             evolved / hero get that form (a reset refused with forms is retried
                             without, flag "forms_refused")
 P4 (levels), P6 (king activation), P11 (riders), P12 (shields) are things a reset cannot carry
-(plan 4.7) and change nothing here; P8 is guarded (a battle reporting a delay is refused).
+(plan 4.7) and change nothing here; P8 is guarded (a battle reporting a delay is refused); P11 and
+P17 (what a spec brings along) are read from the spawn table's "all" instead (SPAWNS).
 
 Never imports scripts/gamestate (the memory reader), torch or royalesim at import time; never
 taps, captures or touches the emulator. Imports the standard library and tools/rs_engine,
@@ -219,13 +245,14 @@ SIGHT_REACH_MT_PER_TICK = 600.0
 
 # Refusals (Refusal.reason).
 REFUSED_SPEC_DROPPED = "units_dropped"
+REFUSED_TOWERS = "towers_unknown"
 REFUSED_OVERTIME = "overtime_crowns"
 REFUSED_RESET = "reset_refused"
 REFUSED_GAME_OVER = "game_over_at_reset"
 REFUSED_DELAYED = "delayed_battle"
 REFUSED_ERROR = "error"
-REFUSALS = (REFUSED_SPEC_DROPPED, REFUSED_OVERTIME, REFUSED_RESET, REFUSED_GAME_OVER,
-            REFUSED_DELAYED, REFUSED_ERROR)
+REFUSALS = (REFUSED_SPEC_DROPPED, REFUSED_TOWERS, REFUSED_OVERTIME, REFUSED_RESET,
+            REFUSED_GAME_OVER, REFUSED_DELAYED, REFUSED_ERROR)
 
 
 class RebuildError(ValueError):
@@ -303,14 +330,7 @@ def with_present(future: Mapping[str, Any], present: Mapping[str, Any]) -> dict:
 # settings, and the probes that set them
 # ---------------------------------------------------------------------------
 
-def load_report(path: str | Path | None = None, out_dir: str | Path = BENCH_DIR) -> dict | None:
-    """The S01 engine report at `path`, else the newest engine_*.json in `out_dir`; None when there
-    is none or it does not read as a JSON object."""
-    if path is None:
-        files = sorted(Path(out_dir).glob("engine_*.json"))
-        if not files:
-            return None
-        path = files[-1]
+def _read_report(path: str | Path) -> dict | None:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
@@ -318,6 +338,19 @@ def load_report(path: str | Path | None = None, out_dir: str | Path = BENCH_DIR)
     if isinstance(data, dict):
         data.setdefault("_path", str(path))
         return data
+    return None
+
+
+def load_report(path: str | Path | None = None, out_dir: str | Path = BENCH_DIR) -> dict | None:
+    """The S01 engine report at `path`, else the newest engine_*.json in `out_dir` that has
+    probes (a later `engine --no-probes` run, timings only, does not hide the probes of an
+    earlier one); None when there is none or it does not read as a JSON object."""
+    if path is not None:
+        return _read_report(path)
+    for f in sorted(Path(out_dir).glob("engine_*.json"), reverse=True):
+        data = _read_report(f)
+        if data is not None and data.get("probes"):
+            return data
     return None
 
 
@@ -365,6 +398,10 @@ def probe_overrides(report: Mapping[str, Any] | None) -> tuple[dict[str, Any], l
         out["inflight_paid"] = p16.get("elixir") == "send"
         if out["inflight_paid"]:
             notes.append("P16: elixir is charged at send, in-flight costs are added back")
+    if _probe_ok(probes, "P17") is False:
+        notes.append("P17 FAIL: a spec lays its second summon too; the spawn table's 'all' "
+                     "decides the substitution (module doc, SPAWNS): regenerate it under this "
+                     "engine")
     return out, notes
 
 
@@ -439,10 +476,22 @@ class RebuildSettings:
         return cls(**kw)
 
     @classmethod
-    def live(cls, **overrides: Any) -> "RebuildSettings":
-        """For the live runner (S13): the client charges our elixir and cycles our hand at the tap,
-        so in-flight costs are added back (inflight_paid)."""
-        return cls.from_report(**{"inflight_paid": True, **overrides})
+    def live(cls, base: "RebuildSettings | None" = None, **overrides: Any) -> "RebuildSettings":
+        """For the live runner (S13): `base` (the settings the gate ran; default the defaults) with
+        inflight_paid False. The live client charges our elixir and cycles our hand when a play
+        RUNS, not at the tap (Battle.set_command_delay_ticks docstring: "measured on the live
+        client"; rs_decide.prune_pending; public_state reports pending_cost apart and
+        rs_decide._spendable subtracts it), so the HUD's elixir has not paid our plays in flight
+        and each pays when the rebuild steps it in (plan 4.3)."""
+        return (base or cls()).replace(**{"inflight_paid": False, **overrides})
+
+    @property
+    def key(self) -> str:
+        """sha1 of what changes a rebuild (every field but `probes` and `notes`, the
+        provenance): equal keys, equal rebuilds. S08 records it beside SearchConfig."""
+        data = {k: v for k, v in self.to_json().items() if k not in ("probes", "notes")}
+        text = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -487,14 +536,58 @@ class Tables:
         self.spells = frozenset(i for i, k in self.kind.items() if k == "SPELL")
         self.spawnable = [i for i, k in sorted(self.kind.items()) if k in ("TROOP", "BUILDING")]
         self.filler = PV.card_ids(rs_spawn_table.FILLER_NAMES, self.names)
+        # What one reset spec of a card puts down (the spawn table's "all", measured by
+        # rs_spawn_table; absent in an older table: nothing is known, nothing changes).
+        self.all_units = {int(c): frozenset(int(u) for u in us)
+                          for c, us in (spawn_table.get("all") or {}).items()}
+        #: Cards whose spec lays a unit type besides its own (a second summon, a rider).
+        self.bundled = frozenset(c for c, us in self.all_units.items()
+                                 if c in self.primary and us - {self.primary[c]})
+        #: unit type -> the lowest card whose spec lays that unit and nothing else.
+        self.alone: dict[int, int] = {}
+        for c, u in sorted(self.primary.items()):
+            if c in self.all_units and self.all_units[c] <= {u}:
+                self.alone.setdefault(u, c)
 
     def own_hp(self, card: int, level: int | None = None) -> int | None:
         return _own_hp(self.hp_table, card, self.level if level is None else level)
 
-    def spawn_card(self, card: Any, unit: Any) -> int | None:
-        """public_state.rebuild_card: the card a spawn of entity (card_id, unit_type) uses."""
+    def unit_name(self, unit: Any) -> str | None:
+        try:
+            u = int(unit)
+        except (TypeError, ValueError):
+            return None
+        return self.unit_names[u] if 0 <= u < len(self.unit_names) else None
+
+    def unit_id(self, name: Any) -> int:
+        """The unit type id of a unit name (unit_types order), -1 when it is not one."""
+        try:
+            return self.unit_names.index(str(name))
+        except ValueError:
+            return -1
+
+    def base_card(self, card: Any, unit: Any) -> int | None:
+        """public_state.rebuild_card: the card RSAgent.rebuilt spawns for (card_id, unit_type)."""
         return _ps().rebuild_card(int(card), int(unit), self.primary, self.by_unit,
                                   self.unit_names)
+
+    def spawn_card(self, card: Any, unit: Any) -> int | None:
+        """The card a spawn of entity (card_id, unit_type) uses: base_card, except that the own
+        unit of a bundled card (its spec lays more, module doc SPAWNS) spawns as a card whose
+        spec lays that unit alone, when there is one."""
+        c = self.base_card(card, unit)
+        if c is not None and c in self.bundled and self.primary.get(c) == int(unit):
+            return self.alone.get(int(unit), c)
+        return c
+
+    def carried(self, card: Any, unit: Any) -> bool:
+        """Whether a unit of type `unit` made by `card` comes with the spec of `card`'s own unit
+        (a rider, a second summon: the spawn table's "all"), so it is not spawned again, while
+        `card`'s own unit spawns as `card` itself (no alone card stands in for it)."""
+        c, u = int(card), int(unit)
+        own = self.primary.get(c)
+        return (c in self.bundled and own is not None and u != own
+                and u in self.all_units.get(c, ()) and own not in self.alone)
 
     def cap(self, card: int) -> int:
         return int(DAMAGE_CAP.get(self.names[card] if 0 <= card < len(self.names) else "",
@@ -990,13 +1083,18 @@ def build_spec(view: Mapping[str, Any], tables: Tables, settings: RebuildSetting
                sub: int = SUBTILE_PER_MILLITILE, opp_fill: Iterable[int] = (),
                snap: Callable[[int, int, int, int], tuple[int, int] | None] | None = None,
                deploy_total: Callable[[int], int] | None = None,
-               first_sighting: Callable[[int, int], tuple[int, int, int] | None] | None = None
+               first_sighting: Callable[[int, int], tuple[int, int, int] | None] | None = None,
+               members: Callable[[int], Sequence[tuple[str, int]] | None] | None = None,
+               tap_point: Callable[[int, int, int, int], tuple[int, int] | None] | None = None
                ) -> RootSpec:
     """The R1 / R2 RootSpec of a public view (module doc). view: rs_public_view.public_view, with
     Permanence's kept rows if any; land_tick: B (default the view's tick); opp_fill: cards for the
     opponent's open slots first (a deck prior's draw); snap(team, card, x, y) -> (x, y) or None: a
     building's landing point (Rebuilder.snap); deploy_total(card) -> ticks (Rebuilder.deploy_total);
-    first_sighting(team, card) -> (tick, x, y) (SpellSightings.first)."""
+    first_sighting(team, card) -> (tick, x, y) (SpellSightings.first); members(card) -> the
+    (unit name, deploy ticks) a play of the card lays, or None (Rebuilder.members; without it a
+    play is its catalogue count of its own unit, all deploying together); tap_point(team, card, x,
+    y) -> the tap whose formation is centred on (x, y), or None (Rebuilder.tap_point)."""
     s = settings or RebuildSettings()
     level = level or s.level
     if level == R0:
@@ -1031,17 +1129,58 @@ def build_spec(view: Mapping[str, Any], tables: Tables, settings: RebuildSetting
             dropped += 1
             lost_hp += int(e[F["hp"]])
 
-    # --- one candidate spawn per kept unit: (spawn, label, uid, row, spawn card). The hp fraction
-    # is the view row's (sanitize has capped the hp already); the point is sanitize's.
+    # --- the spawn card of each kept unit
     first_row: dict[int, Sequence[Any]] = {}
     for e in view_units:
         first_row.setdefault(int(e[F["uid"]]), e)
-    cands = []
+    # a unit a bundled card's spec brings along is not spawned again while that card's own unit
+    # is in the view (module doc, SPAWNS)
+    carriers = {(int(e[F["team"]]), int(e[F["card_id"]])) for e in kept_rows
+                if tables.primary.get(int(e[F["card_id"]])) == int(e[F["unit_type"]])}
+    picked: list[tuple[Sequence[Any], int]] = []
     for e in kept_rows:
-        card = tables.spawn_card(e[F["card_id"]], e[F["unit_type"]])
+        label, unit_type = int(e[F["card_id"]]), int(e[F["unit_type"]])
+        if (int(e[F["team"]]), label) in carriers and tables.carried(label, unit_type):
+            flags.append("carried")
+            continue
+        card = tables.spawn_card(label, unit_type)
         if card is None:                    # sanitize keeps only units with a spawn card
             continue
-        own = tables.own_hp(card)
+        if card != tables.base_card(label, unit_type):
+            flags.append("spec_substituted")
+        picked.append((e, card))
+
+    # --- forms (probe P5): a card seen evolved / hero on a side is reset in that form, and its
+    # spawns are scaled by that form's max_hp (the view's), not the base card's
+    forms_of: list[tuple] = [(), ()]
+    form_max: dict[tuple[int, int], int] = {}
+    if s.forms:
+        for side in (0, 1):
+            of: dict[int, int] = {}
+            for e, card in picked:
+                st = int(e[F["status_flags"]] or 0)
+                if int(e[F["team"]]) == side and int(e[F["card_id"]]) == card and st > 0:
+                    if st & PV.STATUS_HERO:
+                        of[card] = 2
+                    elif st & PV.STATUS_EVOLVED:
+                        of.setdefault(card, 1)
+            forms_of[side] = tuple(sorted(of.items()))
+        for e, card in picked:
+            side = int(e[F["team"]])
+            form = dict(forms_of[side]).get(card, 0)
+            bit = PV.STATUS_HERO if form == 2 else PV.STATUS_EVOLVED if form == 1 else 0
+            if bit and int(e[F["status_flags"]] or 0) & bit:
+                src = first_row.get(int(e[F["uid"]]), e)
+                mx = int(src[F["max_hp"]] or 0)
+                if mx > 0:
+                    form_max[(side, card)] = max(form_max.get((side, card), 0), mx)
+
+    # --- one candidate spawn per kept unit: (spawn, label, uid, row, spawn card). The hp fraction
+    # is the view row's (sanitize has capped the hp already); the point is sanitize's.
+    cands = []
+    for e, card in picked:
+        side = int(e[F["team"]])
+        own = form_max.get((side, card)) or tables.own_hp(card)
         src = first_row.get(int(e[F["uid"]]), e)
         hp, mx = int(src[F["hp"]]), int(src[F["max_hp"]] or 0)
         if own is None:
@@ -1052,50 +1191,62 @@ def build_spec(view: Mapping[str, Any], tables: Tables, settings: RebuildSetting
         x, y = int(e[F["x"]]), int(e[F["y"]])
         if snap is not None and int(e[F["kind"]]) == KIND_BUILDING \
                 and tables.kind.get(card) == "BUILDING":
-            got = snap(int(e[F["team"]]), card, x, y)
+            got = snap(side, card, x, y)
             if got is not None:
                 x, y = int(got[0]), int(got[1])
-        cands.append(((int(e[F["team"]]), card, x, y, hp_spawn), int(e[F["card_id"]]),
+        cands.append(((side, card, x, y, hp_spawn), int(e[F["card_id"]]),
                       int(e[F["uid"]]), e, card))
 
-    # --- R2 deploy recasts
+    # --- R2 deploy recasts: one whole play per side and card (module doc, RECASTS)
     recasts: list[Recast] = []
     in_recast: set[int] = set()            # cands indices
     own_sent = pub.get("own_sent") or ()
+
+    def left_of(i: int) -> int:
+        return int(cands[i][3][F["deploy_ticks"]] or 0)
+
     if level == R2 and s.deploy_recasts:
         groups = defaultdict(list)
         for i, (_sp, label, _uid, e, card) in enumerate(cands):
-            if int(e[F["deploy_ticks"]] or 0) > 0 and label == card:
-                groups[(int(e[F["team"]]), card)].append(i)
-        for (side, card), idx in sorted(groups.items()):
-            idx.sort(key=lambda i: (-int(cands[i][3][F["deploy_ticks"]]), cands[i][2]))
-            chunks: list[list[int]] = []
-            for i in idx:
-                d = int(cands[i][3][F["deploy_ticks"]])
-                if chunks and int(cands[chunks[-1][0]][3][F["deploy_ticks"]]) - d \
-                        <= int(s.deploy_group_ticks):
-                    chunks[-1].append(i)
-                else:
-                    chunks.append([i])
-            total = max(1, int(deploy_total(card)))
-            ok = [ch for ch in chunks
-                  if int(cands[ch[0]][3][F["deploy_ticks"]]) >= s.recast_min_left * total]
-            if not ok:
+            if left_of(i) <= 0 or tables.kind.get(label) not in ("TROOP", "BUILDING"):
                 continue
-            ch = ok[0]                      # the youngest group; any other is spawned
-            left_ticks = int(cands[ch[0]][3][F["deploy_ticks"]])
-            played = tick - max(0, total - left_ticks)
-            x = int(round(sum(cands[i][0][2] for i in ch) / len(ch)))
-            y = int(round(sum(cands[i][0][3] for i in ch) / len(ch)))
+            if label != card:               # a second summon of `label`'s play, or a child
+                names = {str(m[0]) for m in (members(label) or ())} if members else set()
+                if tables.unit_name(e[F["unit_type"]]) not in names:
+                    continue                # a Witch's skeleton is never recast as a Witch
+            groups[(int(e[F["team"]]), label)].append(i)
+        for (side, card), idx in sorted(groups.items()):
+            idx.sort(key=lambda i: (-left_of(i), cands[i][2]))
+            total = max(1, int(deploy_total(card)))
+            youngest = left_of(idx[0])
+            if youngest < s.recast_min_left * total:
+                continue                    # most of its deploy is gone: spawned as it is
+            form = list(members(card) or ()) if members else []
+            # the members the view must show (a rider the spec brings along was not kept)
+            laid = [m for m in form if not tables.carried(card, tables.unit_id(m[0]))]
+            want = len(laid) or int(tables.count.get(card, 1))
+            ticks = [int(m[1]) for m in form]
+            stagger = max(ticks) - min(ticks) if ticks else 0
+            spread = youngest - left_of(idx[-1])
+            if len(idx) != want or spread > stagger + int(s.deploy_group_ticks):
+                flags.append("recast_partial")      # not one whole play: a recast would lay
+                continue                            # the whole formation again
+            played = tick - max(0, total - youngest)
+            x = int(round(sum(cands[i][0][2] for i in idx) / len(idx)))
+            y = int(round(sum(cands[i][0][3] for i in idx) / len(idx)))
             if side == team:
                 aim = _own_aim(own_sent, card, int(pub.get("tick", tick)), total + 3)
                 if aim is not None:
                     x, y, played = aim
-            rows = _sorted_spawns((cands[i][0], cands[i][1], cands[i][2]) for i in ch)
+            elif tap_point is not None:
+                got = tap_point(side, card, x, y)
+                if got is not None:
+                    x, y = int(got[0]), int(got[1])
+            rows = _sorted_spawns((cands[i][0], cands[i][1], cands[i][2]) for i in idx)
             recasts.append(Recast(side, card, x, y, "deploy", tables.cost.get(card, 0), int(played),
                                   rows[0], rows[1], rows[2],
-                                  sum(int(cands[i][3][F["hp"]]) for i in ch)))
-            in_recast.update(ch)
+                                  sum(int(cands[i][3][F["hp"]]) for i in idx)))
+            in_recast.update(idx)
 
     # --- R2 spell recasts (R1: dropped)
     spells = list(view.get("spells") or ())
@@ -1236,27 +1387,16 @@ def build_spec(view: Mapping[str, Any], tables: Tables, settings: RebuildSetting
     if clamped:
         flags.append("elixir_clamped")
 
-    # --- forms (probe P5)
-    forms_of: list[tuple] = [(), ()]
-    if s.forms:
-        for side in (0, 1):
-            of: dict[int, int] = {}
-            for (sp, label, _uid, e, card) in cands:
-                st = int(e[F["status_flags"]] or 0)
-                if sp[0] == side and label == card and st > 0:
-                    if st & PV.STATUS_HERO:
-                        of[card] = 2
-                    elif st & PV.STATUS_EVOLVED:
-                        of.setdefault(card, 1)
-            forms_of[side] = tuple(sorted(of.items()))
-
-    # --- towers, refusals
+    # --- towers, refusals (a side without its three towers is refused: tower_hp None would
+    # reset every tower at full hp)
     towers = tuple(tuple(int(h) for h in (san["players"][t].get("tower_hp") or ())[:3])
                    for t in (0, 1))
     tower_hp = towers if all(len(t) == 3 for t in towers) else None
     refusal = None
     if units and dropped / units > s.max_dropped_share:
         refusal = REFUSED_SPEC_DROPPED
+    elif tower_hp is None:
+        refusal = REFUSED_TOWERS
     regular = int(view.get("regular_ticks") or REGULAR_TICKS)
     if refusal is None and tower_hp is not None and tick >= regular:
         crowns = [sum(1 for k in (1, 2) if tower_hp[1 - t][k] <= 0)
@@ -1431,9 +1571,10 @@ class Rebuilder:
     """One Battle per process, reused with reset (module doc). engine: an rs_engine.EngineConfig
     (or its to_json(); None: rs_engine.active()), always undelayed; rs: the royalesim module (None:
     imported when the battle is first needed); spawn_table: the E06 table (None: read from
-    data/rs_rows/spawn_primary.json); settings: RebuildSettings (None: RebuildSettings.from_report
-    (), the newest S01 report's probes). catalogue / catalogue_fields / fields / spell_fields / sub
-    / level: given instead of read from the engine (tests, workers)."""
+    data/rs_rows/spawn_primary.json); settings: RebuildSettings (None: RebuildSettings(), the
+    plan's defaults; the probes' answers only when the caller passes RebuildSettings.from_report
+    (...), so nothing read from disk later changes a rebuild). catalogue / catalogue_fields /
+    fields / spell_fields / sub / level: given instead of read from the engine (tests, workers)."""
 
     def __init__(self, engine: Any = None, rs: ModuleType | None = None,
                  spawn_table: Mapping[str, Any] | None = None, *,
@@ -1446,7 +1587,7 @@ class Rebuilder:
         self.cfg = rs_engine.resolve(engine).undelayed()
         self._rs = rs
         self._spawn_table = None if spawn_table is None else dict(spawn_table)
-        self.settings = settings if settings is not None else RebuildSettings.from_report()
+        self.settings = settings if settings is not None else RebuildSettings()
         self._catalogue = None if catalogue is None else [list(r) for r in catalogue]
         self._catalogue_fields = None if catalogue_fields is None else list(catalogue_fields)
         self._fields = fields
@@ -1458,7 +1599,7 @@ class Rebuilder:
         self._battle: Any = None
         self._tables: Tables | None = None
         self._snaps: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
-        self._deploy: dict[int, int] = {}
+        self._previews: dict[int, tuple | None] = {}
         self._blank = False
         self._current: Built | None = None
         self._dirty = True
@@ -1568,25 +1709,55 @@ class Rebuilder:
         self._snaps[key] = got
         return got
 
+    def _preview(self, card: int) -> tuple | None:
+        """formation_preview's members of a blue play of `card` at the spawn point (cached), or
+        None without the accessor or for a card it refuses."""
+        card = int(card)
+        if card in self._previews:
+            return self._previews[card]
+        rows = None
+        fn = getattr(self.battle, "formation_preview", None)
+        if callable(fn) and 0 <= card < len(self.tables.names):
+            sx, sy = rs_spawn_table.spawn_point(self.sub)
+            try:
+                rows = tuple(tuple(r) for r in (fn(0, self.tables.names[card], sx, sy) or ())
+                             if len(r) >= 4)
+            except Exception:                   # not a deployable card here
+                rows = None
+        self._previews[card] = rows or None
+        return self._previews[card]
+
+    def members(self, card: int) -> tuple[tuple[str, int], ...] | None:
+        """(unit name, deploy ticks) of each member a play of `card` lays (formation_preview, in
+        creation order: member k's ticks include its formation.DEPLOY_STAGGER wait), or None."""
+        rows = self._preview(card)
+        if not rows:
+            return None
+        return tuple((str(r[0]), max(0, int(math.ceil(float(r[3]) / TICK_MS)))) for r in rows)
+
     def deploy_total(self, card: int) -> int:
         """`card`'s deploy time in ticks: formation_preview's longest member (cached), else
         DEFAULT_DEPLOY_TICKS."""
-        card = int(card)
-        if card in self._deploy:
-            return self._deploy[card]
-        ticks = DEFAULT_DEPLOY_TICKS
+        ticks = [t for _, t in self.members(card) or ()]
+        return max(1, max(ticks)) if ticks and max(ticks) > 0 else DEFAULT_DEPLOY_TICKS
+
+    def tap_point(self, team: int, card: int, x: int, y: int) -> tuple[int, int] | None:
+        """The tap whose formation_preview members are centred on (x, y) subtiles: (x, y) less
+        the offset of the members' centroid from a tap there (one fixed-point step; a building's
+        or a single unit's is (x, y)); None without the accessor or when it refuses."""
         fn = getattr(self.battle, "formation_preview", None)
-        if callable(fn):
-            sx, sy = rs_spawn_table.spawn_point(self.sub)
-            try:
-                rows = list(fn(0, self.tables.names[card], sx, sy) or ())
-                ms = [float(r[3]) for r in rows if len(r) >= 4]
-                if ms and max(ms) > 0:
-                    ticks = max(1, int(math.ceil(max(ms) / TICK_MS)))
-            except Exception:                   # not a deployable card here: the default
-                pass
-        self._deploy[card] = ticks
-        return ticks
+        if not callable(fn) or not 0 <= int(card) < len(self.tables.names):
+            return None
+        try:
+            rows = [r for r in (fn(int(team), self.tables.names[int(card)], int(x), int(y)) or ())
+                    if len(r) >= 3]
+        except Exception:                       # an odd card: keep the centroid
+            return None
+        if not rows:
+            return None
+        ox = sum(float(r[1]) for r in rows) / len(rows) - int(x)
+        oy = sum(float(r[2]) for r in rows) / len(rows) - int(y)
+        return int(round(int(x) - ox)), int(round(int(y) - oy))
 
     # ------------------------------------------------------------ specs
     def spec(self, view: Mapping[str, Any], *, land_tick: int | None = None, seed: int = 0,
@@ -1600,7 +1771,8 @@ class Rebuilder:
         return build_spec(view, self.tables, self.settings, land_tick=land_tick, seed=seed,
                           level=level, fields=self.F, spell_fields=self.SF, sub=self.sub,
                           opp_fill=opp_fill, snap=snap, deploy_total=self.deploy_total,
-                          first_sighting=self.sightings.first)
+                          first_sighting=self.sightings.first, members=self.members,
+                          tap_point=self.tap_point)
 
     def spec_r0(self, state: Mapping[str, Any], team: int, *, sent: Iterable[Sequence[int]] = (),
                 lead: int = 0, public: bool = False) -> RootSpec:
@@ -1788,6 +1960,7 @@ class Rebuilder:
         b = built.battle
         if self._current is not built or self._dirty:
             b.load(built.blob)
+            self._blank = False                 # a root's board: snap() must reset first
             if verify and b.state_json() != built.raw:
                 raise RebuildError("the root's state_json differs after load(): the restore is "
                                    "not exact")

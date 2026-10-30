@@ -18,8 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.pipeline.conftest import (DEFAULT_CATALOGUE, DEPLOY_REASONS, Call, FakeBattle,
-                                     entity_row, make_fake_royalesim, player_dict, state_dict)
+from tests.pipeline.conftest import (DEFAULT_CATALOGUE, DEFAULT_UNIT_TYPES, DEPLOY_REASONS, Call,
+                                     FakeBattle, catalogue_row, entity_row, make_fake_royalesim,
+                                     player_dict, state_dict)
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "tools"
@@ -293,6 +294,31 @@ def test_report_cli_json_and_missing_inputs(sb, tmp_path, capsys):
     assert "no timings" in capsys.readouterr().err
 
 
+def test_report_skips_a_newer_probes_only_or_quick_report(sb, tmp_path, capsys):
+    """`engine --probes ... --no-timings` after a full run, then an `engine --quick`: the report
+    still reads the full run; a quick one only when it is all there is, with a warning."""
+    full = canned_engine()
+    probes_only = {k: v for k, v in canned_engine().items() if k != "timings"}
+    quick = canned_engine()
+    quick["settings"] = {"reps": 3, "quick": True}
+    quick["timings"]["step"]["busy"]["60"] = _s(600.0)
+    (tmp_path / "engine_20261030_120000.json").write_text(json.dumps(full))
+    (tmp_path / "engine_20261030_130000.json").write_text(json.dumps(probes_only))
+    (tmp_path / "engine_20261030_140000.json").write_text(json.dumps(quick))
+    assert sb.newest_engine(tmp_path) == (tmp_path / "engine_20261030_120000.json", None)
+    assert sb.main(["report", "--dir", str(tmp_path), "--json", "--no-write", "--row-ms", "1.5",
+                    "--forward-ms", "5"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["sources"]["engine"] == "engine_20261030_120000.json" and "warnings" not in rec
+    assert rec["latency_ticks"] == {"s_root": 1, "s_idle": 2, "s_reply": 2}
+    (tmp_path / "engine_20261030_120000.json").unlink()
+    got, warning = sb.newest_engine(tmp_path)
+    assert got == tmp_path / "engine_20261030_140000.json" and "--quick" in warning
+    assert sb.main(["report", "--dir", str(tmp_path), "--json", "--no-write"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["warnings"] == [warning] and "--quick" in captured.err
+
+
 def test_search_says_it_needs_s08(sb, capsys):
     assert sb.main(["search", "--ckpt", "runs/tokens/live_big_hog/best.pt", "--opp-ckpt",
                     "runs/tokens/live_big/best.pt", "--games", "6", "--delay", "24",
@@ -305,8 +331,8 @@ def test_engine_cli_refuses_unknown_probes(sb, capsys):
     assert "P99" in capsys.readouterr().err
 
 
-def test_probe_ids_are_p1_to_p16(sb):
-    assert sb.PROBE_IDS == tuple(f"P{i}" for i in range(1, 17))
+def test_probe_ids_are_p1_to_p17(sb):
+    assert sb.PROBE_IDS == tuple(f"P{i}" for i in range(1, 18))
     assert all(p.question.endswith("?") or "?" in p.question for p in sb.PROBES)
 
 
@@ -426,6 +452,35 @@ def test_p1_counts_the_entities_of_one_spec(sb, n, ok):
     assert ("per unit" if ok else "per formation") in rec["note"]
     spawned = rs.battles[-1].reset_kwargs["spawns"]
     assert spawned == [(0, SKELETONS, 9000 * 18, 10000 * 18, -1)]
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_p17_counts_the_unit_types_one_spec_lays(sb, bundled):
+    catalogue = list(DEFAULT_CATALOGUE) + [catalogue_row("GoblinGang", 3, "TROOP")]
+    units = list(DEFAULT_UNIT_TYPES) + ["Goblin", "SpearGoblin"]
+    gang, goblin, spear = len(DEFAULT_CATALOGUE), units.index("Goblin"), units.index("SpearGoblin")
+
+    def states(b):
+        ents = [entity_row(uid=100, team=0, card_id=gang, x=9000 * 18, y=10000 * 18, hp=202,
+                           unit_type=goblin)]
+        if bundled:                         # the spec lays its three Spear Goblins too
+            ents += [entity_row(uid=101 + i, team=0, card_id=gang, x=(9000 + 400 * i) * 18,
+                                y=10400 * 18, hp=133, unit_type=spear) for i in range(3)]
+        return state_dict(tick=b.tick, entities=ents)
+    rs = make_fake_royalesim(states=states, catalogue=catalogue, unit_types=units)
+    [rec] = sb.run_probes(_lab(sb, rs), sb.QUICK, only=["P17"])
+    assert rec["ok"] is (not bundled), rec["note"]
+    got = rec["answer"]["GoblinGang"]
+    assert got["entities"] == (4 if bundled else 1)
+    assert got["units"] == ({"Goblin": 1, "SpearGoblin": 3} if bundled else {"Goblin": 1})
+    assert list(rec["answer"]) == ["GoblinGang"]                  # no Three Musketeers here
+    assert ("second summon" in rec["note"]) is bundled
+    assert rs.battles[-1].reset_kwargs["spawns"] == [(0, gang, 9000 * 18, 10000 * 18, -1)]
+
+
+def test_p17_is_not_run_without_the_cards(sb):
+    [rec] = sb.run_probes(_lab(sb, make_fake_royalesim()), sb.QUICK, only=["P17"])
+    assert rec["ok"] is None and rec["note"].startswith("not run: no GoblinGang")
 
 
 class QueueBattle(FakeBattle):

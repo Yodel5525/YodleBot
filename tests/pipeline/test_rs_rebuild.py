@@ -377,7 +377,8 @@ def test_recast_costs_are_added_to_that_sides_elixir(ps):
     spec = RB.build_spec(view, TABLES, RB.RebuildSettings(level=RB.R2), land_tick=T0 + 24,
                          fields=FIELD, opp_fill=[ARCHER, ARROWS, BABYD, ZAP])
     assert spec.elixir == (10_000, 9000) and "elixir_clamped" in spec.flags
-    # live (the client charged the Log at the tap): its cost is added back too
+    # an engine that charges a play when it is SENT (probe P16 "send"; not the live client,
+    # which charges when the play runs): the Log's cost is added back too
     live = RB.build_spec(view_of(push_state(), 0, PUSH_MEM, opp_elixir=(5000, False), sent=SENT),
                          TABLES, RB.RebuildSettings(level=RB.R2, inflight_paid=True),
                          land_tick=T0 + 24, fields=FIELD, opp_fill=[ARCHER, ARROWS, BABYD, ZAP])
@@ -469,6 +470,197 @@ def test_a_refused_recast_is_spawned_instead_and_the_deck_redealt(ps):
     assert MINIPEKKA in built.labels.values()                  # the spawned group is relabelled
     assert steps(b)[0] == ([(0, 2, *HOG_AIM)], 1)
     assert built.fidelity == 1.0                              # spawned, not lost
+
+
+# ---------------------------------------------------------------------------
+# multi-member plays: Goblins (staggered), a Goblin Gang (a second summon), a Goblin Giant
+# (riders); the catalogue and spawn table above plus four cards and three unit types
+# ---------------------------------------------------------------------------
+
+GOBLIN_ROWS = [["Goblins", 0, 2, 4, 0, False, 0, 0, "TROOP"],
+               ["GoblinGang", 0, 3, 3, 0, False, 0, 0, "TROOP"],
+               ["SpearGoblins", 0, 2, 3, 0, False, 0, 0, "TROOP"],
+               ["GoblinGiant", 0, 6, 1, 0, False, 0, 0, "TROOP"]]
+CATALOGUE2 = CATALOGUE + GOBLIN_ROWS
+NAMES2 = [r[0] for r in CATALOGUE2]
+GOBLINS, GANG, SPEARS, GGIANT = range(len(CATALOGUE), len(CATALOGUE2))
+UNITS2 = UNITS + ["Goblin", "SpearGoblin", "GoblinGiant"]
+UID2 = {n: i for i, n in enumerate(UNITS2)}
+PRIMARY2 = {**PRIMARY, "Goblins": "Goblin", "GoblinGang": "Goblin",
+            "SpearGoblins": "SpearGoblin", "GoblinGiant": "GoblinGiant"}
+HP2 = {**HP11, "Goblins": 202, "GoblinGang": 202, "SpearGoblins": 133, "GoblinGiant": 3000}
+#: formation_preview's (unit, deploy ticks): member k waits k x the card's SummonDeployDelay
+#: (Goblins 200 ms: 4 ticks; the Gang's goblins and its second summon 100 ms).
+MEMBERS = {GOBLINS: (("Goblin", 20), ("Goblin", 24), ("Goblin", 28), ("Goblin", 32)),
+           GANG: (("Goblin", 20), ("Goblin", 22), ("Goblin", 24),
+                  ("SpearGoblin", 22), ("SpearGoblin", 24), ("SpearGoblin", 26)),
+           WITCH: (("Witch", 20),)}
+
+
+def table2(all_units=None):
+    t = {"format": 1, "card_names": list(NAMES2), "unit_types": list(UNITS2),
+         "primary": {str(NAMES2.index(c)): UID2[u] for c, u in PRIMARY2.items()},
+         "hp": {str(NAMES2.index(c)): {"11": [["own", PRIMARY2[c], hp]]} for c, hp in HP2.items()}}
+    if all_units:
+        t["all"] = {str(NAMES2.index(c)): sorted(UID2[u] for u in us)
+                    for c, us in all_units.items()}
+    return t
+
+
+def unit2(uid, team, name, card, x, y, hp, *, deploy=0):
+    row = unit(uid, team, None, card, x, y, hp, deploy=deploy)
+    row[FIELD["unit_type"]] = UID2[name]
+    return row
+
+
+def goblin_view(ents, last):
+    """Seat 0 at T0: the opponent's latest play is `last` (its formation `ents` on the board)."""
+    me = player_dict(0, elixir_milli=6000, hand=[CANNON, FIREBALL, SKELS, LOG], next_card=MUSK,
+                     deck=list(range(8)))
+    mem = memory([(MUSK, 700), (ICEGOLEM, 800), (SPIRITS, 900), (HOG, 950)],
+                 [(GIANT, 600), (VALK, 700), (KNIGHT, 800), (last, T0 - 2)])
+    state = state_dict(T0, players=[me, player_dict(1)], entities=ents)
+    return view_of(state, 0, mem, opp_elixir=(5000, True))
+
+
+def goblin_spec(view, tables, level=RB.R2):
+    return RB.build_spec(view, tables, RB.RebuildSettings(level=level), land_tick=T0 + 24,
+                         fields=FIELD, opp_fill=[ARCHER, ARROWS, BABYD, ZAP],
+                         members=MEMBERS.get,
+                         deploy_total=lambda c: max(t for _, t in MEMBERS.get(c, (("", 20),))),
+                         tap_point=lambda team, card, x, y: (x + 5, y - 7))
+
+
+GOBLIN_AT = ((8500, 19500), (9500, 19500), (8500, 20500), (9500, 20500))
+
+
+def test_a_deploy_recast_takes_the_whole_play_or_none_of_it(ps):
+    tables = RB.Tables(CATALOGUE2, table2(), level=11)
+    # four Goblins two ticks after the play: member k has 30 - 4k ticks left (the stagger)
+    goblins = [unit2(40 + k, 1, "Goblin", GOBLINS, *GOBLIN_AT[k], 202, deploy=30 - 4 * k)
+               for k in range(4)]
+    skeleton = unit2(50, 1, "Skeleton", WITCH, 12000, 22000, 81, deploy=10)   # a Witch's
+    spec = goblin_spec(goblin_view(goblins + [skeleton], GOBLINS), tables)
+    [rec] = spec.recasts
+    assert (rec.team, rec.card, rec.kind, rec.order, rec.cost) == (1, GOBLINS, "deploy", T0 - 2,
+                                                                   2000)
+    assert (rec.x, rec.y) == (9000 * SUB + 5, 20000 * SUB - 7)       # the formation's tap point
+    assert sorted(rec.uids) == [40, 41, 42, 43] and set(rec.labels) == {GOBLINS}
+    assert rec.hp == 4 * 202
+    # no goblin is spawned beside the recast (it lays all four); the skeleton is spawned
+    assert spec.spawns == ((1, SKELS, *mt(12000, 22000), 81),) and spec.labels == (WITCH,)
+    assert "recast_partial" not in spec.flags and spec.elixir[1] == 5000 + 2000
+    # one goblin gone: not one whole play, so nothing is recast and the three are spawned
+    spec = goblin_spec(goblin_view(goblins[:3], GOBLINS), tables)
+    assert spec.recasts == () and "recast_partial" in spec.flags
+    assert sorted(s[1] for s in spec.spawns) == [GOBLINS] * 3 and spec.elixir[1] == 5000
+    # a Goblin Gang: its three goblins and its three Spear Goblins (a second summon, spawned as
+    # SpearGoblins) are one play: one recast of the Gang, none of them spawned
+    gang = ([unit2(60 + k, 1, "Goblin", GANG, 8500 + 500 * k, 20000, 202, deploy=22 - 2 * k)
+             for k in range(3)]
+            + [unit2(63 + k, 1, "SpearGoblin", GANG, 8500 + 500 * k, 21000, 133,
+                     deploy=24 - 2 * k) for k in range(3)])
+    spec = goblin_spec(goblin_view(gang, GANG), tables)
+    [rec] = spec.recasts
+    assert (rec.card, rec.order, rec.cost) == (GANG, T0 - 2, 3000)
+    assert sorted(s[1] for s in rec.spawns) == [GANG] * 3 + [SPEARS] * 3
+    assert set(rec.labels) == {GANG} and spec.spawns == ()
+    # without formation_preview the play is the catalogue count deploying together: the
+    # staggered goblins are spawned, never recast in part
+    bare = RB.build_spec(goblin_view(goblins, GOBLINS), tables, RB.RebuildSettings(level=RB.R2),
+                         land_tick=T0 + 24, fields=FIELD, opp_fill=[ARCHER, ARROWS, BABYD, ZAP],
+                         deploy_total=lambda c: 32)
+    assert bare.recasts == () and len(bare.spawns) == 4 and "recast_partial" in bare.flags
+
+
+def test_a_spec_that_lays_more_than_its_unit_is_substituted_or_carries_it(ps):
+    """The spawn table's "all": a Goblin Gang spec lays its Spear Goblins too, so its goblins
+    spawn as Goblins; a Goblin Giant spec brings its riders, so they are not spawned again."""
+    table = table2(all_units={"Goblins": ["Goblin"], "GoblinGang": ["Goblin", "SpearGoblin"],
+                              "SpearGoblins": ["SpearGoblin"],
+                              "GoblinGiant": ["GoblinGiant", "SpearGoblin"]})
+    tables = RB.Tables(CATALOGUE2, table, level=11)
+    assert tables.bundled == {GANG, GGIANT} and tables.alone[UID2["Goblin"]] == GOBLINS
+    assert tables.spawn_card(GANG, UID2["Goblin"]) == GOBLINS
+    assert tables.spawn_card(GGIANT, UID2["GoblinGiant"]) == GGIANT     # nothing lays it alone
+    assert tables.carried(GGIANT, UID2["SpearGoblin"])
+    assert not tables.carried(GANG, UID2["SpearGoblin"])                # the goblins are Goblins
+    gang = ([unit2(60 + k, 1, "Goblin", GANG, 8500 + 500 * k, 20000, 202) for k in range(3)]
+            + [unit2(63 + k, 1, "SpearGoblin", GANG, 8500 + 500 * k, 21000, 133)
+               for k in range(3)])
+    giant = [unit2(70, 1, "GoblinGiant", GGIANT, 4000, 22000, 3000),
+             unit2(71, 1, "SpearGoblin", GGIANT, 3800, 22000, 133),
+             unit2(72, 1, "SpearGoblin", GGIANT, 4200, 22000, 133)]
+    spec = goblin_spec(goblin_view(gang + giant, GANG), tables, level=RB.R1)
+    got = sorted(zip((s[1] for s in spec.spawns), spec.labels))
+    assert got == [(GOBLINS, GANG)] * 3 + [(SPEARS, GANG)] * 3 + [(GGIANT, GGIANT)]
+    assert {"spec_substituted", "carried"} <= set(spec.flags)
+    assert (spec.units, spec.dropped, spec.lost_hp) == (9, 0, 0) and RB.fidelity(spec) == 1.0
+    # the giant gone (its riders jumped off): they are spawned as Spear Goblins
+    spec = goblin_spec(goblin_view(giant[1:], GGIANT), tables, level=RB.R1)
+    assert sorted(s[1] for s in spec.spawns) == [SPEARS, SPEARS] and "carried" not in spec.flags
+
+
+def test_a_side_without_three_towers_is_refused(ps):
+    state = push_state()
+    state["players"][1]["tower_hp"] = [KING_HP, PRINCESS_HP]            # a misread lost one
+    view = view_of(state, 0, PUSH_MEM, opp_elixir=(5000, True), sent=SENT)
+    spec = RB.build_spec(view, TABLES, RB.RebuildSettings(level=RB.R2), land_tick=T0 + 24,
+                         fields=FIELD, opp_fill=[ARCHER, ARROWS, BABYD, ZAP])
+    assert spec.tower_hp is None and spec.refusal == RB.REFUSED_TOWERS
+    assert RB.fidelity(spec) == 0.0
+    rb, mod = rebuilder()
+    assert rb.root(spec) is None and rb.last_error.reason == "towers_unknown"
+    assert mod.battles == []                                  # the battle is never touched
+
+
+def test_forms_scale_a_spawn_by_its_forms_max_hp(ps):
+    """An evolved Knight at half of its form's 2000 hp: with forms on (probe P5) it is reset as
+    the evolution and spawned at 1000, not at half the base Knight's 1766."""
+    knight = unit(30, 1, "Knight", KNIGHT, 4000, 20000, 1000, 2000, status=PV.STATUS_EVOLVED)
+    full = unit(31, 1, "Knight", KNIGHT, 5000, 20000, 2000, 2000, status=PV.STATUS_EVOLVED)
+    me = player_dict(0, hand=[CANNON, FIREBALL, SKELS, LOG], next_card=MUSK, deck=list(range(8)))
+    view = view_of(state_dict(T0, players=[me, player_dict(1)], entities=[knight, full]), 0,
+                   PUSH_MEM, opp_elixir=(5000, True))
+    on = RB.build_spec(view, TABLES, RB.RebuildSettings(forms=True), fields=FIELD)
+    assert on.forms_of == ((), ((KNIGHT, 1),))
+    assert dict(zip(on.uids, (s[4] for s in on.spawns))) == {30: 1000, 31: 2000}
+    off = RB.build_spec(view, TABLES, RB.RebuildSettings(), fields=FIELD)
+    assert off.forms_of == ((), ()) and dict(zip(off.uids, (s[4] for s in off.spawns))) == {
+        30: 883, 31: 1766}
+
+
+class PlaceBattle(CycleBattle):
+    """CycleBattle with building_placement: records (tick, entities on the board) per ask."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.placed = []
+
+    def building_placement(self, team, name, x, y):
+        self.placed.append((self.tick, len(self.ents)))
+        return (x, y)
+
+
+def test_snap_asks_on_a_blank_board_even_after_a_root_was_loaded_back(ps):
+    mod = make_fake_royalesim()
+
+    def Battle(*args, **kwargs):
+        b = PlaceBattle()
+        mod.battles.append(b)
+        return b
+    mod.Battle = Battle
+    rb = RB.Rebuilder(rs_engine.EngineConfig.legacy(), mod, SPAWN_TABLE,
+                      settings=RB.RebuildSettings(), catalogue=CATALOGUE, fields=FIELD)
+    built = rb.root(push_spec(rb))
+    assert built is not None, rb.last_error
+    b = built.battle
+    assert rb.snap(1, CANNON, *mt(9000, 20000)) == mt(9000, 20000)
+    assert b.placed[-1] == (RB.BLANK_TICK, 0)                 # a blank board
+    assert rb.legal(MUSK, *mt(6000, 10000), built) == 0       # the root is loaded back ...
+    assert b.tick == T0 + 24 and len(b.ents) == 4
+    assert rb.snap(1, CANNON, *mt(9000, 21000)) == mt(9000, 21000)
+    assert b.placed[-1] == (RB.BLANK_TICK, 0)                 # ... and blanked again to ask
 
 
 def test_two_states_that_differ_only_in_what_no_screen_shows_give_one_spec(ps):
@@ -771,20 +963,43 @@ def test_probe_settings_follow_the_engine_report(tmp_path):
     d = RB.RebuildSettings.from_report(search=False)
     assert d == RB.RebuildSettings() and d.probes == "defaults"
     assert RB.RebuildSettings.from_report(search=False, level="R2").level == "R2"
-    # the newest engine report of a folder
+    # the newest engine report of a folder that has probes: a later timings-only run
+    # (--no-probes) does not hide them
     (tmp_path / "engine_20261030_000000.json").write_text(json.dumps({"probes": []}))
     (tmp_path / "engine_20261030_000001.json").write_text(json.dumps(report))
+    (tmp_path / "engine_20261030_000002.json").write_text(json.dumps({"timings": {"x": 1}}))
     got = RB.load_report(out_dir=tmp_path)
     assert got["probes"] == report["probes"] and got["_path"].endswith("000001.json")
     assert RB.load_report(out_dir=tmp_path / "none") is None
     s2 = RB.RebuildSettings.from_report(path=tmp_path / "engine_20261030_000001.json")
     assert s2.spec_per == "formation" and s2.probes.endswith("000001.json")
-    assert RB.RebuildSettings.live().inflight_paid
+    # live: the client charges a play when it runs, so in-flight costs are never added back,
+    # whatever the simulator's engine does; the rest is the settings the gate ran
+    assert not RB.RebuildSettings.live().inflight_paid
+    live = RB.RebuildSettings.live(s)
+    assert not live.inflight_paid and (live.spec_per, live.forms) == ("formation", True)
+    assert RB.RebuildSettings.live(level="R2").level == "R2"
     assert RB.RebuildSettings.from_json(s.to_json()) == s
+    # the key: what changes a rebuild, not where the values came from
+    assert s.key == RB.RebuildSettings.from_json(s.to_json()).key
+    assert s.replace(probes="elsewhere", notes=("n",)).key == s.key
+    assert s.replace(level="R2").key != s.key and len(s.key) == 40
     with pytest.raises(ValueError):
         RB.RebuildSettings(level="R3")
     with pytest.raises(ValueError):
         RB.RebuildSettings(min_fidelity=1.5)
+
+
+def test_a_rebuilder_without_settings_never_reads_a_report(tmp_path):
+    """A report written between two gate runs must not change an arm: no settings, the
+    defaults (whatever reports/search_bench holds); the probes only when asked for."""
+    (tmp_path / "engine_20261030_000001.json").write_text(json.dumps(
+        {"probes": [{"id": "P1", "ok": False}, {"id": "P16", "answer": {"elixir": "send"}}]}))
+    rb = RB.Rebuilder(rs_engine.EngineConfig.legacy(), cycle_rs(), SPAWN_TABLE,
+                      catalogue=CATALOGUE, fields=FIELD)
+    assert rb.settings == RB.RebuildSettings() and rb.settings.probes == "defaults"
+    asked = RB.RebuildSettings.from_report(path=tmp_path / "engine_20261030_000001.json")
+    assert (asked.spec_per, asked.inflight_paid) == ("formation", True)
 
 
 def test_with_present_keeps_the_present_hand_and_elixir():

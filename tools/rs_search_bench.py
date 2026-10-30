@@ -47,13 +47,19 @@ accessor the engine lacks, or an error, which is recorded). Every probe records 
   P15  does a blob saved on one Battle load on a sibling Battle?
   P16  under set_command_delay_ticks, are the elixir and the hand charged when a play is SENT
        or when it RUNS? (added by the S01 task; the report repeats it as "pending_charge")
+  P17  does a spec of a card with a second summon (Goblin Gang, Three Musketeers) lay only its
+       own unit type? (added: P1 asks about Skeletons only; a Goblin Gang goblin spawns as a
+       Goblin Gang spec, so its Spear Goblins would be doubled. S04 reads the same answer for
+       every card from the spawn table's "all")
 
 It writes reports/search_bench/engine_<stamp>.json and the readable summary beside it as
 engine_<stamp>.txt, and prints the summary.
 
-report (any venv, no engine). Reads the newest engine_*.json (or --engine) and, when one exists,
-the newest search_*.json (or --search), prints the table and a recommendation, and writes
-report_<stamp>.json:
+report (any venv, no engine). Reads the newest engine_*.json that has timings, preferring one
+not made with --quick (or --engine; a later `--no-timings` probe run does not hide an earlier full
+one, and a --quick report is used only when there is no other, with a warning: its p95s are of 3
+samples), and, when one exists, the newest search_*.json (or --search), prints the table and a
+recommendation, and writes report_<stamp>.json:
   per preset (s_root, s_idle, s_reply; plan section 3.2) the estimated search time against its
   deadline (80 / 120 ms, section 6.3), the cuts needed in the plan's order (H 40, 5 trials,
   K 2; then the asynchronous mode), the most trials within the budget, latency_ticks =
@@ -1122,6 +1128,31 @@ def _p16(lab: Lab, s: "BenchSettings"):
     return ok, answer, note
 
 
+def _p17(lab: Lab, s: "BenchSettings"):
+    out: dict[str, Any] = {}
+    for name in ("GoblinGang", "ThreeMusketeers"):
+        cid = lab.card(name)
+        if cid is None:
+            continue
+        b = lab.battle()
+        units = lab.units_of(lab.reset(b, spawns=[lab.spawn(0, cid, SPAWN_MT)]), 0)
+        if not units:
+            b.step([], 1)
+            units = lab.units_of(lab.state(b), 0)
+        kinds = Counter(str(lab.unit_name(e)) for e in units)
+        out[name] = {"entities": len(units), "units": dict(sorted(kinds.items())),
+                     "unit_types": len(kinds)}
+    if not out:
+        raise Skip("no GoblinGang or ThreeMusketeers in this engine's catalogue")
+    extra = [n for n, r in out.items() if r["unit_types"] > 1]
+    ok = not extra
+    note = ("a spec lays only its own unit type: each member spawns as its own spec" if ok else
+            f"a spec of {extra} lays its second summon too: never spawn such a card's member as "
+            "that card (S04 substitutes a card whose spec lays only that unit, from the spawn "
+            "table's 'all')")
+    return ok, out, note
+
+
 PROBES: tuple[Probe, ...] = (
     Probe("P1", "Does one Skeletons spec make 1 entity?",
           "1 entity per spec", "S04: one spec per unit, or one per formation", _p1),
@@ -1157,6 +1188,8 @@ PROBES: tuple[Probe, ...] = (
     Probe("P16", "Under set_command_delay_ticks, are elixir and the hand charged at SEND or "
           "when the play RUNS?", "both at RUN (Battle docstring)",
           "plan 4.3: own in-flight plays pay when stepped in; public_state pending_cost", _p16),
+    Probe("P17", "Does a spec of a card with a second summon (GoblinGang) lay only its own unit "
+          "type?", "its own unit only", "S04 spawns (spawn_card, the spawn table's 'all')", _p17),
 )
 PROBE_IDS = tuple(p.id for p in PROBES)
 
@@ -1742,6 +1775,31 @@ def newest(out_dir: Path, kind: str) -> Path | None:
     return files[-1] if files else None
 
 
+def newest_engine(out_dir: Path) -> tuple[Path | None, str | None]:
+    """(the newest engine report with timings, a warning or None): one not made with --quick
+    first; a quick one only when there is no other; (None, why) when none has timings."""
+    files = sorted(Path(out_dir).glob("engine_*.json"), reverse=True)
+    quick = None
+    for f in files:
+        try:
+            data = _load(f)
+        except (OSError, ValueError):
+            continue
+        if not data.get("timings"):
+            continue
+        if not (data.get("settings") or {}).get("quick"):
+            return f, None
+        quick = quick or f
+    if quick is not None:
+        return quick, (f"{quick.name} is a --quick run (p95 of a few samples): run `engine` "
+                       "without --quick for the numbers the recommendation should use")
+    if files:
+        return None, (f"no timings in any engine report in {out_dir} (the newest, "
+                      f"{files[0].name}, was run with --no-timings?): run "
+                      "`tools/rs_search_bench.py engine`")
+    return None, None
+
+
 # ---------------------------------------------------------------------------
 # command line
 # ---------------------------------------------------------------------------
@@ -1822,10 +1880,17 @@ def _load(path: Path) -> dict:
 
 def run_report(args: argparse.Namespace) -> int:
     out_dir = Path(args.dir)
-    epath = Path(args.engine) if args.engine else newest(out_dir, "engine")
+    warning = None
+    if args.engine:
+        epath = Path(args.engine)
+    else:
+        epath, warning = newest_engine(out_dir)
     if epath is None or not epath.is_file():
-        _say(f"no engine report in {out_dir}: run `tools/rs_search_bench.py engine` first")
+        _say(warning or f"no engine report in {out_dir}: run `tools/rs_search_bench.py engine` "
+             "first")
         return 1
+    if warning:
+        _say(f"warning: {warning}")
     spath = Path(args.search) if args.search else newest(out_dir, "search")
     try:
         engine = _load(epath)
@@ -1847,6 +1912,8 @@ def run_report(args: argparse.Namespace) -> int:
              f"({type(exc).__name__}: {exc})")
         return 1
     rec["sources"] = {"engine": epath.name, "search": spath.name if search else None}
+    if warning:
+        rec["warnings"] = [warning]
     text += "\n" + render_recommendation(rec)
     if args.json:
         print(json.dumps(rec, indent=2))

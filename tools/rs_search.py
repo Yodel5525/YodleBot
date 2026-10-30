@@ -6,7 +6,7 @@ r"""Search on a rebuilt board (docs/LIVE_SEARCH_PLAN.md). This part: BatchedPoli
     enc = policy.encode_rows(rows)                # many rows, one encoder pass
     gate, value = enc.head(2)                     # TokenPolicyAdapter.heads of row 2
     logits = enc.tiles_for([(0, 1), (0, 3)])      # tile logits of (row, hand slot) pairs, one call
-    v = policy.values(after_rows)                 # V per after-row, one encoder pass
+    v = policy.values(after_rows, policy.value_kind)    # the search's V per after-row, one pass
 
 WHY (plan 6.1, "The shared encoder pass"). In TokenPolicy._heads (sim/model_tokens.py:251-270)
 the gate, the value head and the critic read only the encoder's output, and the tile logits are
@@ -38,7 +38,8 @@ BatchedPolicy(model, torch=None, *, batch=None, device=None, value_kind=None)
   encode(b)          the Encoded pass of a batch, cached by the batch's identity (the last
                      CACHE_BATCHES batches): heads(b) then tiles(b, slot) run the encoder once
   encode_rows(rows)  encode(stack(rows)), not cached (the caller holds the Encoded)
-  values(rows, kind) V per row, float64 [N], one encoder pass (below)
+  values(rows, kind) V per row, float64 [N], one encoder pass (below; kind None: the critic's,
+                     tools/rl/teacher.policy_values' protocol)
   stats              Counter: passes, rows, cache_hits, tile_calls, tile_rows
   clear()            drops the cache
 
@@ -53,7 +54,7 @@ Encoded (one pass over N rows; numpy float32 unless said)
   gate [N, G], value [N, 2], value2 [N, 2] or None (a model with a critic), cls (the encoder's
   [N, d] tensor, on the model's device), batch (the stacked tensors)
   head(i)            the adapter's heads() of row i: (gate[i], tuple(value2[i]) or None)
-  values(kind)       V per row (below)
+  values(kind)       V per row (below; kind None: the policy's value_kind, the search's V)
   tiles(i, slot)     [576] for the card in row i's hand slot `slot`
   tiles_for(pairs)   [M, 576] for (row, slot) pairs, one tile-head call
   tiles_cards(rows, tokens)   [M, 576] for (row, card token) pairs, one tile-head call; a token
@@ -67,8 +68,13 @@ VALUES (plan 3.1 step 9: score = swing + V + ...). kind:
             tools/rl/ppo.py:887-893): exactly what tools/rl/teacher.policy_values reads
             (teacher.py:318-366), which calls a policy's own values(rows) first; so this
             BatchedPolicy gives the teacher the same V as its batched TokenPolicyAdapter path.
-  None      value_kind: "critic" for a model with a critic, else "swing" (the constructor's
-            value_kind overrides; "critic" without a critic is refused).
+  None      BatchedPolicy.values(rows): "critic", the teacher's protocol, unless the constructor
+            was given a value_kind; a model without a critic then raises BatchedPolicyError, as
+            the teacher's adapter path raises TeacherError, instead of handing the teacher the
+            value head's swing (another unit) as if it were tanh(z / 2). Encoded.values() and
+            value_kind: the search's V (plan 3.1 step 9), "critic" for a model with a critic,
+            else "swing"; the search asks values(rows, policy.value_kind) or
+            encode_rows(rows).values(). ("critic" without a critic is refused.)
 The potential Phi, the terminal result (ppo.result_of, scaled for the value head) and the swing
 are the scorer's (S06), not the policy's.
 
@@ -255,6 +261,7 @@ class BatchedPolicy:
                                      f"{value_kind!r}")
         if value_kind == VALUE_CRITIC and not self.has_critic:
             raise BatchedPolicyError("value_kind 'critic' needs a model with a critic (value2)")
+        self._value_kind_given = value_kind
         self.value_kind = value_kind or (VALUE_CRITIC if self.has_critic else VALUE_SWING)
         self.cache_size = max(0, int(cache))
         self._cache: list[tuple[Mapping[str, Any], Encoded]] = []
@@ -359,8 +366,18 @@ class BatchedPolicy:
 
     # ------------------------------------------------------------ values
     def values(self, rows: Iterable[Mapping[str, Any]], kind: str | None = None) -> np.ndarray:
-        """V per row, float64 [N], from one encoder pass (module doc, VALUES); [] -> [0]."""
+        """V per row, float64 [N], from one encoder pass (module doc, VALUES); [] -> [0]. kind
+        None: the constructor's value_kind when it was given one, else "critic" (what
+        tools/rl/teacher.policy_values expects of values(rows); BatchedPolicyError without a
+        critic). The search's own V: values(rows, self.value_kind)."""
         rows = list(rows)
+        if kind is None:
+            kind = self._value_kind_given or VALUE_CRITIC
+            if kind == VALUE_CRITIC and not self.has_critic:
+                raise BatchedPolicyError(
+                    "values(rows): the default kind is 'critic' (tanh(z / 2), what "
+                    "tools/rl/teacher.policy_values reads) and this model has no critic: pass "
+                    "kind='swing' (or value_kind='swing') for the value head's tower swing")
         if not rows:
             return np.zeros(0, dtype=np.float64)
         return self.encode_rows(rows).values(kind)
