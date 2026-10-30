@@ -683,7 +683,9 @@ Do not commit `reports\vision_play\`, `reports\vision\`, `STOP` or `MANUAL`. The
 
 The first model learned each play at the tick it landed. Live, the bot decides about 24 ticks (1.2 s) earlier: the client's command delay of 21-22 ticks, plus capture and inference. In the simulator the first model loses about 11 points at a 21-tick delay (46.0% against 56.7%). The second model is trained on decision-time rows: each play is shown at the moment its player tapped it, about 24 ticks before it lands. The rows also show only what the screen shows (no invisible enemies), and they drop more of the rows where the simulator has drifted from the recording (trust v2). Unit tokens stay `--live-compat`, like the first model.
 
-It needs the first model from section 14: `runs\tokens\live_big_hog\best.pt` and `runs\tokens\live_big\ep01.pt`. The script checks for them before it starts.
+It needs the first model from section 14: `runs\tokens\live_big_hog\best.pt` and `runs\tokens\live_big\ep01.pt`. The script checks for them before it starts. The new rows in `data\rs_rows_dt` need about as much disk as `data\rs_rows_live` (section 3: 20-35 GB).
+
+After `git pull`, run the tests of section 12 first. The batch 4 row options and this script's training options have not run on the PC yet, and a failing test costs a minute where a failed step can cost an hour. Paste any failure back before you start the script.
 
 **One script runs everything unattended.** It stops at the first failure and writes everything to `reports\second_model_<time>.log`:
 

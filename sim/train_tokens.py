@@ -70,12 +70,14 @@ COLS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "next", "opp_seen
 #: Columns stored as float16 whatever the shard holds (the largest one, ~84% of a row).
 HALF_COLS = ("unit_feats",)
 DEFAULT_WAIT_KEEP = 0.35
-#: vocab.json keys that describe how the rows were made (E01 / E04 / E09 / E10 / E11 / E18).
-#: The whole of vocab.json goes into the checkpoint meta; these are the ones
-#: printed at start and the ones a checkpoint must not lose.
+#: vocab.json keys that describe how the rows were made (E01 / E04 / E08 / E09 / E10 / E11 /
+#: E12 / E18). The whole of vocab.json goes into the checkpoint meta; these are the ones
+#: printed at start and the ones a checkpoint must not lose. A key the rows' vocab.json
+#: lacks (rows built without that option) is not printed.
 PROVENANCE_KEYS = ("engine", "version", "fingerprint", "engine_fingerprint", "card_table",
                    "schema", "obs_delay", "obs_delay_jitter", "wait_keep_at_build",
-                   "live_compat", "trust", "presses")
+                   "live_compat", "opp_memory", "visibility", "decision_rows", "trust",
+                   "presses")
 #: --trust (E09): the column the trusted-rows filter reads. legacy: `trusted`, as before;
 #: v2: `trusted_v2`, which tools/rs_rows.py --trust v2 writes next to `trusted`.
 TRUST_LEGACY, TRUST_V2 = "legacy", "v2"

@@ -91,7 +91,9 @@ function Invoke-Step([string]$Name, [string]$Python, [string[]]$ArgList) {
 }
 
 $order = @('rows', 'general', 'hog', 'eval', 'league')
-$start = [array]::IndexOf($order, $From)
+# ValidateSet accepts any case (-From Eval), but IndexOf compares exactly: without the
+# lower-casing, -From Eval would give -1 and run every step from the rows again.
+$start = [array]::IndexOf($order, $From.ToLowerInvariant())
 $runLeague = $League -or ($From -eq 'league')
 $rowsDir = 'data\rs_rows_dt'
 $champion = 'runs\tokens\live_big_hog\best.pt'     # the first model (scripts\first_model.ps1)
@@ -104,9 +106,11 @@ if ($MaxRows -gt 0) { $model += @('--max-rows', "$MaxRows") }
 Write-Both ("second_model.ps1: from '{0}', workers {1}, others {2}, max rows {3}, league {4}. Log: {5}" -f $From, $Workers, $Others, $(if ($MaxRows -gt 0) { $MaxRows } else { 'all' }), $(if ($runLeague) { 'yes' } else { 'no' }), $log) 'Cyan'
 
 # What the steps after -From read, checked now rather than after an hour of work.
+# manifest.json, not vocab.json: rs_rows writes vocab.json first and manifest.json only
+# once every shard is done, so an interrupted rows step is not taken for a finished one.
 $need = @($champion)
 if ($start -le 3) { $need += $opponent }
-if ($start -eq 1 -or $start -eq 2) { $need += "$rowsDir\vocab.json" }
+if ($start -eq 1 -or $start -eq 2) { $need += "$rowsDir\manifest.json" }
 if ($start -eq 2) { $need += $general }
 if ($start -ge 3) { $need += $candidate }
 foreach ($f in $need) {
