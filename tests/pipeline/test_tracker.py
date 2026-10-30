@@ -351,6 +351,24 @@ def test_first_seen_and_deploy_ticks():
     assert T.deploy_ticks_left(track, 40, 1000) == 0
 
 
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_last_assignment_gives_each_observation_its_uid(solver):
+    """N05: Tracker.last_assignment, in observation order: the matched track's uid, or the new
+    tentative track's (reported once confirmed)."""
+    tracker = T.Tracker(solver=solver)
+    assert tracker.last_assignment == []
+    tracker.update([ob("knight", 3500, 20000), ob("skeleton", 9000, 25000)], 0)
+    assert tracker.last_assignment == [1, 2]
+    out = tracker.update([ob("skeleton", 9000, 25050), ob("hog-rider", 14500, 10000),
+                          ob("knight", 3500, 19900)], 2)
+    assert tracker.last_assignment == [2, 3, 1]
+    assert sorted(t.uid for t in out) == [1, 2]            # 3 is still tentative
+    tracker.update([], 4)
+    assert tracker.last_assignment == []
+    tracker.reset()
+    assert tracker.last_assignment == []
+
+
 def test_reset_starts_a_new_battle():
     tracker = T.Tracker(solver="greedy")
     tracker.note_own_tap({"knight"}, 0, 0, 0)

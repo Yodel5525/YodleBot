@@ -7,7 +7,8 @@ This one:
 
 1. CROPS the frame to the board plus a margin (ArenaGeometry, resolution-free:
    the PC's 747x1328 PrintWindow frames work as well as 1080x1920) and runs
-   the model on that crop only, RGB -> BGR as ultralytics expects of arrays;
+   the model on that crop only, RGB -> BGR as ultralytics expects of arrays
+   (crop_rect_for(geometry, config, size) gives the same crop without a model);
 2. maps every box back to frame pixels, reads its name through the E16
    crosswalk (scripts/vision/labels.py -> tools/vision_classes.ClassTable):
    class x side names ("Skeleton_EV1@enemy", a model from
@@ -405,6 +406,33 @@ def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def crop_rect_for(geometry: ArenaGeometry, config: DetectorConfig | None,
+                  size: Sequence[int]) -> tuple[int, int, int, int]:
+    """(x0, y0, x1, y1) frame pixels a detector with `geometry` and `config` (None: the live
+    DetectorConfig) shows the model, for a frame of `size`: config.crop_norm of the frame, else
+    the 18x32 board grown by config.crop_margin_mt, mapped through the geometry, floored /
+    ceiled to whole pixels and clipped to the frame. Detector.crop_rect is this; the harvest
+    and label emitters (N05, N11) use it to write labels in the framing the live model sees
+    without loading a model. DetectorError when the crop is empty (under 8 px a side)."""
+    w, h = check_frame_size(size[0], size[1])
+    cfg = config if config is not None else DetectorConfig()
+    if cfg.crop_norm is not None:
+        u0, v0, u1, v1 = cfg.crop_norm
+        xs, ys = np.array([u0 * w, u1 * w]), np.array([v0 * h, v1 * h])
+    else:
+        left, top, right, bottom = cfg.crop_margin_mt
+        wx = np.array([-left, WIDTH_MT + right, -left, WIDTH_MT + right], dtype=np.float64)
+        wy = np.array([-top, -top, HEIGHT_MT + bottom, HEIGHT_MT + bottom], dtype=np.float64)
+        xs, ys = geometry.world_to_px(wx, wy, (w, h))
+    x0 = max(0, int(math.floor(float(np.min(xs)) + _EPS_PX)))
+    y0 = max(0, int(math.floor(float(np.min(ys)) + _EPS_PX)))
+    x1 = min(w, int(math.ceil(float(np.max(xs)) - _EPS_PX)))
+    y1 = min(h, int(math.ceil(float(np.max(ys)) - _EPS_PX)))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        raise DetectorError(f"crop {(x0, y0, x1, y1)} of a {w}x{h} frame is empty; check the geometry")
+    return x0, y0, x1, y1
+
+
 def _array(value: Any, shape_tail: tuple[int, ...] = ()) -> np.ndarray:
     """A torch tensor, numpy array or list -> float64 numpy array."""
     if value is None:
@@ -513,24 +541,9 @@ class Detector:
 
     # -- geometry ------------------------------------------------------------
     def crop_rect(self, size: Sequence[int]) -> tuple[int, int, int, int]:
-        """(x0, y0, x1, y1) frame pixels the model sees, for a frame of `size`."""
-        w, h = check_frame_size(size[0], size[1])
-        cfg = self.config
-        if cfg.crop_norm is not None:
-            u0, v0, u1, v1 = cfg.crop_norm
-            xs, ys = np.array([u0 * w, u1 * w]), np.array([v0 * h, v1 * h])
-        else:
-            left, top, right, bottom = cfg.crop_margin_mt
-            wx = np.array([-left, WIDTH_MT + right, -left, WIDTH_MT + right], dtype=np.float64)
-            wy = np.array([-top, -top, HEIGHT_MT + bottom, HEIGHT_MT + bottom], dtype=np.float64)
-            xs, ys = self.geometry.world_to_px(wx, wy, (w, h))
-        x0 = max(0, int(math.floor(float(np.min(xs)) + _EPS_PX)))
-        y0 = max(0, int(math.floor(float(np.min(ys)) + _EPS_PX)))
-        x1 = min(w, int(math.ceil(float(np.max(xs)) - _EPS_PX)))
-        y1 = min(h, int(math.ceil(float(np.max(ys)) - _EPS_PX)))
-        if x1 - x0 < 8 or y1 - y0 < 8:
-            raise DetectorError(f"crop {(x0, y0, x1, y1)} of a {w}x{h} frame is empty; check the geometry")
-        return x0, y0, x1, y1
+        """(x0, y0, x1, y1) frame pixels the model sees, for a frame of `size`
+        (crop_rect_for of this detector's geometry and config)."""
+        return crop_rect_for(self.geometry, self.config, size)
 
     def _flying(self, lab: Any) -> bool:
         try:

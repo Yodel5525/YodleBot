@@ -47,6 +47,10 @@ Output is a list of scripts.vision.types.Track: confirmed tracks seen within
 position). ``first_seen_tick`` is the first sighting, which gives the
 deploying flag (see deploy_ticks_left). Tracks that expired on the last update
 are in ``Tracker.expired`` (for the event deriver's "just-dead parent" rule).
+``Tracker.last_assignment`` lists, in the order the last update's observations
+came, the uid each went to: the track it was matched to, or the tentative track
+it started (reported once it has ``min_hits`` sightings). Harvest tools read it to
+carry a detection's box to its track (N05).
 
 Imports only the standard library; scipy (and numpy with it) is optional.
 
@@ -346,6 +350,7 @@ class Tracker:
         self._next_uid = 1
         self._tick: float | None = None
         self.expired: list[Track] = []
+        self.last_assignment: list[int] = []     # uid per observation of the last update
         self.backwards_ticks = 0     # updates whose tick went backwards (clamped)
 
     # -- inputs ---------------------------------------------------------------
@@ -371,13 +376,16 @@ class Tracker:
         obs = list(observations)
         tracks = list(self._tracks.values())
         cost = [[self._cost(t, o, tick) for o in obs] for t in tracks]
+        uids = [0] * len(obs)
         matched = set()
         for i, j in _assign(cost, self.solver, self._lsa):
             self._absorb(tracks[i], obs[j], tick)
             matched.add(j)
+            uids[j] = tracks[i].uid
         for j, o in enumerate(obs):
             if j not in matched:
-                self._birth(o, tick)
+                uids[j] = self._birth(o, tick).uid
+        self.last_assignment = uids
 
         horizon = cfg.tap_window_ticks + cfg.tap_claim_age_ticks
         self._taps = [tp for tp in self._taps if not tp.full and tick - tp.tick <= horizon]

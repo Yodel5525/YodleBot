@@ -443,6 +443,20 @@ def test_detector_works_at_the_pc_capture_size():
     assert res.detections[0].ground_px == pytest.approx((371.425, 390.93), abs=1e-6)
 
 
+def test_crop_rect_for_is_the_detectors_crop_without_a_model():
+    """N05: detector.crop_rect_for(geometry, config, size), what the label emitters use, is
+    Detector.crop_rect: at the PC's 747x1328 and the other sizes, for each kind of crop."""
+    assert D.crop_rect_for(GEOM, None, (747, 1328)) == (18, 47, 725, 1050)
+    assert D.crop_rect_for(GEOM, D.DetectorConfig(), (1080, 1920)) == CROP_1080
+    for cfg in (D.DetectorConfig(), D.DetectorConfig(crop_norm=(0.0, 0.05, 1.0, 0.8)),
+                D.DetectorConfig(crop_margin_mt=(0, 0, 0, 0)), D.DetectorConfig(conf=0.05, imgsz=960)):
+        det = D.Detector(FakeModel(joint_names()), geometry=GEOM, table=TABLE, config=cfg)
+        for size in ((747, 1328), (1080, 1920), (225, 400)):
+            assert D.crop_rect_for(GEOM, cfg, size) == det.crop_rect(size), (cfg, size)
+    with pytest.raises(FrameSizeError):
+        D.crop_rect_for(GEOM, None, (1080, 2400))
+
+
 def test_detector_refuses_frames_that_are_not_9_16():
     det = detector(FakeModel(joint_names()))
     with pytest.raises(FrameSizeError):
