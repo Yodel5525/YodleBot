@@ -84,6 +84,19 @@ This file is the plan. `docs/SPARRING_RUNBOOK.md` has the exact commands to run 
 
 The next lever is delay: decision-time rows (E11), which predict the play about 1.2 s before it lands. This first model is good enough to drive the first live friendlies.
 
+**Second model, `dt_big_hog`** (2026-10-30, owner's PC, `scripts/second_model.ps1`, log `reports/second_model_20261030_101529.log`):
+
+| Item | Value |
+|---|---|
+| Rows | Decision time (`--obs-delay 24 --obs-delay-jitter 3 --opp-lag 1 --visibility public --trust v2`): 13,947,771 rows in 19 min. `trusted_v2` keeps 73.9% (Hog 2.6: 76.1%). 20,714 of 2,096,396 play rows tap a card that is not yet in hand. |
+| General model `dt_big` | 3 epochs in 32 min, on 3,316,529 training rows. Hog card 62.5%, tile-within-1 52.4%. |
+| Hog 2.6 fine-tune `dt_big_hog` | 3 epochs in 9.2 min. Hog card 63.3%, tile exact 30.6%, tile-within-1 54.0%. |
+| A: `live_big_hog`, 21-tick delay (re-measured) | 46.0% [40.4, 51.7], crown difference -0.34, 33.3 plays per match. Same as before. |
+| B: `dt_big_hog`, 21-tick delay | **29.3%** [24.5, 34.7], crown difference -1.02, 28.7 plays per match. |
+| C: `dt_big_hog`, no delay | 21.0% [16.8, 26.0], crown difference -1.25, 30.4 plays per match. |
+
+**B is 17 points below A, far outside the noise.** That is the opposite of what decision-time rows were meant to do. The cause is being diagnosed: either training and evaluation differ in what the model sees around its own pending plays, or the recorded tick means something other than assumed, or the gate is miscalibrated, or the rows are selected differently. `scripts/third_model.ps1` uses the same decision-time rows, so it waits for the diagnosis. The live runner keeps `live_big_hog`.
+
 ## Phases
 
 | # | Phase | Where | Done when | Compute |
