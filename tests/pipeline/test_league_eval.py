@@ -9,8 +9,10 @@ the report's tables (Wilson, the pairing bootstrap, the paired CI and McNemar, t
 the log (torn lines, duplicates), the worker cap, the protocol, players, and, on conftest's fake
 royalesim with stub players: the games are rs_match.pairing_specs' (both seats, the decks
 exchanged for a head-to-head, the same positions for every player against an anchor), a run
-resumes without replaying, stops early, refuses a changed player, logs and retries errors, and
-plays idle seats through rs_match.run_match under the delay. One engine-marked smoke test.
+resumes without replaying, stops early, refuses a changed player, logs and retries errors, plays
+the champion against the pool members (a cycle is found), refuses final-split pairs given as a
+plain list, and plays idle seats through rs_match.run_match under the delay. One engine-marked
+smoke test.
 
 Synthetic tags (as in test_rs_match.py): of "synthetic-0000" .. "synthetic-0199" the 12 in VAL
 are the val (dev) split and the 10 in TEST the test (final) split.
@@ -686,6 +688,52 @@ def test_evaluate_logs_and_retries_errors(tools, tmp_path):
     assert [x["kind"] for x in lines(tmp_path / "other.jsonl")] == ["league_run", "league_error"]
 
 
+#: A cycle: C beats H, H beats M, C only draws M; both beat the anchor A. (team 0, team 1)
+#: pairs listed here are won by their first player, every other pair is a draw.
+BEATS = frozenset({("C", "H"), ("C", "A"), ("H", "A"), ("H", "M")})
+
+
+def relation_play(M, calls, beats=BEATS):
+    """play(spec): the winner from `beats`, a draw for pairs it does not list."""
+    def play(spec):
+        calls.append(spec)
+        names = tuple(a.label for a in spec.agents)
+        winner = 0 if names in beats else 1 if names[::-1] in beats else -1
+        return M.MatchResult(
+            id=spec.id, tag=spec.tag, pairing=spec.pairing, seat=spec.seat, seed=spec.seed,
+            agents=names, winner=winner, crowns=(int(winner == 0), int(winner == 1)),
+            game_over=True, end_tick=3600, plays=(30, 30), refused=(0, 0), decisions=(300, 300),
+            full_ticks=(0, 0), leak=(0.0, 0.0), towers=((0, 0, 0), (0, 0, 0)),
+            delay=(spec.delay, spec.delay))
+    return play
+
+
+def test_evaluate_pool_phase_plays_the_champion_and_finds_a_cycle(tools, tmp_path):
+    """C beats H 8 of 8 and A as H does, but only draws M, which H beats 4 of 4. The pool phase
+    plays H against M on C's positions, so pool_collapse's reference is H's own 1.0 and C's 0.5
+    falls short (se 0: one pairing): a cycle. (A reference fitted on C's games alone puts M level
+    with C, above H, and would pass C.)"""
+    M, LE = tools.match, tools.league
+    calls = []
+    rep = small_eval(tools, tmp_path, relation_play(M, calls), candidates=["C=c.pt"],
+                     pool=["M=m.pt"])
+    assert rep["phases"]["pool"] == {"planned": 8, "skipped": 0, "played": 8, "errors": 0}
+    assert len(calls) == 8 + 8 + 8
+    played = [x for x in lines(tmp_path / "dev.jsonl") if x["kind"] == "league_game"]
+    assert [(x["a"], x["b"]) for x in played[-8:]] == [("H", "M")] * 4 + [("C", "M")] * 4
+    g = rep["gates"]["C"]
+    assert (g["decision"], g["admit"], g["promote"], g["turned_on"]) == (
+        "cycle", True, False, "pool_collapse")
+    p = g["conditions"]["pool_collapse"]
+    assert (p["n"], p["missing"], p["observed"], p["reference"], p["bound"]) == (4, 0, 0.5, 1.0,
+                                                                                 1.0)
+    assert p["detail"]["champion_observed"] == {"M": 1.0}
+    assert p["detail"]["source"] == {"M": "observed"} and p["detail"]["reference"] == {"M": 1.0}
+    assert (p["detail"]["se"], p["detail"]["groups"]) == (0.0, 1)
+    assert rep["best"] is None and [r["opponent"] for r in rep["paired"]] == ["A", "M"]
+    assert "pool_collapse: mean 50.0% vs the champion's observed 100.0%" in LE.format_report(rep)
+
+
 def test_evaluate_refuses_the_final_split(tools, tmp_path):
     M, LE = tools.match, tools.league
     final = M.read_pairs(synthetic_rows(), NAMES, "final", require=M.HOG26, allow_final=True)
@@ -698,6 +746,12 @@ def test_evaluate_refuses_the_final_split(tools, tmp_path):
     with pytest.raises(ValueError, match="split"):
         LE.evaluate(final, LE.Protocol(noise=None, engine=cfg(tools)), candidates=["C=c.pt"],
                     champion="H=h.pt", log_path=tmp_path / "f.jsonl", play=stub_play(M, calls))
+    # A plain list of the final split's DeckPairs (no set split) is caught by the pairs' own.
+    with pytest.raises(ValueError, match="pairs are of the test split"):
+        LE.evaluate(list(final.pairs), LE.Protocol(noise=None, engine=cfg(tools)),
+                    candidates=["C=c.pt"], champion="H=h.pt", log_path=tmp_path / "f.jsonl",
+                    play=stub_play(M, calls))
+    assert calls == [] and not (tmp_path / "f.jsonl").exists()
     with pytest.raises(SystemExit):
         LE.main(["run", "--candidate", "c=idle", "--champion", "h=idle", "--split", "final"])
     # With final=True it plays: 8 wins of 8 (at n = 4 even 4 of 4 has LB 0.5101 < 0.52).

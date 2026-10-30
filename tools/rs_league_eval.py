@@ -50,14 +50,20 @@ THE GATE (gate()), evaluated in order on the protocol's games:
                     candidate's score may be at most anchor_tolerance_pp (2 pp) below the
                     champion's (a drop of exactly 2 pp passes).
   3 pool_collapse   when pool members are given: the candidate's mean score against them, over
-                    >= pool_games (100) each, must reach the champion's FITTED mean against them
-                    (BTD on every game of the protocol) less one standard error over pairings.
+                    >= pool_games (100) each, must reach the champion's mean against them less
+                    one standard error over pairings. The champion's mean against a member is
+                    its own score on the positions both played against it (evaluate() plays the
+                    champion against every selected member, as against an anchor) when it has
+                    >= pool_games of them, else its BTD-fitted mean (every game of the
+                    protocol). A fitted mean alone cannot see a cycle: fitted on the candidate's
+                    own games, it follows them by transitivity.
                     No members: not played; promotion rests on 1 and 2.
 Decision: "fail" when 1 or 2 fails (later conditions with no games are marked skipped),
 "cycle" when 1 and 2 pass and 3 fails (admit as an opponent, do not promote), "pass" (promote)
 when all hold, "incomplete" when a condition that would decide has fewer games than it needs.
 evaluate() stops early as royalelearn does: a candidate that failed 1 plays no anchor games, one
-that failed 2 no pool games (--full plays everything).
+that failed 2 no pool games (--full plays everything); the champion plays the anchors and the
+pool members once some candidate reaches that phase (its games stay in the log for later runs).
 
 THE LOG (JSONL, appended and fsynced game by game, so a restart loses at most the games in
 flight): a "league_run" header per run (protocol, players with their spec and checkpoint
@@ -1009,7 +1015,10 @@ def anchor_condition(games: Iterable[Game], candidate: str, champion: str, ancho
 def pool_condition(games: Iterable[Game], candidate: str, champion: str, members: Sequence[str],
                    config: GateConfig, table: Any) -> Condition:
     """3: the candidate's mean score over the members (>= pool_games each) reaches the mean of
-    table.predict(champion, member) less one standard error of its pairing means."""
+    the champion's score against each member less one standard error of the candidate's
+    pairing means. The champion's score against a member is its mean on the positions both
+    played against it (_matched) when there are >= pool_games of them, else
+    table.predict(champion, member) (module doc, THE GATE)."""
     members = [m for m in members if m not in (candidate, champion)]
     if not members:
         return Condition(COND_POOL, False, 0, skipped=True, reason=SKIP_NO_POOL)
@@ -1031,12 +1040,21 @@ def pool_condition(games: Iterable[Game], candidate: str, champion: str, members
     values = np.array([_mean(v) for _, v in sorted(groups.items())], dtype=np.float64)
     se = float(values.std(ddof=1) / math.sqrt(values.size)) if values.size > 1 else 0.0
     predicted = {m: float(table.predict(champion, m)) for m in members}
-    reference = _mean(list(predicted.values()))
+    champion_seen: dict[str, float] = {}
+    for m in members:
+        _a, b, _groups = _matched(games, candidate, champion, m)
+        if len(b) >= config.pool_games:
+            champion_seen[m] = _mean(b)
+    ref = {m: champion_seen.get(m, predicted[m]) for m in members}
+    reference = _mean(list(ref.values()))
     passed = missing == 0 and observed + EPS >= reference - se
     return Condition(COND_POOL, passed, n, observed=observed, bound=reference - se,
                      reference=reference, missing=missing,
-                     detail={"per_member": per, "predicted": predicted, "se": se,
-                             "groups": int(values.size)})
+                     detail={"per_member": per, "predicted": predicted,
+                             "champion_observed": champion_seen, "reference": ref,
+                             "source": {m: "observed" if m in champion_seen else "fitted"
+                                        for m in members},
+                             "se": se, "groups": int(values.size)})
 
 
 def ratings(games: Iterable[Game], anchor: str, **kwargs: Any) -> Any:
@@ -1258,8 +1276,10 @@ def _condition_line(name: str, c: Mapping[str, Any]) -> str:
         drop = 100.0 * (c["reference"] - c["observed"])
         return (f"{name}: drop {drop:+.1f} pp over {c['n']} games (candidate "
                 f"{_pct(c['observed'])}, champion {_pct(c['reference'])}) {verdict}")
-    return (f"{name}: mean {_pct(c['observed'])} vs the champion's fitted "
-            f"{_pct(c['reference'])} - 1 se = {_pct(c['bound'])} over {c['n']} games {verdict}")
+    sources = sorted(set((c.get("detail") or {}).get("source", {}).values())) or ["fitted"]
+    return (f"{name}: mean {_pct(c['observed'])} vs the champion's "
+            f"{'/'.join(sources)} {_pct(c['reference'])} - 1 se = {_pct(c['bound'])} over "
+            f"{c['n']} games {verdict}")
 
 
 def format_report(rep: Mapping[str, Any]) -> str:
@@ -1323,16 +1343,23 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     """Play what the gate needs and report (module doc). pairs: an rs_match.PairSet (or a list
     of DeckPairs) of the protocol's split; players: AgentSpecs, dicts or [NAME=]CKPT[,K=V] text.
     Phases: every candidate against the champion; the champion and the surviving candidates
-    against every anchor; the surviving candidates against the selected pool members
-    (pool_selection). stop_early=False plays every phase for every candidate. play(spec) ->
+    against every anchor; the champion and the surviving candidates against the selected pool
+    members (pool_selection; the champion's games give pool_collapse its reference on the same
+    positions). stop_early=False plays every phase for every candidate. play(spec) ->
     MatchResult replaces the engine (tests); workers > 1 runs worker processes (worker_cap)."""
     config = config or GateConfig()
     protocol = (protocol or Protocol()).resolved()
     if protocol.split == FINAL_SPLIT and not final:
         raise FinalSplitError(FINAL_MESSAGE)
-    split = getattr(pairs, "split", None)
-    if split is not None and SPLIT_ALIASES.get(split, split) != protocol.split:
-        raise ValueError(f"the pairs are of the {split} split, the protocol's is {protocol.split}")
+    if not hasattr(pairs, "pairs"):
+        pairs = list(pairs)                      # read more than once below
+    # The pair set's split and every pair's own (a plain list of DeckPairs has no set split): a
+    # final-split pair must not slip in under a dev protocol.
+    named = [getattr(pairs, "split", None)] + [getattr(p, "split", None) for p in _pair_list(pairs)]
+    other = sorted({SPLIT_ALIASES.get(s, s) for s in named if s} - {protocol.split})
+    if other:
+        raise ValueError(f"the pairs are of the {', '.join(other)} split, the protocol's is "
+                         f"{protocol.split}")
     digest = _pairs_digest(pairs, protocol.split)
     if protocol.pairs_digest and protocol.pairs_digest != digest:
         raise ValueError(f"the protocol is for pair set {protocol.pairs_digest}, these pairs are "
@@ -1395,8 +1422,12 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
         alive = [c for c in alive if all(anchor_condition(games, c, champ, a, config).passed
                                          for a in anchor_names)]
     members = pool_selection(games, roles.pool, roles.candidates, champ, config, rating_anchor)
-    tasks = [t for c in alive for m in members
-             for t in plan(c, m, config.pool_games, protocol.h2h_decks)]
+    tasks = []
+    if alive and members:
+        # The champion on the very positions the candidates play (pool_condition's reference).
+        tasks = [t for m in members for t in plan(champ, m, config.pool_games, protocol.h2h_decks)]
+        tasks += [t for c in alive for m in members
+                  for t in plan(c, m, config.pool_games, protocol.h2h_decks)]
     phases["pool"] = run(tasks, "pool")
     final_log = read_log(log_path)
     rep = report(final_log.of(pd), candidates=roles.candidates, champion=champ,
@@ -1452,7 +1483,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--champion", required=True, metavar=player)
     run.add_argument("--anchor", action="append", default=[], metavar=player)
     run.add_argument("--pool", action="append", default=[], metavar=player,
-                     help="pool members for the collapse check (cycle detection)")
+                     help="pool members for the collapse check (cycle detection); the "
+                          "champion plays them too, on the candidates' positions")
     run.add_argument("--decide", default=None,
                      help="decision rule of players that set none: live (default), legacy, sample")
     run.add_argument("--split", default="dev", help="dev (IL_Replay val) or final (test, --final)")
