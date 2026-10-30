@@ -1,6 +1,6 @@
 # New cards: detector and event coverage plan
 
-Status: plan, 2026-10-30. Work items are N01-N18 (section 9). The capture decks of 4.4 and 4.5 were rechosen from the clan's own battles on 2026-10-30 (section 4.8).
+Status: plan, 2026-10-30. Work items are N01-N18 (section 9). The capture decks of 4.4 and 4.5 were rechosen from the clan's own battles on 2026-10-30 (section 4.8), then fitted to the main account's collection the same day (4.8.7). The forms the main account lacks come from clanmate friendlies (4.8.8).
 
 The problem, in the owner's words: the clanmates play a wide variety of decks, and most of them use one or more cards released since 2024. The live detector learns only from KataCR's 2024 frames.
 
@@ -17,9 +17,11 @@ The facts below come from reading code and data. Nothing was run, and no game im
 - **The gap.** 14 of the 123 cards in the regular pool have no KataCR class. 26 of the 43 evolutions and all 18 heroes are not covered. 97.5% of the top-ladder opponent decks hold at least one gap item, 2.25 of 8 cards on average.
 - **The gap in the clan (4.8).** 95.0% of the clanmates' ranked decks hold at least one card or form the detector lacks or barely knows, 2.85 of 8 cards on average. 28.9% hold a card it cannot name at all.
   - The most-played gaps are Knight hero (in .207 of decks), Bowler hero (.150), the Inferno Dragon evo (.138), the Baby Dragon evo (.122), and Zap and Lightning (thin on KataCR's enemy side).
-  - The ladder-based capture decks would leave 48.4% of clan decks with a gap. **The capture decks in 4.4 and 4.5 are now chosen from the clan data**: same 36 friendlies, and they leave 7.1%. On the clan's event decks, which they were not chosen on, they leave 31.6% (the ladder decks 69.2%).
-  - Heroes decide it. With only the Electro Wizard hero owned (the only hero the main account's log proves), 69.8% keep a gap.
-  - Forms (-ev1 or -hero) come from the deck slot, as `opponents.py` reads them. The pull backs that rule; only slot-3 reads of Knight, Musketeer, Valkyrie and Wizard could be the other form (4.8.4).
+  - **The main account's collection is known** (official API, 2026-10-30; 4.8.7): all 123 cards, 39 of 43 evolutions, and 4 of 18 heroes (Electro Wizard, Goblins, Ice Golem, Musketeer). It lacks the Elite Barbarians, Goblin Drill, Princess and Electro Giant evolutions and 14 heroes, among them Knight and Bowler.
+  - **The capture decks in 4.4 and 4.5 are fitted to that collection** (current, 2026-10-30): 30 friendlies instead of 36, and every deck uses only owned forms. They leave 69.0% of clan decks with a gap, 1.01 gaps per deck. No plan with the main account alone can go below 68.2% (0.98): the 18 forms it lacks are in that many clan decks.
+  - **Clanmate friendlies close the rest** (4.8.8): eight clanmates, 27 training friendlies with their own decks, take the 69.0% to 5.3%, and every clanmate's main deck is then fully covered.
+  - The earlier clan revision assumed every hero owned and claimed 7.1% with 36 friendlies; the ladder-based decks would leave 48.4% on that assumption.
+  - Forms (-ev1 or -hero) come from the deck slot, as `opponents.py` reads them. The 2026-10-30 probe confirmed that the battle log shows the form played. Left to check: slot-2 hero reporting, and slot-3 reads of Knight, Musketeer, Valkyrie and Wizard (4.8.4).
 - **Two table bugs.** These hurt even with a perfect detector:
   - Heal Spirit plays are never named.
   - Spirit Empress is named as an internal variant card, not as itself.
@@ -27,7 +29,7 @@ The facts below come from reading code and data. Nothing was run, and no game im
 - **The plan has four parts:**
   1. Fix the event tables.
   2. Add a safety net: a play that cannot be named reaches the policy as UNKNOWN and is charged an expected cost.
-  3. Record friendlies where the owner's main account plays the new cards against Yodle2. Turn them into auto-labelled real frames, and fine-tune the detector with labels appended to tonight's.
+  3. Record friendlies where the owner's main account plays the new cards against Yodle2, and clanmates play the forms it lacks. Turn them into auto-labelled real frames, and fine-tune the detector with labels appended to tonight's.
   4. Gate every new detector on held-out friendlies before it is pinned.
 - **Tonight.** Run runbook section 15 unchanged (section 8).
 
@@ -215,6 +217,7 @@ Clanmates play many decks, so some cards will always be ahead of the labels. The
 **Why the owner's friendlies.**
 - The owner's main account plays gap decks against Yodle2, and the main always shows at the top, as the enemy. That is exactly what the live bot sees, with the same PrintWindow capture, arena, fights and tower attacks.
 - Only enemy-side labels are needed, because Yodle2 only ever shows base Hog 2.6.
+- The main account lacks 14 heroes and 4 evolutions. Those come from clanmates' training friendlies against Yodle2, played with their own decks (4.8.8).
 
 **Per recorded battle:**
 1. **Ingest.** Hard-link the images into a session folder at once, so the recorder's disk budget cannot prune them.
@@ -338,10 +341,10 @@ Images stay on the data drive and are never committed. Recordings show account n
 6. **Play Spirit Empress both below 6 elixir and at 6 or more,** so both forms appear.
 7. **Keep the game going to overtime.** Avoid an early 3-crown.
    - If Yodle2 is idle, play mostly in your own half and at the bridge, not straight at the towers.
-8. **Swap in any card the main account does not own.** Tell `ingest` the real deck and which slots are evolution or hero.
-9. **Single-unit evolutions in Tier 2 need hard cycling.** A form with fewer than 8 labelled tracks trains under its base label (2.3). Two evolved plays per friendly give a Tier 2 evolution only 4 training tracks, so aim for 4 evolved plays a friendly. Multi-unit evolutions (Minion Horde, Skeleton Army, Royal Hogs, Goblin Barrel, Elite Barbarians) get several tracks per play. `status` lists what to top up.
-10. **Play each hero 5 times or more.** 4 plays × 2 training friendlies is only just 8 tracks.
-11. **Cards with both forms in slot 3** (Valkyrie hero in I, Wizard evo in J): write the form you chose in the `ingest` deck string.
+8. **Every capture deck uses only forms the main account owns** (API collection, 2026-10-30; 4.8.7), so no swaps are needed. If the deck builder still refuses a card, swap it and tell `ingest` the real deck and which slots are evolution or hero.
+9. **Single-unit evolutions in Tier 2 need hard cycling.** A form with fewer than 8 labelled tracks trains under its base label (2.3). Two evolved plays per friendly give a Tier 2 evolution only 4 training tracks, so aim for 4 evolved plays a friendly. These are Goblin Cage (D), Cannon and Musketeer (E), Dart Goblin (F), Royal Ghost and Battle Ram (G), Furnace and Wizard (H), and P.E.K.K.A (I). Multi-unit evolutions (Royal Hogs, Goblin Barrel, Minion Horde, and Skeleton Army in A) get several tracks per play. `status` lists what to top up.
+10. **Play each hero 5 times or more.** 4 plays × 2 training friendlies is only just 8 tracks. The heroes are Electro Wizard (A, G, I), Ice Golem (E), Musketeer (F) and Goblins (H).
+11. **Cards with both forms in slot 3** (E's Musketeer evo; H's Wizard evo): write the form you chose in the `ingest` deck string. The main account owns both Musketeer forms, so E is the slot-3 check of 4.8.4.
 
 ### 4.3 Round 0: the friendly already recorded (no play)
 
@@ -356,10 +359,10 @@ $R0 = 'reports\vision\gold'      # the copied session folder
 & $BB tools\vision_autolabel.py ingest $R0 --sid 20261029_R0_1 --role gold --capture natural --deck "boss-bandit,elite-barbarians,executioner,freeze,guards,hog-rider,minion-horde-ev1,zap" --client 16.635.1
 ```
 
-- **Its gap items:** Boss Bandit (no class), Zap and Freeze (thin), the Minion Horde evo (base class only). All four are also in capture decks (C; C and G; J; F), so Round 0 is their natural gold.
+- **Its gap items:** Boss Bandit (no class), Zap and Freeze (thin), the Minion Horde evo (base class only). All four are also in capture decks (C; C and G; I; I), so Round 0 is their natural gold.
 - **The 10 GoldenKnight plays** the pinned detector reported. The deck has no Golden Knight, so none of them is one. Label each GoldenKnight cluster after looking at it: Boss Bandit, which has no class yet, is the expected answer. The tracker forces any label outside our deck to the enemy side (1.8), so some may be the main account's Executioner, Elite Barbarians or Guards (label them as those), or Yodle2's own units such as Hog Rider (label them `o`). Golden Knight is in no clanmate's ranked deck.
-- **The Elite Barbarians evolution.** Slot 3 showed no evolution bit and the card was played as base, so the main account probably lacks that evolution. Deck J names a fallback.
-- **The probe** (`opponents.py probe`, SEASON_UPDATES 7.1) can run on the existing log; it needs no new friendly. Its form test counts any owned form in a slot that cannot take it: Round 0's Executioner (slot 4) and Zap (slot 7), and Lumberjack, Balloon and Barbarian Barrel in slots 4-8 of the main account's usual ranked deck (10 battles in the log); each counts if you own its evolution or hero. Deck A's friendly 1 gives that test nothing: its special cards sit in slots that take their forms, and its five plain cards have no forms.
+- **The Elite Barbarians evolution.** Slot 3 showed no evolution bit and the card was played as base. The API collection confirms that the main account lacks that evolution (4.8.7); a clanmate's friendlies supply it (4.8.8).
+- **The probe** (`opponents.py probe`, SEASON_UPDATES 7.1) can run on the existing log; it needs no new friendly. Its form test counts any owned form in a slot that cannot take it: Round 0's Executioner (slot 4) and Zap (slot 7), and Lumberjack, Balloon and Barbarian Barrel in slots 4-8 of the main account's usual ranked deck (10 battles in the log); each counts if you own its evolution or hero. Deck A's friendly 1 gives that test nothing: its special cards sit in slots that take their forms, and its five plain cards have no forms. It does test slot-2 hero reporting: the Electro Wizard hero sits in slot 2. The probe on the PC (2026-10-30) found the form played (4.8.4).
 - **Optional Round 0b.** One natural friendly with your usual ranked deck, as a second natural gold and, if wanted, a probe friendly against Yodle2 (an evolution in slot 1, a hero in slot 2, all proven owned). It holds four clan gap items: Vines, the Baby Dragon evo, the Electro Wizard hero and the P.E.K.K.A evo. About 7 minutes of play and 27 minutes of labelling.
 
   ```powershell
@@ -370,91 +373,102 @@ $R0 = 'reports\vision\gold'      # the copied session folder
 
 ### 4.4 Tier 1: the 14 whole cards (3 decks × 4 friendlies)
 
-**This table is current** (revised 2026-10-30 from the clan data, 4.8). It replaces the ladder-based Tier 1 table, which put the top ladder's favourite evolutions in the special slots.
+**This table is current: fitted to the main account's collection, 2026-10-30** (4.8.7). It replaces the clan-data table of the same day, which assumed every hero owned, and the ladder-based table before it. Every form below is owned, so no deck needs a fallback.
 
 Deck lists use RoyaleAPI keys, as in `data/ladder/battles_2p6.csv`; Minion Giant has no key yet, so it is given by its catalogue name. Slot 1 takes an evolution, slot 2 a hero or champion, slot 3 any of them (4.8.3).
 
 | Deck | Slot 1 (evo) | Slot 2 | Slot 3 | Slots 4-8 | Shape (evo, hero, champion) |
 |---|---|---|---|---|---|
-| A | skeleton-barrel-ev1 | berserker-hero (if owned; else electro-wizard-hero) | inferno-dragon-ev1 | vines, suspicious-bush, goblin-curse, goblin-demolisher, rocket | (2, 1, 0) |
+| A | skeleton-barrel-ev1 | electro-wizard-hero | skeleton-army-ev1 | vines, suspicious-bush, goblin-curse, goblin-demolisher, rocket | (2, 1, 0) |
 | B | baby-dragon-ev1 | goblinstein | giant-snowball-ev1 | MinionGiant, rune-giant, ronin, berserker, lightning | (2, 0, 1) |
-| C | goblin-drill-ev1 | boss-bandit | witch-ev1 | three-musketeers, void, spirit-empress, goblin-machine, zap | (2, 0, 1) |
+| C | inferno-dragon-ev1 | boss-bandit | witch-ev1 | three-musketeers, void, spirit-empress, goblin-machine, zap | (2, 0, 1) |
 
-- **All 14 whole cards stay in Tier 1.** Base Berserker, which was Tier 3, rides in B.
-- **The nine special slots** carry the clan's six most-played uncovered evolutions (Inferno Dragon .138, Baby Dragon .122, Giant Snowball .099, Goblin Drill .092, Skeleton Barrel .091, Witch .082), Berserker hero, Goblinstein and Boss Bandit. Evolutions go in Tier 1 because they look evolved only on their evolution cycle and need the third training friendly; a hero shows on every play.
-- **A** holds the whole cards clanmates play: Vines (.085), Berserker hero (.050), Goblin Demolisher (.046), Suspicious Bush (.046) and Goblin Curse (.032). Without Berserker hero, play the Electro Wizard hero and get Berserker hero from a clanmate (4.6).
-- **C** holds the four whole cards no clanmate plays in ranked (Three Musketeers, Void, Spirit Empress, Goblin Machine), for the top ladder and for later. Without one of them, play a thin spell instead: royal-delivery, freeze, arrows or tornado. C is heavy: play it to overtime.
-- **Ownership.** Only the Baby Dragon evo, Boss Bandit and Vines are proven owned. Check the other Tier 1 evolutions, Berserker hero and the whole cards in the game before deck A (open question 2).
+- **All 14 whole cards are in Tier 1.** Base Berserker rides in B.
+- **The six evolutions** are the clan's six most-played owned gap evolutions: Inferno Dragon .138, Baby Dragon .122, Giant Snowball .099, Skeleton Barrel .091, Witch .082 and Skeleton Army .069. Evolutions go in Tier 1 because they look evolved only on their evolution cycle and need the third training friendly; a hero shows on every play.
+- **What the collection changed:**
+  - A: the Electro Wizard hero takes slot 2 (Berserker hero is not owned; a clanmate supplies it, 4.8.8), and the Skeleton Army evo takes slot 3.
+  - C: the Inferno Dragon evo takes slot 1 (the Goblin Drill evo is not owned).
+  - B is unchanged.
+- **A** holds the whole cards clanmates play: Vines (.085), Goblin Demolisher (.046), Suspicious Bush (.046) and Goblin Curse (.032), with the bait evolutions they come with. Its friendly 1 has an owned hero in slot 2: the slot-2 hero check (4.3).
+- **C** holds the four whole cards no clanmate plays in ranked (Three Musketeers, Void, Spirit Empress, Goblin Machine), for the top ladder and for later. The Skeleton Army evo is in A, not C: its skeletons would mix with the Witch evo's on the same side. C is heavy: play it to overtime.
+- **Ownership.** All forms were checked against the API collection of 2026-10-30. Check each special card in the deck builder before the deck's first friendly.
 - **Roles.** In each deck, friendly 2 is **gold** (held out). Friendlies 1, 3 and 4 are training. Deck A's friendly 4 is **dev**, used for early stopping only.
-- **Playing time.** 12 friendlies at about 7 minutes each is about 1.5 h. Split it over evenings if you like.
+- **Playing time.** 12 friendlies at about 7 minutes each is about 1.4 h. Split it over evenings if you like.
 
-### 4.5 Tier 2: the common evolutions and heroes (8 decks × 3 friendlies)
+### 4.5 Tier 2: the common evolutions and owned heroes (6 decks × 3 friendlies)
 
-**This table is current** (revised 2026-10-30 from the clan data, 4.8). It replaces the ladder-based table of special-slot triples: none of those triples survives, because their items rank far apart in the clan (Knight hero .207 sat beside the Minion Horde evo .029). All eight decks are complete: the plain cards are part of the deck, mostly a playable shell plus spells that are thin on KataCR's enemy side.
+**This table is current: fitted to the main account's collection, 2026-10-30** (4.8.7). It replaces the clan-data table of 8 decks: those carried 10 heroes, and the main account owns only 4. The letters D-I are reassigned and are the play order. D, F, G and H are built on shells clanmates play; I is built on the owner's own ranked deck.
 
 | Deck | Slot 1 (evo) | Slot 2 | Slot 3 | Slots 4-8 | Shape |
 |---|---|---|---|---|---|
-| D | goblin-barrel-ev1 | knight-hero (if owned) | princess-ev1 | goblin-gang, ice-spirit, inferno-tower, rocket, the-log | (2, 1, 0) |
-| E | electro-giant-ev1 | bowler-hero (if owned) | pekka-ev1 | electro-wizard, goblin-hut, lightning, tornado, barbarian-barrel | (2, 1, 0) |
-| F | minion-horde-ev1 | ice-wizard-hero (if owned; else goblinstein) | skeleton-army-ev1 | mortar, cannon-cart, fireball, barbarian-barrel, royal-delivery | (2, 1, 0) |
-| G | royal-ghost-ev1 (else pekka-ev1, with royal-ghost in P.E.K.K.A's place) | electro-wizard-hero | battle-ram-ev1 | bandit, pekka, fireball, magic-archer, zap | (2, 1, 0) |
-| H | royal-hogs-ev1 | barbarian-barrel-hero (if owned) | goblin-cage-ev1 | arrows, fireball, flying-machine, royal-recruits, zappies | (2, 1, 0) |
-| J | elite-barbarians-ev1 (probably not owned; else lumberjack-ev1) | giant-hero (if owned) | wizard-ev1 | phoenix, elixir-collector, heal-spirit, mini-pekka, freeze | (2, 1, 0) |
-| I | musketeer-ev1 | mini-pekka-hero (if owned) | valkyrie-hero (if owned; else inferno-dragon-ev1) | arrows, knight, mega-knight, skeleton-barrel, the-log | (1, 2, 0) |
-| K | cannon-ev1 | balloon-hero (if owned) | tombstone-hero (if owned; else furnace-ev1, with tombstone in Furnace's place) | ice-golem, miner, barbarian-barrel, furnace, graveyard | (1, 2, 0) |
+| D | royal-hogs-ev1 | royal-delivery | goblin-cage-ev1 | arrows, fireball, flying-machine, royal-recruits, zappies | (2, 0, 0) |
+| E | cannon-ev1 | ice-golem-hero | musketeer-ev1 | hog-rider, ice-spirit, skeletons, the-log, fireball | (2, 1, 0) |
+| F | goblin-barrel-ev1 | musketeer-hero | dart-goblin-ev1 | goblin-gang, heal-spirit, inferno-tower, rocket, the-log | (2, 1, 0) |
+| G | royal-ghost-ev1 | electro-wizard-hero | battle-ram-ev1 | bandit, pekka, fireball, magic-archer, zap | (2, 1, 0) |
+| H | furnace-ev1 | goblins-hero | wizard-ev1 | barbarian-barrel, giant-skeleton, goblin-hut, graveyard, poison | (2, 1, 0) |
+| I | pekka-ev1 | electro-wizard-hero | minion-horde-ev1 | balloon, barbarian-barrel, lumberjack, tornado, freeze | (2, 1, 0) |
+| J (optional) | lumberjack-ev1 | mini-pekka | zap-ev1 | golem, night-witch, bomber, arrows, phoenix | (2, 0, 0) |
 
-- **Together** they cover 10 heroes and 14 evolutions. With Tier 1, every hero and evolution in .025 or more of clan decks is in a capture deck.
-- **Play order (greedy, gaps per deck): A, B, D, C, E, F, G, H, J, I, K.** The table lists Tier 2 in that order. Run the first fine-tune after A, B, D and C (15 friendlies), then label E-K with its model, so it auto-accepts what it knows.
-- **A slot-2 hero you do not own** (D, E, H, I, J, K): play the next owned hero of the Tier 3 reserve (goblins, magic-archer, mega-minion, musketeer, wizard, then ice-golem), but skip a hero whose card is already in the deck (I skips musketeer, J skips wizard, K skips ice-golem). If none is owned, play the Electro Wizard hero, unless the deck holds an Electro Wizard (E does). Then get the hero from a clanmate friendly (4.6).
-- **Slot-3 fallbacks.** I's Inferno Dragon evo repeats A on purpose: it is the third most-played gap, and evolutions need many evolved plays (4.2 rule 9). K's Furnace evo adds a new item.
+- **Together with Tier 1** they cover all four owned heroes, 18 owned evolutions, and every owned gap form in .008 or more of clan decks except Phoenix (.011, in J). Every thin spell the clan plays is in a deck except the Zap evo (J).
+- **What each deck adds first** (clan share): D the Royal Hogs and Goblin Cage evos and Royal Delivery (.117); E the Cannon and Musketeer evos and the Ice Golem hero (.097); F the Goblin Barrel evo, the Musketeer hero and the Dart Goblin evo (.095); G the Royal Ghost and Battle Ram evos (.083); H the Furnace and Wizard evos, base Furnace and the Goblins hero (.069); I the P.E.K.K.A and Minion Horde evos and Freeze (.066).
+- **Play order (greedy on gaps per deck, given what the decks before cover): A, B, C, D, E, F, G, H, I.** Run the first fine-tune after A, B, C and D (15 friendlies), then label E-I with its model, so it auto-accepts what it knows. The Tier 2 steps are close (1.42 to 1.48 gaps per deck after Tier 1), so the order matters little.
+- **No hero you lack is needed.** The reserve-hero rule and the slot-3 fallbacks of the earlier table are gone. D's slot 2 holds Royal Delivery, because no owned hero fits that shell.
 - **Deck notes:**
-  - D carries Knight hero, the clan's most-played gap: 9 of 28 ranked players use it.
-  - E is heavy (4.75 elixir on average): play it to overtime. Its P.E.K.K.A evo is proven owned.
-  - F's Skeleton Army evo soldiers merge to `skeleton-evolution`, but its General and Spectral units have no class.
-  - G: only the Electro Wizard hero is proven owned. Its Battle Ram evo is thin (4.8).
-  - J: Heal Spirit checks the N01 fix on gold. Phoenix is thin (22 enemy boxes).
-  - K: Furnace's KataCR class is the 2024 building, and Graveyard was reworked. K's gold checks the Furnace interval spawns and the Graveyard skeletons.
-- **Look changes.** All six possible look changes of 1.9 are now in a deck: Furnace and Graveyard in K, Goblin Hut in E, Three Musketeers and the Goblin Drill dig in C, Goblin Barrel in D.
+  - D: Royal Delivery is spell-thin.
+  - E mirrors Yodle2's Hog 2.6. Its forms show only on your side, but its base cards are on both, so label sides by colour; the S3 "not in deck" flag cannot tell them apart. The main account owns both Musketeer forms, so E is the slot-3 check of 4.8.4.
+  - F: Heal Spirit checks the N01 fix on gold. The Goblin Barrel evo shows the base barrel on its other cycles. The Musketeer hero (.021 of clan decks in all modes) brings MusketeerTurret, which has no class.
+  - G: the Electro Wizard hero repeats A and I on purpose: it is the clan's largest owned hero gap (.068 ranked, .129 in all modes). Its Battle Ram evo is thin (4.8).
+  - H: Furnace's KataCR class is the 2024 building, and Graveyard and Goblin Hut were reworked. H's gold checks the Furnace interval spawns, the Graveyard skeletons and the Goblin Hut.
+  - I is the easiest to play well. It gives the largest single drop in decks with a gap (75.1% to 69.0%).
+  - J (optional): the Lumberjack and Zap evos are in no or almost no ranked clan deck, but they are the largest owned leftovers in all modes (.057 and .043). Play J if the next pull shows them in ranked; on the clan's event decks it is worth 5.7 points (11 with the clanmate friendlies of 4.8.8).
+- **Look changes.** Five of the six possible look changes of 1.9 are in a deck: Furnace, Graveyard and Goblin Hut in H, Three Musketeers in C, Goblin Barrel in F. The Goblin Drill dig comes with a clanmate's friendlies (4.8.8).
+- **Five decks instead of six** (drop H) would leave 69.8% and 1.08 gaps per deck.
 - **Roles.** Friendly 2 of each deck is gold; friendlies 1 and 3 train.
-- **Playing time.** 24 friendlies is about 2.8 h, over several evenings.
+- **Playing time.** 18 friendlies is about 2.1 h, over several evenings.
 
 ### 4.6 Tier 3 and the clanmates
 
-**The long tail** (current, from the clan data). The Tier 3 list was ladder-based; Goblin Cage, Electro Giant, Ice Wizard, Electro Wizard and base Berserker have moved into capture decks.
-- **Evolutions:** Dart Goblin (clan share .019), Furnace (.011; K's fallback), Ice Spirit (thin, .007), Mega Knight, Zap (thin), Executioner, Hunter, Lumberjack (0 in ranked but 8 players in all modes; J's fallback), Electro Dragon, Goblin Giant, Bomber (thin).
-- **Heroes:** Dark Prince (.011), Goblins, Mega Minion, Magic Archer, Musketeer, Wizard, Ice Golem.
+**The forms the main account lacks** (14 heroes, 4 evolutions; 4.8.7) come from clanmate training friendlies: eight requests, 27 friendlies (4.8.8).
+
+**The long tail** (current, from the clan data and the collection). What neither the owner's decks nor the eight clanmate requests cover:
+- **Owned evolutions:** Ice Spirit (thin, .006), Mega Knight (.005), Zap (thin, .005; J), Executioner (.002), Hunter (.001), Lumberjack (0 in ranked but 8 players in all modes; J), Electro Dragon (0 in ranked, .031 in all modes), Goblin Giant, Bomber (thin). Phoenix (.011, thin) is in J and in clanmate F's deck.
+- **Heroes the main account lacks:** Tombstone (.015), Dark Prince (.011), Mega Minion (.007), Magic Archer (.006): each is below the .02 bar, and each has an optional clanmate deck (4.8.8). Wizard hero is in no clanmate's ranked deck.
 - **Others:** Clone, Mirror. The Royal Chef tower troop (.036 of clan decks) has no class, but towers are ignore classes and `vision_autolabel label` refuses them.
 
-`vision_gap_labels plan` (N16) builds the decks for these. Re-run the clan ranking after each pull; the Furnace, Lumberjack and Zap evolutions are the first to watch. Until then they rely on the base label (when the look is close) or on the UNKNOWN safety net.
+`vision_gap_labels plan` (N16) builds the decks for these. Re-run the clan ranking after each pull; the Lumberjack and Zap evolutions are the first to watch. Until then they rely on the base label (when the look is close) or on the UNKNOWN safety net.
 
 **Field gold** (the true target):
-- 2-3 friendlies against clanmates, with the bot only watching (runbook section 17). Pass `--record-images 5` to `vision_play`; its default keeps only one image in 20.
-- **Choose partners by deck:** a clanmate whose usual ranked deck holds at least two Tier 1 or Tier 2 gap items and is not itself a capture deck. The pull on the PC shows who.
+- **8 single friendlies against clanmates, with the bot only watching** (runbook section 17), instead of 2-3. Pass `--record-images 5` to `vision_play`; its default keeps only one image in 20.
+  - **5 for the forms the main account lacks** (4.8.8). The owner's scripted gold cannot hold these forms, and a game used for training is never gold. Each partner is a different clanmate from that form's training source.
+  - **3 for owned forms in natural play:** a clanmate's main deck whose gap items the owner's decks all cover (two or more), not itself a capture deck. The scripted gold already holds these forms; these measure another player's placements.
 - **Ask for their usual ranked deck, not an event deck.** A friendly uses their own collection. For the 17 clanmates with both kinds of battles, the Oct 24-30 AllCards event overstates cards they may not own: Minion Giant 0 in ranked against .155 in the event, Ice Wizard hero .063 against .238, base Knight .020 against .140.
 - **Record field gold before 2026-11-02,** when Season 89 is planned to bring Evo Giant and Evo Mirror, and record one more after it. Neither can be labelled until RoyaleSim ships a table with them.
 - **Take the deck from the battle log.** After the friendly, run `opponents.py pull`; Yodle2's spar record then holds the partner's 8 cards with forms. It matched 8 of 8 on 10-29. Use that string at `ingest` and as the gold deck. Confirm it with the partner if Knight, Musketeer, Valkyrie or Wizard (or Giant after 11-02) sits in slot 3. These are never trained on.
-- **Never put a name or tag in a session id or a session note.** `session.json` is committed.
-- **Cards and heroes your main account does not own** come from clanmate training friendlies. They play their own deck against Yodle2, which is idle or played lightly. Label them as training, never gold:
+- **Never put a name or tag in a session id or a session note.** `session.json` is committed. Use the clanmate's letter of 4.8.8: `20261103_CMA_1`.
+- **Clanmate training friendlies** (4.8.8): they play their own deck against Yodle2, which you play lightly by hand so the game reaches overtime. Label them as training, never gold:
 
   ```powershell
-  & $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --sid 20261103_CM_1 --role train --deck "<their 8 cards>" --client 16.635.1
+  & $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --sid 20261103_CMA_1 --role train --deck "<their 8 cards>" --client 16.635.1
   ```
 
-  Pass `--role train`. `--capture field` is gold only, and with `--role auto` a `_CM_2` session would become gold.
+  Pass `--role train`. `--capture field` is gold only, and with `--role auto` a `_CMA_2` session would become gold.
 - How many clanmates carry each hero or whole card in their ranked decks (and in how many most-played decks): Knight hero 9 (6), Bowler hero 8 (4), Berserker hero 5 (1), Ice Wizard hero 3 (2; 17 players in all modes), Valkyrie hero 3 (0), Mini P.E.K.K.A hero 2 (2), Barbarian Barrel hero 2 (2), Balloon hero 2 (1), Tombstone hero 2 (0), Giant hero 1 (1); Vines 4 (4), Suspicious Bush 2 (2), Goblin Demolisher 2 (1), Goblin Curse 2 (1), Goblinstein 1 (1).
 
 ### 4.7 Time and disk
 
-| Step | Playing | Notes |
-|---|---|---|
-| Round 0 | none | the existing friendly |
-| Round 0b (optional) | about 7 min | 1 natural gold friendly with your usual deck |
-| Tier 1 | about 1.5 h | 12 friendlies |
-| Tier 2 | about 2.8 h | 24 friendlies |
-| Field gold | about 20 min | 2-3 friendlies, bot watching |
+| Step | Friendlies | Your time at the PC | Notes |
+|---|---|---|---|
+| Round 0 | none | none | the existing friendly |
+| Round 0b (optional) | 1 | about 7 min | natural gold with your usual deck |
+| Tier 1 | 12 | about 1.4 h | your main account plays |
+| Tier 2 | 18 | about 2.1 h | your main account plays; J adds 3 (about 20 min) |
+| Clanmate training (4.8.8) | 27 | about 3.2 h | the clanmate plays; you start the capture, accept on Yodle2 and play it lightly |
+| Field gold | 8 | about 1 h | the clanmate plays; Yodle2 by hand, the bot watching |
+
+A human starts every battle, so every clanmate friendly needs you at the PC.
 
 **Disk.**
-- About 1.2-1.7 GB per harvest battle, so about 45-60 GB for Tiers 1 and 2. The disk is 500 GB.
+- About 1.2-1.7 GB per harvest battle: about 36-51 GB for Tiers 1 and 2, and about 32-46 GB more for the clanmate training friendlies. The disk is 500 GB.
 - Keep gold raw images. Delete training raws after `emit`; the labels can always regenerate the boxes while the raws exist.
 
 ### 4.8 Clan data (2026-10-30)
@@ -473,10 +487,11 @@ The owner's `opponents.py pull` of 2026-10-30 holds 1,286 battles of 44 clan pla
 - "No class" counts `no`, `base-only` and `not-a-unit`; "cannot name" is `no` only.
 - **Only the 8 deck cards count.** Tower troops are left out (4.8.5).
 - **Covered:** the card+form is in a capture deck; an evolution also covers its base form. This is an upper bound: it assumes the labels reach their thresholds and pass the gate (6).
+- **Which decks:** 4.8.1-4.8.6 describe the clan revision of the capture decks, made before the collection was known ("revised": every hero assumed owned). 4.8.7 fits the decks to the collection (the current 4.4-4.5), and 4.8.8 adds the clanmate friendlies.
 
 #### 4.8.1 Headline coverage
 
-"Ladder plan" is the 4.4-4.5 tables before this revision; "revised" is the current tables.
+"Ladder plan" is the 4.4-4.5 tables before the clan revision. "Revised" is the clan revision of 2026-10-30, which assumed every hero owned. "Current" is the decks fitted to the collection, now in 4.4-4.5 (4.8.7).
 
 | Stage | Friendlies | Clan decks with a gap | Gaps per deck | No class | Cannot name | Main decks fully covered |
 |---|---|---|---|---|---|---|
@@ -488,76 +503,82 @@ The owner's `opponents.py pull` of 2026-10-30 holds 1,286 battles of 44 clan pla
 | **Revised, Tier 1+2** | 36 | **7.1%** | 0.08 | 6.7% | 0.0% | 27-28 |
 | Revised, worst case | 36 | 69.8% | 0.80 | 69.3% | 5.0% | 9-10 |
 | Ladder plan, worst case (with fillers) | 36 | 84.2% (83.3%) | 1.25 (1.13) | 82.8% | 6.7% | 4-5 |
+| **Current (4.8.7), Tier 1** | 12 | 84.7% | 1.54 | 84.2% | 5.0% | 5-6 |
+| **Current, Tier 1+2** | 30 | **69.0%** | 1.01 | 68.5% | 5.0% | 9-10 |
+| Floor: every owned gap form covered | - | 68.2% | 0.98 | 68.2% | 5.0% | 9-10 |
+| **Current + clanmate friendlies (4.8.8)** | 30 + 27 | **5.3%** | 0.06 | 4.8% | 0.0% | 28 |
 
-- **Worst case:** the main account owns no hero but the Electro Wizard hero, and no Elite Barbarians evolution. Each deck then uses its named fallback; a slot-2 hero that has only the reserve rule is lost. Other evolutions and whole cards count as owned.
+- **Revised** rows assumed every hero owned. **Worst case:** the main account owns no hero but the Electro Wizard hero, and no Elite Barbarians evolution. Each deck then uses its named fallback; a slot-2 hero that has only the reserve rule is lost. Other evolutions and whole cards count as owned. The collection turned out close to that worst case (4.8.7).
+- **Current** rows are the decks of 4.4-4.5 fitted to the collection; "+ clanmate friendlies" adds the eight requests of 4.8.8.
 - **Main decks fully covered:** the clanmates whose most-played deck has no gap left. It is a range because one player has two decks played once each.
 - **"Decks with a gap" is harsh:** one leftover card keeps a deck counted. "Gaps per deck" is the fairer view of progress.
-- **In-sample.** The revised decks were chosen on these same ranked decks. On decks they were not chosen on:
+- **In-sample.** The revised and current decks were chosen on these same ranked decks. On decks they were not chosen on:
 
-  | Deck set | Today | Revised Tier 1+2 | Ladder plan Tier 1+2 | ... with fillers |
-  |---|---|---|---|---|
-  | Event decks, 33 clan players | 98.8% | 31.6% | 69.2% | 66.1% |
-  | Ranked and event decks, 44 clan players | 97.2% | 21.3% | 59.1% | 54.7% |
+  | Deck set | Today | Revised Tier 1+2 | Ladder plan Tier 1+2 | ... with fillers | Current Tier 1+2 | Current + clanmates |
+  |---|---|---|---|---|---|---|
+  | Event decks, 33 clan players | 98.8% | 31.6% | 69.2% | 66.1% | 81.7% | 22.0% |
+  | Ranked and event decks, 44 clan players | 97.2% | 21.3% | 59.1% | 54.7% | 78.7% | 15.1% |
 
+- **Sensitivity** of the current 69.0%: with troop labels up to 30 enemy boxes counted as thin it is 75.0% (the floor stays 68.2%, because the newly thin Firecracker, Valkyrie and Royal Giant evolutions are owned); with the Goblin Hut and Graveyard look changes it stays 69.0%; with every slot-3 dual-form read swapped it is 67.2%.
 - **Sensitivity** of the revised 7.1%:
   - counting troop labels with up to 30 enemy boxes as thin gives 19.3%, mostly the Firecracker evo (.061, 30 boxes), the Valkyrie evo (.050) and the Royal Giant evo (.017);
-  - if the Goblin Hut and Graveyard reworks also changed their look, it stays 7.1% (both are in E and K), and the ladder plan gives 54.2%;
+  - if the Goblin Hut and Graveyard reworks also changed their look, it stays 7.1% (both were in revised decks), and the ladder plan gives 54.2%;
   - counting tower troops gives 14.4%, with 3.6% that cannot be named (Royal Chef);
   - if every slot-3 read of a dual-form card were the other form (4.8.4), it gives 7.4%.
 - **Left after the revised Tier 1+2** (clan share): Dart Goblin evo .019, Dark Prince hero .011, Furnace evo .011, Goblins hero .008, Mega Minion hero .007, Ice Spirit evo .007, and six items below .007. Among the event-only players, the largest leftovers are the Furnace, Lumberjack and Zap evolutions.
 
-**Along the play order** (A first: its whole cards cannot be named today):
+**Along the current play order** (4.4-4.5; A first: its whole cards cannot be named today; the revised decks' curve is in git history):
 
-| After deck | A | B | D | C | E | F | G | H | J | I | K |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Friendlies | 4 | 8 | 11 | 15 | 18 | 21 | 24 | 27 | 30 | 33 | 36 |
-| Decks with a gap | 94.7% | 94.1% | 86.6% | 74.1% | 62.8% | 47.0% | 40.2% | 32.0% | 23.4% | 17.1% | 7.1% |
-| Gaps per deck | 2.27 | 1.83 | 1.48 | 1.18 | 0.93 | 0.73 | 0.58 | 0.44 | 0.31 | 0.18 | 0.08 |
+| After deck | A | B | C | D | E | F | G | H | I | J (optional) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Friendlies | 4 | 8 | 12 | 15 | 18 | 21 | 24 | 27 | 30 | 33 |
+| Decks with a gap | 91.0% | 91.0% | 84.7% | 84.7% | 80.8% | 80.7% | 75.9% | 75.1% | 69.0% | 68.5% |
+| Gaps per deck | 2.32 | 1.88 | 1.54 | 1.42 | 1.33 | 1.23 | 1.15 | 1.08 | 1.01 | 1.00 |
 
 #### 4.8.2 Priority list
 
 The 25 most-played card+forms the detector lacks or barely knows, by clan share.
 - **Share:** in ranked decks, with the 90% interval of a bootstrap over players. **All modes** adds event decks.
-- **Ladder plan / Revised:** the deck that carries the item before and after the revision.
-- **Owned:** "yes" when the main account's own battles show it, "if owned" for every hero not yet proven.
+- **Ladder plan / Current:** the deck that carries the item in the ladder plan and now: a deck of 4.4-4.5, or "cm X" for clanmate request X of 4.8.8.
+- **Owned:** from the API collection of 2026-10-30 (4.8.7). Every whole card is owned.
 - **Forms** come from the slot rule (4.8.4). Only slot-3 reads could be the other form: Knight hero holds .039 of its .207 in slot 3.
 
-| # | Card+form | Detector | Share [90% CI] | All modes | Players ranked/all | Ladder plan | Revised | Owned |
+| # | Card+form | Detector | Share [90% CI] | All modes | Players ranked/all | Ladder plan | Current | Owned |
 |---|---|---|---|---|---|---|---|---|
-| 1 | knight-hero | base-only | .207 [.10-.32] | .169 | 9/15 | T2 D | D | if owned |
-| 2 | bowler-hero | base-only | .150 [.04-.26] | .104 | 8/16 | T2 J | E | if owned |
-| 3 | inferno-dragon-ev1 | base-only | .138 [.05-.24] | .099 | 6/10 | T1 B | A | |
+| 1 | knight-hero | base-only | .207 [.10-.32] | .169 | 9/15 | T2 D | cm A | no |
+| 2 | bowler-hero | base-only | .150 [.04-.26] | .104 | 8/16 | T2 J | cm B | no |
+| 3 | inferno-dragon-ev1 | base-only | .138 [.05-.24] | .099 | 6/10 | T1 B | C | yes |
 | 4 | baby-dragon-ev1 | base-only | .122 [.04-.22] | .128 | 6/16 | T1 A | B | yes |
-| 5 | zap | spell-thin | .117 [.04-.21] | .096 | 8/11 | T1 C | C, G | |
-| 6 | lightning | spell-thin | .112 [.04-.22] | .134 | 5/17 | T1 C | B, E | |
-| 7 | giant-snowball-ev1 | base-only | .099 [.03-.18] | .093 | 6/13 | T2 D | B | |
-| 8 | rocket | spell-thin | .093 [.03-.17] | .060 | 8/10 | suggested filler | A, D | |
-| 9 | goblin-drill-ev1 | base-only | .092 [.02-.18] | .067 | 5/9 | T2 K | C | |
-| 10 | skeleton-barrel-ev1 | base-only | .091 [.03-.17] | .060 | 7/9 | T2 F | A | |
+| 5 | zap | spell-thin | .117 [.04-.21] | .096 | 8/11 | T1 C | C, G | yes |
+| 6 | lightning | spell-thin | .112 [.04-.22] | .134 | 5/17 | T1 C | B | yes |
+| 7 | giant-snowball-ev1 | base-only | .099 [.03-.18] | .093 | 6/13 | T2 D | B | yes |
+| 8 | rocket | spell-thin | .093 [.03-.17] | .060 | 8/10 | suggested filler | A, F | yes |
+| 9 | goblin-drill-ev1 | base-only | .092 [.02-.18] | .067 | 5/9 | T2 K | cm A | no |
+| 10 | skeleton-barrel-ev1 | base-only | .091 [.03-.17] | .060 | 7/9 | T2 F | A | yes |
 | 11 | vines | no | .085 [.02-.17] | .056 | 4/7 | T1 A | A | yes |
-| 12 | witch-ev1 | base-only | .082 [.01-.18] | .018 | 3/5 | T2 H | C | |
-| 13 | ice-wizard-hero | base-only | .074 [.01-.15] | .148 | 3/17 | T3 | F | if owned |
-| 14 | princess-ev1 | base-only | .072 [.02-.14] | .035 | 5/5 | T2 I | D | |
-| 15 | electro-giant-ev1 | base-only | .071 [0-.14] | .087 | 2/11 | T3 | E | |
-| 16 | skeleton-army-ev1 | base-only | .069 [.02-.14] | .053 | 3/7 | none | F | |
-| 17 | electro-wizard-hero | base-only | .068 [0-.14] | .129 | 2/10 | T3 | G | yes |
-| 18 | musketeer-ev1 | base-only | .058 [.01-.13] | .039 | 3/3 | T2 F | I | |
-| 19 | royal-hogs-ev1 | base-only | .054 [.01-.12] | .056 | 4/8 | T2 E | H | |
-| 20 | berserker-hero | no | .050 [.01-.11] | .049 | 5/7 | T1 B | A | if owned |
-| 21 | mini-pekka-hero | base-only | .048 [0-.11] | .066 | 2/7 | T2 G | I | if owned |
-| 22 | royal-ghost-ev1 | base-only | .048 [0-.11] | .041 | 2/6 | T1 C | G | |
-| 23 | barbarian-barrel-hero | base-only | .046 [0-.12] | .039 | 2/5 | T2 J | H | if owned |
-| 24 | goblin-demolisher | no | .046 [0-.11] | .054 | 2/7 | T1 A | A | |
-| 25 | suspicious-bush | no | .046 [0-.10] | .020 | 2/3 | T1 A | A | |
+| 12 | witch-ev1 | base-only | .082 [.01-.18] | .018 | 3/5 | T2 H | C | yes |
+| 13 | ice-wizard-hero | base-only | .074 [.01-.15] | .148 | 3/17 | T3 | cm C | no |
+| 14 | princess-ev1 | base-only | .072 [.02-.14] | .035 | 5/5 | T2 I | cm D | no |
+| 15 | electro-giant-ev1 | base-only | .071 [0-.14] | .087 | 2/11 | T3 | cm B | no |
+| 16 | skeleton-army-ev1 | base-only | .069 [.02-.14] | .053 | 3/7 | none | A | yes |
+| 17 | electro-wizard-hero | base-only | .068 [0-.14] | .129 | 2/10 | T3 | A, G, I | yes |
+| 18 | musketeer-ev1 | base-only | .058 [.01-.13] | .039 | 3/3 | T2 F | E | yes |
+| 19 | royal-hogs-ev1 | base-only | .054 [.01-.12] | .056 | 4/8 | T2 E | D | yes |
+| 20 | berserker-hero | no | .050 [.01-.11] | .049 | 5/7 | T1 B | cm C | no |
+| 21 | mini-pekka-hero | base-only | .048 [0-.11] | .066 | 2/7 | T2 G | cm D | no |
+| 22 | royal-ghost-ev1 | base-only | .048 [0-.11] | .041 | 2/6 | T1 C | G | yes |
+| 23 | barbarian-barrel-hero | base-only | .046 [0-.12] | .039 | 2/5 | T2 J | cm F | no |
+| 24 | goblin-demolisher | no | .046 [0-.11] | .054 | 2/7 | T1 A | A | yes |
+| 25 | suspicious-bush | no | .046 [0-.10] | .020 | 2/3 | T1 A | A | yes |
 
-**Next 24, down to .01** (share, revised deck):
-- goblin-barrel-ev1 .044 (D); elite-barbarians-ev1 .042 (J, probably not owned); cannon-ev1 .039 (K); goblin-cage-ev1 .038 (H);
-- giant-snowball .037 (B, via its evo); battle-ram-ev1 .036 (thin, G); wizard-ev1 .036 (J); giant-hero .036 (J); pekka-ev1 .033 (E, owned);
-- goblin-curse .032 (A); goblin-barrel .031 (D, via its evo); balloon-hero .030 (K); minion-horde-ev1 .029 (F, owned); goblinstein .025 (B);
-- valkyrie-hero .025 (I); royal-delivery .025 (F); dart-goblin-ev1 .019 (Tier 3); ronin .018 (B); berserker .017 (B); tombstone-hero .015 (K);
-- furnace .015 (look-changed, K); dark-prince-hero .011 (Tier 3); furnace-ev1 .011 (Tier 3, K's fallback); phoenix .011 (thin, J).
+**Next 24, down to .01** (share, current deck; "not owned" items come from clanmates):
+- goblin-barrel-ev1 .044 (F); elite-barbarians-ev1 .042 (cm E, not owned); cannon-ev1 .039 (E); goblin-cage-ev1 .038 (D);
+- giant-snowball .037 (B, via its evo); battle-ram-ev1 .036 (thin, G); wizard-ev1 .036 (H); giant-hero .036 (cm E, not owned); pekka-ev1 .033 (I);
+- goblin-curse .032 (A); goblin-barrel .031 (F, via its evo); balloon-hero .030 (cm G, not owned); minion-horde-ev1 .029 (I); goblinstein .025 (B);
+- valkyrie-hero .025 (cm H, not owned); royal-delivery .025 (D); dart-goblin-ev1 .019 (F); ronin .018 (B); berserker .017 (B); tombstone-hero .015 (optional cm I, not owned);
+- furnace .015 (look-changed, H); dark-prince-hero .011 (optional cm D, not owned); furnace-ev1 .011 (H); phoenix .011 (thin; cm F and the optional J).
 
-**Below .01:** rune-giant (B), Minion Giant (B; .004 ranked, but .051 and 10 players in all modes), Boss Bandit (C), freeze (J) and the Tier 3 items of 4.6. Three Musketeers, Void, Spirit Empress and Goblin Machine are in no ranked clan deck (C keeps them). Evo Giant and Evo Mirror (planned for 2026-11-02) are not in the 16.402.22 table, so they cannot be labelled until RoyaleSim ships them.
+**Below .01:** rune-giant (B), Minion Giant (B; .004 ranked, but .051 and 10 players in all modes), Goblins hero (H), Boss Bandit (C), freeze (I), Musketeer hero (F; .021 in all modes) and the Tier 3 items of 4.6. Three Musketeers, Void, Spirit Empress and Goblin Machine are in no ranked clan deck (C keeps them). Evo Giant and Evo Mirror (planned for 2026-11-02) are not in the 16.402.22 table, so they cannot be labelled until RoyaleSim ships them.
 
 #### 4.8.3 Deck slot rules in the clan data
 
@@ -569,7 +590,7 @@ From the 1,176 collection-mode sides:
 - Slots 4-8 take base cards only. Champions sat only in slots 2 and 3; two champions together, once.
 - So: at most 2 evolutions, at most 2 heroes and champions together, at most 3 special cards, as 1.10 says.
 - The owner confirmed the rule on 2026-10-30: two evolutions and one hero, or one evolution and two heroes; never three of one kind; fewer is allowed. That statement did not mention champions; the data shows a champion taking a hero's place.
-- Every capture deck in 4.4-4.5, and every deck its fallbacks can produce (73 variants), follows these rules with 8 different cards.
+- Every capture deck in 4.4-4.5 (the optional J included) follows these rules with 8 different cards and owned forms only, so none needs a fallback. Every clanmate request deck of 4.8.8 is a deck the clanmate played, so it follows them too.
 
 #### 4.8.4 Forms: how they are read, and where -ev1 or -hero could be wrong
 
@@ -598,8 +619,10 @@ This is right under either meaning, as long as the log lists cards in slot order
 - today's 95.0% would become 96.8%, and the revised 7.1% would become 7.4%.
 
 **Checking it.** `opponents.py probe` settles the meaning of the field (4.3). Its own verdict skips slot 3, so check slot 3 by hand:
-1. After a friendly with a dual-form card in slot 3 (I's Valkyrie hero or J's Wizard evo), read the probe's "latest" card table.
-2. If you own both forms of that card, 2 or 1 means the log shows the form played; 3 means it shows ownership.
+1. After a friendly of deck E (the Musketeer evo in slot 3), read the probe's "latest" card table.
+2. The main account owns both Musketeer forms: 1 means the log shows the form played; 3 means it shows ownership.
+
+**The probe on the PC (2026-10-30)** found the form played: an owned evolution in slot 4 shows as base, cards come in deck order, and no side has 7 cards. Friendlies show every card at level 11. Whether a slot-2 hero always reports as a hero is checked with the next friendly (A's friendly 1, or any deck with a hero in slot 2).
 
 Knight in slot 3 would be the most useful check, but no capture deck has it.
 
@@ -633,14 +656,95 @@ Knight in slot 3 would be the most useful check, but no capture deck has it.
 
 **Why:**
 - The ladder tables left five of the clan's 17 most-played gaps in Tier 3 or in no tier: Ice Wizard hero, Electro Giant evo, Skeleton Army evo, Electro Wizard hero and Rocket.
-- The revised tables use the same 36 friendlies, and they take the clan's leftover from 48.4% to 7.1%.
+- The revised tables use the same 36 friendlies, and they take the clan's leftover from 48.4% to 7.1%, if every hero is owned.
+
+**Then fitted to the collection (2026-10-30, 4.8.7):**
+- Tier 1: the Electro Wizard hero replaces Berserker hero in A's slot 2, the Skeleton Army evo takes A's slot 3, and the Inferno Dragon evo moves from A to C, in place of the Goblin Drill evo.
+- Tier 2: 6 decks instead of 8, with new letters in play order. Every unowned hero and evolution left the owner's decks. The Ice Golem, Musketeer and Goblins heroes and the Furnace and Dart Goblin evolutions came in, and the Electro Wizard hero now plays in three decks.
+- The unowned forms moved to clanmate friendlies (4.8.8).
+
+#### 4.8.7 The main account's collection (official API, 2026-10-30)
+
+The API lists every card with `evolutionLevel` and `maxEvolutionLevel`: bit 1 is the evolution, bit 2 the hero, and `maxEvolutionLevel` says which forms exist.
+
+| Kind | Exist | Owned | Not owned |
+|---|---|---|---|
+| Cards | 123 | all 123, champions included | none |
+| Evolutions | 43 | 39 | Elite Barbarians, Goblin Drill, Princess, Electro Giant |
+| Heroes | 18 | 4: Electro Wizard, Goblins, Ice Golem, Musketeer | Knight, Bowler, Ice Wizard, Berserker, Mini P.E.K.K.A, Balloon, Giant, Barbarian Barrel, Tombstone, Valkyrie, Wizard, Dark Prince, Mega Minion, Magic Archer |
+
+- **Musketeer** is the only card with both forms owned. That makes deck E's slot-3 Musketeer evo the direct form check of 4.8.4.
+- **The 18 forms it lacks are all detector gaps:** 17 are `base-only`, and Berserker hero has no class. 17 of them are in clan ranked decks (Wizard hero is in none), together in 68.2% of them, 0.98 gaps per deck. No plan with the main account alone can go below that floor.
+- **The fitted decks** (4.4-4.5, 30 friendlies) leave 69.0%, 1.01 gaps per deck (4.8.1). The earlier revised decks with their unowned forms simply dropped would leave 69.9% with 36 friendlies.
+- **What is left after them**, with each remaining deck's weight shared equally by its remaining items: 52.3 points from unowned heroes, 14.8 from unowned evolutions, 1.9 from owned leftovers. The largest items are Knight hero 14.0, Bowler hero 11.4, Ice Wizard hero 5.5, the Goblin Drill evo 4.6, the Princess evo 4.5, Mini P.E.K.K.A hero 4.5, Barbarian Barrel hero 4.0 and the Electro Giant evo 3.6. 36.8 of the 69.0 points are decks missing a single item.
+- **Owned leftovers** (not in a Tier 1 or Tier 2 deck): Phoenix .011 (thin; in J and in clanmate F's deck), the Ice Spirit .006, Mega Knight .005, Zap .005 (J), Executioner .002 and Hunter .001 evolutions.
+- **Held out:** on the clan's event decks the fitted decks leave 81.7% (floor 76.0%). The decks were chosen on the ranked decks they are scored on.
+
+#### 4.8.8 Clanmate friendlies for forms the main account lacks
+
+Clanmates play their own decks against Yodle2, recorded as training. Letters only: the owner keeps the letter-to-name map off the repo, and the letters are not capture-deck letters.
+
+| Request | Their deck | Forms it adds (clan share) | Training friendlies | Decks with a gap after |
+|---|---|---|---|---|
+| clanmate A | main deck | Knight hero (.207), Goblin Drill evo (.092) | 4 | 52.5% |
+| clanmate B | main deck | Bowler hero (.150), Electro Giant evo (.071) | 4 | 37.6% |
+| clanmate C | main deck | Ice Wizard hero (.074), Berserker hero (.050) | 3 | 30.2% |
+| clanmate D | another ranked deck (4 battles) | Princess evo (.072), Mini P.E.K.K.A hero (.048) | 4 | 18.7% |
+| clanmate E | main deck | Elite Barbarians evo (.042), Giant hero (.036) | 3 | 15.2% |
+| clanmate F | main deck | Barbarian Barrel hero (.046), plus the owned Phoenix (.011) | 3 | 10.6% |
+| clanmate G | main deck | Balloon hero (.030) | 3 | 7.6% |
+| clanmate H | Showdown deck (5 battles) | Valkyrie hero (.025) | 3 | **5.3%** |
+| *optional:* clanmate D | another deck | Dark Prince hero (.011) | 2 | 4.8% |
+| *optional:* clanmate H | another deck | Mega Minion hero (.007) | 2 | 4.1% |
+| *optional:* clanmate F | another deck | Magic Archer hero (.006) | 2 | 3.5% |
+| *optional:* clanmate I | a ranked deck | Tombstone hero (.015) | 2 | 2.0% |
+
+- **Coverage** (clan ranked decks with a gap):
+
+  | Stage | Friendlies | Decks with a gap | Gaps per deck | Main decks fully covered |
+  |---|---|---|---|---|
+  | The main account's decks only (4.4-4.5) | 30 | 69.0% | 1.01 | 9-10 of 28 |
+  | ... plus the eight requests | 30 + 27 | **5.3%** | 0.06 | 28 of 28 |
+  | ... plus the optional J | 33 + 27 | 4.8% | 0.05 | 28 of 28 |
+  | ... plus the four optional decks | 30 + 35 | 2.0% | 0.02 | 28 of 28 |
+
+  - Nothing is left that cannot be named: clanmate C covers Berserker hero.
+  - If every owned form were covered (the floor), the eight requests would leave 4.0%.
+  - Held out: on the clan's event decks, 81.7% becomes 22.0%, and 10.9% with J. Most of the difference is the Lumberjack and Zap evolutions, which only J holds.
+- **How they were chosen.** Greedy over (clanmate, ranked deck) pairs. The gain is the clan share of the unowned forms the deck adds. Ties go to a clanmate active in the last 7 days, then one already asked, then their main deck, then battles with the deck. The main set stops below a gain of .02.
+  - Two clanmates tie for F. The one whose deck also holds Phoenix is asked first. The other, clanmate O, is the fallback; with O the eight give 6.4%.
+  - Every request clanmate played in the last 7 days. Two clan accounts (B and J) play one identical deck and may be one player.
+  - Single sources: Giant hero (E) and Mega Minion hero (H). The Electro Giant evo's two accounts (B and J) may be one player. Every other form has a second clanmate, so a refusal has a fallback.
+- **Friendlies per request.** 4 where a single-unit evolution is new (Goblin Drill, Electro Giant, Princess), 3 for a hero, 2 for the optional decks. A form needs 8 labelled tracks to train as itself (2.3), and a natural friendly shows each card roughly 3-6 times.
+- **Field gold** (one friendly each, bot watching, `--capture field`; 4.6):
+
+  | Clanmate | Gold for |
+  |---|---|
+  | G | Knight hero, Goblin Drill evo |
+  | J | Bowler hero, Electro Giant evo (no independent gold if J and B are one player) |
+  | K | Ice Wizard hero |
+  | L | Princess evo |
+  | D | Berserker hero |
+  | M | owned forms: Goblin Curse, the Inferno Dragon and Skeleton Army evos, Zap |
+  | I | owned forms: the Skeleton Army and Skeleton Barrel evos, Suspicious Bush, Vines |
+  | N | owned forms: Goblinstein, the Minion Horde evo |
+
+  Each gold partner for an unowned form is a different clanmate from that form's training source. One natural friendly may leave a form below the gate's 4 gold plays; it then reports as "insufficient" (6.4).
+- **Running them:**
+  - one SID per friendly with the clanmate's letter, for example `20261103_CMA_1`; never a name;
+  - `--role train` on every training SID;
+  - take `--deck` from `opponents.py pull` after the game;
+  - ask the clanmate to play every card several times, cycle the evolution, use the hero ability and go to overtime; play Yodle2 lightly by hand;
+  - where Knight sits in slot 3 (the optional F deck), confirm with the clanmate that it is the hero (4.6).
+- **Time.** About 3.2 h at the PC for the 27 training friendlies and about 1 h for the 8 field gold friendlies; labelling about 2.7-4 h and 2-3.6 h (5).
+- Slot-2 hero reporting is checked with the next friendly (4.8.4). Re-run the ranking after each pull.
 
 ## 5. Labelling steps and time
 
 The commands are those planned in N08-N12.
 
 ```powershell
-& $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --deck "skeleton-barrel-ev1,berserker-hero,inferno-dragon-ev1,vines,...,rocket" --role auto --client 16.635.1
+& $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --deck "skeleton-barrel-ev1,electro-wizard-hero,skeleton-army-ev1,vines,...,rocket" --role auto --client 16.635.1
 & $BB tools\vision_autolabel.py scan $SID            # unattended, a few minutes on the GPU; MuMu closed
 & $BB tools\vision_autolabel.py sheet $SID           # writes the numbered contact sheet PNG and its legend
 & $BB tools\vision_autolabel.py label $SID --map "0=3,1=3,2=x,5=s"
@@ -679,9 +783,10 @@ The commands are those planned in N08-N12.
 
 **Totals:**
 - **Tier 1:** about 1.4 h for training battles plus 1.4 h for gold.
-- **Tier 2:** shorter per battle, because the Tier 1 model auto-accepts what it knows. About 1.5 h for training battles plus 3 h for gold.
-- **Field gold:** about 15 min each.
-- **Overall:** about 8-9 h of labelling over 2-3 weeks, alongside about 4.5 h of play.
+- **Tier 2:** shorter per battle, because the Tier 1 model auto-accepts what it knows. About 1.2 h for 12 training battles plus 2.2 h for 6 gold.
+- **Clanmate training (4.8.8):** 27 battles at about 6-9 min, about 2.7-4 h.
+- **Field gold:** 8 battles at about 15-27 min each, about 2-3.6 h.
+- **Overall:** about 6.2 h for the main account's 30 friendlies, and 11-14 h with the clanmate and field gold friendlies, over 3-4 weeks. Your time at the PC is about 3.5 h for your own friendlies and about 4 h for the clanmates' (4.7).
 
 **Unattended GPU time:**
 - The scan takes a few minutes per battle: two detector passes per image.
@@ -820,7 +925,7 @@ Tests go in `tests/pipeline`. They use synthetic fixtures and `FakeModel`-style 
 3. **Over-fitting to one arena and one player's placements.** Consecutive frames are highly correlated. Field gold and the natural friendly exist to expose this.
 4. **Pseudo-labels.** Labels for our own units, towers and UI come from tonight's model, so its errors are learned again. The regression gates bound this.
 5. **Masking artefacts.** Pasted background patches can teach "patch edge = background". Mitigations: feathered edges, at most 3 masked regions per frame, and frames are dropped when a mask overlaps a kept box.
-6. **Coverage depends on what the main account owns.** Evolutions appear only on evolved cycles, and hero abilities change the look mid-track. The long tail stays thin. The safety net and `train_as` keep it from vanishing or naming the wrong card.
+6. **Coverage depends on what the main account owns.** It lacks 14 heroes and 4 evolutions (4.8.7), in 68.2% of clan decks. Those rest on clanmate friendlies (4.8.8): one or two players' placements per form, and only if they agree to play. Evolutions appear only on evolved cycles, and hero abilities change the look mid-track. The long tail stays thin. The safety net and `train_as` keep it from vanishing or naming the wrong card.
 7. **Client drift.** The client is 16.635.1, newer than the 16.402.22 table. Anything added in between cannot be labelled until `classes.json` is regenerated from a newer table.
 8. **The policy side.** UNKNOWN plays and card -1 rows exist in training only as far as perception noise produces them. Until N15 refits the noise, the live rate of unknowns may differ from training.
    - Not checked: whether the engine catalogue (`data/rs_rows/spawn_primary.json` `card_names`, not in the repo here) has ids for the new cards. Without an id, rule 5 still finds no card.
@@ -838,13 +943,11 @@ Tests go in `tests/pipeline`. They use synthetic fixtures and `FakeModel`-style 
 ## 11. Open questions
 
 1. ~~Which 8 cards did the main account play in the 2026-10-29 friendly?~~ **Answered (2026-10-30):** boss-bandit, elite-barbarians, executioner, freeze, guards, hog-rider, minion-horde-ev1, zap, read from Yodle2's spar record (4.3).
-2. Which capture cards does the main account own? The pull proves only the Electro Wizard hero, the Baby Dragon, P.E.K.K.A and Minion Horde evolutions, Boss Bandit and Vines, and the Elite Barbarians evolution is probably missing (4.3).
-   - **Before deck A:** the Skeleton Barrel, Inferno Dragon, Giant Snowball, Goblin Drill and Witch evolutions, Berserker hero, and the whole cards Goblinstein, Ronin, Rune Giant, Minion Giant, Goblin Demolisher, Suspicious Bush, Goblin Curse, Goblin Machine, Spirit Empress, Void and Three Musketeers. Minion Giant is in the client: 10 clanmates played it.
-   - **Before Tier 2:** its heroes (Knight, Bowler, Ice Wizard, Barbarian Barrel, Mini P.E.K.K.A, Valkyrie, Giant, Balloon, Tombstone) and evolutions (4.5).
+2. ~~Which capture cards does the main account own?~~ **Answered (2026-10-30, official API; 4.8.7):** all 123 cards, 39 of 43 evolutions (not Elite Barbarians, Goblin Drill, Princess or Electro Giant) and 4 of 18 heroes (Electro Wizard, Goblins, Ice Golem, Musketeer). The capture decks of 4.4-4.5 are fitted to it, and the forms it lacks come from clanmates (4.8.8). Still check each special card in the deck builder before a deck's first friendly.
 3. Does your client (16.635.1) have cards, evolutions or heroes that are missing from the 16.402.22 table?
 4. Do clanmates' friendlies show their own tower troop (Royal Chef, Duchess, Cannoneer), or always Tower Princess? Royal Chef has no KataCR class. 15.3% of clan decks use another tower or have none in the log (4.8.5), so field gold will answer it. Do they use other arenas?
 5. Which card id does the engine log for a Spirit Empress play: MergeMaiden, or a variant? N01's alias depends on it.
 6. Should the deck prior (N18) exist at all? It uses ladder statistics only for naming what is on screen, never as policy input. It is planned off by default. A clan prior would put Golden Knight near 0 in friendlies: it is in no ranked clan deck, yet the pinned detector reported 10 Golden Knight plays in Round 0, most likely Boss Bandit.
-7. Will 2-3 clanmates play a friendly against Yodle2 for field gold, with the bot only watching? Choose them by deck (4.6).
+7. Will the clanmates of 4.8.8 play? Eight training requests (27 friendlies) and 8 single field gold friendlies with the bot only watching. The owner's private list names other clanmates with the same forms, where they exist.
 8. Does the enemy side ever show the elixir-cost pop or the card-name text? KataCR's data says these are our side only (elixir 1,493 / 0, text 2,050 / 0). This can be checked on the recorded friendly.
-9. What does `opponents.py probe` say about battle-log forms? The pull already suggests the form played (4.8.4). Run it on the existing log; then read slot 3 by hand after the first friendly with Valkyrie or Wizard in slot 3.
+9. What does `opponents.py probe` say about battle-log forms? **Partly answered (2026-10-30):** the probe on the PC found the form played, in deck order (4.8.4). Still open: whether a slot-2 hero always reports as a hero (A's friendly 1), and slot 3, read by hand after the first friendly of deck E (the Musketeer evo; both forms owned).
