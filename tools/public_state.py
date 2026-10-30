@@ -79,7 +79,10 @@ SPELLS AND PROJECTILES are not board units: a spell track (a "spell" label: "Fir
 "spells" row (team, card_id, x/y and aim at the track, ticks_flown = its age; an undecided
 team counts as the opponent's); else "spells" is []. "projectiles" is always []. Crown-tower
 and tower-troop labels, objects, UI and unknown labels are left out; state["perception"]
-counts what was left out and what was assumed. A legacy obs_row does not read "spells", a v2
+counts what was left out and what was assumed. With unknown_units (N02, off by default) an
+enemy track of an unknown label stays as an unknown unit instead: card_id -1, unit_type -1
+(row token 1 in --live-compat, unit-type and vision rows alike, the "unknown" token perception
+noise trains), a ground troop of UNKNOWN_MAX_HP. A legacy obs_row does not read "spells", a v2
 one does (spell_ids / spell_feats, the SPELL cards only); RSAgent.rebuilt drops spells in flight.
 
 THE CLOCK: tick, tick_ms, overtime, and elixir_rate by tools/rs_elixir.py's law (2x from
@@ -100,7 +103,9 @@ always was) and row_inputs(state) gives obs_row's v2 keywords from it:
                exactness (the row's opp_exact) is the counter's (no unaffordable play, no Mirror
                with nothing to copy), and False for the whole battle when the bot cannot have
                seen every play: no detector (blind), watching from after the deploy lockout
-               (start_tick > 90), or a play of a card the catalogue does not price.
+               (start_tick > 90), or a play of a card the catalogue does not price. An UNKNOWN
+               play (card -1, N02) is paid its OppPlay.cost (the expected cost) and makes the
+               count not exact too.
   own_pending  OwnTaps: the runner's own sent taps (card, slot, tap tick), each until the event
                deriver reports its OwnLanding (landed, or missed after its wait) or it is
                TAP_MAX_AGE ticks old; shown as rs_decide.pending_inputs(taps, now, delay), the
@@ -157,7 +162,8 @@ from scripts.vision import geometry as G  # noqa: E402
 from scripts.vision.hud import LEVEL11_TOWER_MAX_HP  # noqa: E402
 from scripts.vision.tracker import MID_Y_MT, deploy_ticks_left  # noqa: E402
 from scripts.vision.types import (  # noqa: E402
-    EMPTY_CARD, ENEMY_TEAM, FORM_BASE, HAND_SIZE, OWN_TEAM, PHASE_ENDED, PHASE_OVERTIME, SCREEN_END)
+    EMPTY_CARD, ENEMY_TEAM, FORM_BASE, HAND_SIZE, OWN_TEAM, PHASE_ENDED, PHASE_OVERTIME, SCREEN_END,
+    UNKNOWN_CARD)
 
 __all__ = ["OWN_TEAM", "ENEMY_TEAM", "SUBTILE_PER_MILLITILE", "REQUIRED_FIELDS", "ENTITY_DEFAULTS",
            "PublicStateBuilder", "rs_state_from_vision", "sanitize_for_rebuild", "rebuild_card",
@@ -179,6 +185,9 @@ OVERTIME_TICKS = 2400                                      # state_json's overti
 ELIXIR_MAX_MILLI = 10_000
 #: max_hp of a unit no table gives hit points for (hp is then the bar fill * this).
 UNKNOWN_MAX_HP = 1000
+#: unknown_units: the deploy time of a unit of a label the class table cannot place (most
+#: troops deploy in 1 s), so it reads as deploying for its first 20 ticks.
+UNKNOWN_DEPLOY_MS = 1000
 #: catalogue_json() column of the elixir cost, 2 (royalesim CATALOGUE_FIELDS begin name,
 #: placement, elixir, ...: rs_elixir.CATALOGUE_PREFIX).
 CATALOGUE_ELIXIR = rs_elixir.CATALOGUE_PREFIX.index("elixir")
@@ -213,7 +222,7 @@ ENTITY_DEFAULTS: dict[str, Any] = {
     "ability_ticks": 0, "unit_type": -1,
 }
 
-_SPELL, _UNIT, _TOWER = "spell", "unit", "tower"
+_SPELL, _UNIT, _TOWER, _UNKNOWN = "spell", "unit", "tower", "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +320,11 @@ class PublicStateBuilder:
     unknown_team  "half" or "drop" for tracks whose team is undecided
     tower_max_hp  TOWER_KEYS -> max hit points where the HUD has none (LEVEL11_TOWER_MAX_HP)
     spell_fields  royalesim.SPELL_FIELDS: spell tracks become "spells" rows (else [])
+    unknown_units N02 (docs/NEW_CARDS_PLAN.md 2.2; off by default): an ENEMY track of a label
+                  the class table cannot place stays on the board as an unknown unit, card_id
+                  -1 (or its track_cards card) and unit_type -1, row token 1 in every unit
+                  schema, instead of being dropped; state["perception"]["unknown_units"]
+                  counts them. Our own such tracks are dropped as before
     """
 
     def __init__(self, classes: Any, spawn_table: Mapping[str, Any] | None, *, deck: Iterable[Any],
@@ -318,7 +332,8 @@ class PublicStateBuilder:
                  fields: Mapping[str, int] | Sequence[str] | None = None,
                  sub: int = SUBTILE_PER_MILLITILE, own_team: int = OWN_TEAM,
                  unknown_team: str = "half", tower_max_hp: Mapping[str, int] | None = None,
-                 spell_fields: Mapping[str, int] | Sequence[str] | None = None):
+                 spell_fields: Mapping[str, int] | Sequence[str] | None = None,
+                 unknown_units: bool = False):
         if own_team not in (0, 1):
             raise ValueError(f"own_team must be 0 or 1, got {own_team!r}")
         if unknown_team not in UNKNOWN_TEAM_POLICIES:
@@ -355,6 +370,7 @@ class PublicStateBuilder:
         self.own_team = int(own_team)
         self.enemy_team = 1 - self.own_team
         self.unknown_team = unknown_team
+        self.unknown_units = bool(unknown_units)
         self.levels = team_levels(levels)
         self.deck = _card_list(deck, self.card_ids, "deck")
         self.deck_names = [names[c] for c in self.deck]
@@ -518,6 +534,37 @@ class PublicStateBuilder:
                 row[SF[name]] = v
         return row
 
+    def _unknown_entity(self, track: Any, tick: int, given: Mapping[int, int],
+                        entities: list[list]) -> str | None:
+        """unknown_units: enemy `track`, whose label the class table cannot place, appended to
+        `entities` as an unknown unit (card_id its track_cards card or -1, unit_type -1, a
+        ground troop, UNKNOWN_MAX_HP or its card's own hit points, deploying for
+        UNKNOWN_DEPLOY_MS from its first sighting). None when added, else the reason it was
+        not, as state()'s "dropped" counts it ("unknown" for a track of ours)."""
+        x_mt, y_mt = float(track.x_mt), float(track.y_mt)
+        if not (math.isfinite(x_mt) and math.isfinite(y_mt)):
+            return "position"
+        team = self._team(track)
+        if team is None:
+            return "team"
+        if team != self.enemy_team:
+            return "unknown"
+        card = int(given.get(int(track.uid), UNKNOWN_CARD))
+        card = card if card >= 0 else UNKNOWN_CARD
+        level = self.levels[team]
+        max_hp = (card_hitpoints(self.hp_table, card, level) if card >= 0 else None) or UNKNOWN_MAX_HP
+        frac = 1.0 if track.hp_frac is None else min(1.0, max(0.0, float(track.hp_frac)))
+        deploy_total = int(round(UNKNOWN_DEPLOY_MS / TICK_MS))
+        entities.append(self._row({
+            "uid": int(track.uid), "team": team, "kind": KIND_TROOP, "card_id": card,
+            "tower_slot": -1, "x": int(round(x_mt * self.sub)), "y": int(round(y_mt * self.sub)),
+            "hp": min(max_hp, max(1, int(round(frac * max_hp)))), "max_hp": max_hp,
+            "flying": False,
+            "deploy_ticks": min(deploy_total, deploy_ticks_left(track, tick, UNKNOWN_DEPLOY_MS)),
+            "status_flags": STATUS_NONE, "level": level, "unit_type": -1,
+        }))
+        return None
+
     def _towers(self, hud: Any, side: str, notes: list[str]) -> tuple[list[int], list[int]]:
         hp, mx = [], []
         for pos in ("king", "left", "right"):
@@ -564,7 +611,7 @@ class PublicStateBuilder:
         entities: list[list] = []
         spells: list[list] = []
         dropped: Counter = Counter()
-        n_spells = 0
+        n_spells = n_unknown = 0
         for tr in vf.tracks:
             typ, cid, lform, spell_card = self.label(tr.cls)
             if typ == _SPELL:
@@ -575,6 +622,13 @@ class PublicStateBuilder:
                     spells.append(self._spell_row(tr, team, card, t))
                 continue
             if typ != _UNIT:
+                if typ == _UNKNOWN and self.unknown_units:      # N02: kept as an unknown unit
+                    why = self._unknown_entity(tr, t, given, entities)
+                    if why is None:
+                        n_unknown += 1
+                    else:
+                        dropped[why] += 1
+                    continue
                 dropped[typ] += 1
                 continue
             x_mt, y_mt = float(tr.x_mt), float(tr.y_mt)
@@ -645,6 +699,8 @@ class PublicStateBuilder:
             "perception": {"tracks": len(vf.tracks), "units": len(entities), "spells": n_spells,
                            "dropped": dict(sorted(dropped.items())), "notes": notes},
         }
+        if self.unknown_units:
+            out["perception"]["unknown_units"] = n_unknown
         if observer is not None:
             inputs = observer if isinstance(observer, Mapping) else observer.inputs(t)
             out["observer"] = _observer_block(inputs)
@@ -666,12 +722,14 @@ def rs_state_from_vision(vf: Any, deck: Iterable[Any], classes: Any = None,
                          spell_fields: Mapping[str, int] | Sequence[str] | None = None,
                          tick: int | None = None, opp_deck: Iterable[Any] = (),
                          track_cards: Mapping[int, int] | None = None,
-                         pending_cost: int = 0, observer: Any = None) -> dict:
+                         pending_cost: int = 0, observer: Any = None,
+                         unknown_units: bool = False) -> dict:
     """PublicStateBuilder(classes, spawn_tables, deck=deck, ...).state(vf, ...) in one call
     (the arguments are those two's). A loop should keep one builder: it caches lookups."""
     return PublicStateBuilder(classes, spawn_tables, deck=deck, levels=levels, catalogue=catalogue,
                               fields=fields, sub=sub, own_team=own_team, unknown_team=unknown_team,
-                              tower_max_hp=tower_max_hp, spell_fields=spell_fields).state(
+                              tower_max_hp=tower_max_hp, spell_fields=spell_fields,
+                              unknown_units=unknown_units).state(
         vf, tick=tick, opp_deck=opp_deck, track_cards=track_cards, pending_cost=pending_cost,
         observer=observer)
 
@@ -695,8 +753,14 @@ class OpponentElixir:
     exec_tick is None) and keeps each until view reaches its tick; view(tick) feeds the ones due
     (exec_tick <= tick) to the counter and returns (elixir_milli(tick), exact): the bar after
     the plays dated `tick`, what rs_rows.SeenElixir(lag=0).view gives for the same plays. A
-    play reported late is paid at its own tick. A card the catalogue does not price is
-    skipped and counted in `unpriced`; the count is then not exact.
+    play reported late is paid at its own tick. A play with an OppPlay.cost is paid that
+    (ElixirCounter.play(cost=): a Spirit Empress form's 3 or 6). An UNKNOWN play (card -1, N02:
+    events.EventConfig.unknown_plays) is paid its cost, the expected one the deriver gives it,
+    and counted in `unknown`; the count is then not exact (the rows' opp_exact 0), since the
+    card and so its price are a guess. A card the catalogue does not price, with no cost, is
+    skipped and counted in `unpriced` (an UNKNOWN play without a cost, too); the count is then
+    not exact. Training rows price an unknown play differently: rs_rows / rs_eval skip it (not
+    paid, exactness kept), so a count with UNKNOWN plays is one the model has not seen.
     """
 
     def __init__(self, catalogue: Sequence[Sequence[Any]], *,
@@ -707,7 +771,8 @@ class OpponentElixir:
         self.blind = bool(blind)
         self.recorded = 0
         self.unpriced = 0
-        self._waiting: list[tuple[int, int]] = []
+        self.unknown = 0
+        self._waiting: list[tuple[int, int, int | None]] = []     # (tick, card, cost or None)
 
     @property
     def late(self) -> bool:
@@ -717,9 +782,9 @@ class OpponentElixir:
     @property
     def exact(self) -> bool:
         """The row's opp_exact: the counter's own exactness, and the bot can have seen every
-        play (not blind, not late, every play priced)."""
+        play (not blind, not late, every play priced, no UNKNOWN play)."""
         return bool(self.counter.exact and not self.blind and not self.late
-                    and not self.unpriced)
+                    and not self.unpriced and not self.unknown)
 
     def record(self, plays: Iterable[Any]) -> int:
         """Log the opponent plays `plays` (OppPlay); returns how many were taken."""
@@ -727,10 +792,13 @@ class OpponentElixir:
         for p in () if plays is None else plays:
             card = int(p.card)
             when = p.exec_tick if p.exec_tick is not None else p.tick
-            if card not in self.counter.costs:
+            cost = getattr(p, "cost", None)
+            if cost is None and card not in self.counter.costs:
                 self.unpriced += 1
                 continue
-            self._waiting.append((max(0, int(when)), card))
+            if card < 0:                                   # UNKNOWN_CARD: its cost is a guess
+                self.unknown += 1
+            self._waiting.append((max(0, int(when)), card, None if cost is None else max(0, int(cost))))
             n += 1
         self.recorded += n
         return n
@@ -742,8 +810,8 @@ class OpponentElixir:
             due = [e for e in self._waiting if e[0] <= tick]
             if due:
                 self._waiting = [e for e in self._waiting if e[0] > tick]
-                for when, card in due:
-                    self.counter.play(when, card)
+                for when, card, cost in due:
+                    self.counter.play(when, card, cost=cost)
         return int(self.counter.elixir_milli(tick)), self.exact
 
 

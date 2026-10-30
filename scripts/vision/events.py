@@ -36,11 +36,23 @@ team is decided (or after ``team_wait_ticks``, by a fallback). In order:
    that join it, and takes the card whose composition fits the counts best.
    Our own unmatched plays (a human playing in MANUAL mode) are reported as an
    OwnLanding with slot -1 (scripts/vision/control.as_own_play reads that).
+6. UNKNOWN (EventConfig.unknown_plays, OFF by default; docs/NEW_CARDS_PLAN.md 2.2).
+   An ENEMY track rules 1-5 leave unexplained (no card's units include its class:
+   a card the tables lack, a hero's or an evolution's extra unit, a misread) joins
+   the newest UNKNOWN play of its team first seen less than PLAY_WINDOW ticks from
+   it and within ``merge_radius_mt`` (another unit of the same unnamed card), or
+   starts one: OppPlay(card=UNKNOWN_CARD (-1), cost=``unknown_cost``).
+   record_plays writes it as row token 1 ("unknown", rs_memory.UNKNOWN), and
+   tools/public_state.OpponentElixir charges it that cost and stops calling its
+   count exact. Its tracks keep card_of None: the board names them by the class
+   table, as before. With the option off such a track is only counted in
+   OppStats.unknown, and nothing is reported.
 
 Every classified track also gets a CARD-LEVEL identity (card_of / card_for):
 the card that put it on the board, so a Witch's skeleton is the Witch's. That
 is what the legacy --live-compat rows use as the unit token (rs_rows.py: unit
-id = creating card); the finer vision class stays on the Track.
+id = creating card); the finer vision class stays on the Track. how_of(uid)
+says which rule explained a track (N05: the harvest tools read it).
 
 TIMING. OppPlay.tick is the first sighting (Track.first_seen_tick). exec_tick
 estimates when the play ran: tick minus a sight lag (``unit_sight_lag_ticks``,
@@ -48,6 +60,10 @@ estimates when the play ran: tick minus a sight lag (``unit_sight_lag_ticks``,
 troop is drawn with its deploy stopwatch from the tick it runs). Feed it to
 PublicMemory with record_plays(); LandingStats.sight_lag_estimate() measures the
 lag from our own landings. Ticks are battle ticks (20 per second).
+
+COST. OppPlay.cost is None (the catalogue's price) except for a card whose forms
+cost differently, where it is EventTables.play_cost of the classes the play
+showed (the Spirit Empress: 3 or 6), and for an UNKNOWN play (rule 6).
 
 TABLES. EventTables holds, per RoyaleSim card id, the classes one play puts
 down (with counts) or, for a spell, the classes that show it; and the
@@ -73,7 +89,7 @@ team ids; the deriver's own team is OWN_TEAM (1) unless told otherwise (an
 offline run on an engine seat 0 passes own_team=0).
 
     from scripts.vision import events as EV
-    deriver = EV.EventDeriver(tables, own_deck=deck_ids)
+    deriver = EV.EventDeriver(tables, own_deck=deck_ids)       # EventConfig(unknown_plays=True): rule 6
     deriver.note_own_tap(card, tick, slot=slot, aim_x_mt=x, aim_y_mt=y, t=EV.now(), tracker=tracker)
     vf.events = deriver.update(tracks, vf.tick, t=vf.t_capture, tracker=tracker)
     EV.record_plays(public_memory, vf.events.opp_plays)        # card + 2 at exec_tick
@@ -96,12 +112,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .tracker import MID_Y_MT, TICK_MS
-from .types import ENEMY_TEAM, OWN_TEAM, UNKNOWN_TEAM, Events, OppPlay, OwnLanding, Track, now
+from .types import (ENEMY_TEAM, OWN_TEAM, UNKNOWN_CARD, UNKNOWN_TEAM, Events, OppPlay, OwnLanding,
+                    Track, now)
 
 __all__ = ["PLAY_WINDOW", "TOKEN_OFFSET", "KIND_UNIT", "KIND_SPELL", "WILDCARD", "SPAWN_CHILDREN",
-           "KATACR_SPELL_CLASSES", "EventTables", "EventConfig", "EventDeriver", "OwnTap",
-           "LandingStats", "OppStats", "StateTracks", "load_spawn_children", "unit_class_map",
-           "cardless_classes", "record_plays", "strip_form", "now"]
+           "KATACR_SPELL_CLASSES", "UNKNOWN_CARD", "UNKNOWN_PLAY_COST", "EventTables", "EventConfig",
+           "EventDeriver", "OwnTap", "LandingStats", "OppStats", "StateTracks", "load_spawn_children",
+           "unit_class_map", "cardless_classes", "record_plays", "strip_form", "now"]
 
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN_CHILDREN = ROOT / "data" / "vision" / "spawn_children.json"
@@ -112,6 +129,12 @@ KIND_UNIT, KIND_SPELL = "unit", "spell"     # OppPlay.kind
 WILDCARD = "*"                 # in EventTables.children: explains a child of any class
 TICK_S = TICK_MS / 1000.0
 SPELL_UID_OFFSET = 1 << 30     # StateTracks: spell uids live above the entity uids
+#: Elixir an UNKNOWN play is charged (EventConfig.unknown_cost): about the mean cost of the
+#: cards KataCR has no class for, weighted by the 1,467 top-ladder decks that hold them
+#: (4.04, docs/NEW_CARDS_PLAN.md 1.2), and a common card cost.
+UNKNOWN_PLAY_COST = 4
+#: EventDeriver.how_of of a track still waiting for its team.
+HOW_PENDING = "pending"
 
 #: KataCR detector names of spells, by RoyaleSim card name (the "spell" entries of
 #: data/vision/classes.json "katacr", E16). EventTables.from_names adds them to each
@@ -577,6 +600,8 @@ class EventConfig:
     aim_near_mt: float | None = 2000.0       # any tap aimed this close explains an own unit
     forget_ticks: int = 600                  # forget tracks and plays unseen this long
     prime: bool = True                       # tracks present at the first update are not plays
+    unknown_plays: bool = False              # rule 6: an unexplained enemy track is an UNKNOWN play
+    unknown_cost: int = UNKNOWN_PLAY_COST    # ... charged this much elixir (OppPlay.cost)
 
     def __post_init__(self):
         for name in ("play_window_ticks", "just_dead_ticks", "reid_ticks", "team_wait_ticks",
@@ -584,6 +609,13 @@ class EventConfig:
                      "tap_max_lag_ticks", "forget_ticks"):
             if getattr(self, name) < 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
+        try:
+            cost = math.nan if isinstance(self.unknown_cost, (bool, str, bytes)) else float(self.unknown_cost)
+        except (TypeError, ValueError):
+            cost = math.nan
+        if not (math.isfinite(cost) and cost == int(cost) and cost >= 0):
+            raise ValueError(f"EventConfig.unknown_cost must be a whole elixir cost >= 0, "
+                             f"got {self.unknown_cost!r}")
         for name in ("merge_radius_mt", "child_radius_mt", "reid_radius_mt", "reid_speed_mt_per_tick",
                      "excess_weight", "missing_weight"):
             if not getattr(self, name) >= 0:
@@ -669,12 +701,13 @@ class OppStats:
     ambiguous: int = 0             # plays decided by composition fit
     fallback_team: int = 0         # tracks whose team the fallback decided (both teams)
     unknown: Counter = field(default_factory=Counter)    # class -> tracks no card explains
+    unknown_plays: int = 0         # UNKNOWN plays reported (rule 6; not in `plays`)
 
     def summary(self) -> dict[str, Any]:
         return {"plays": self.plays, "spells": self.spells, "merged": self.merged,
                 "children": self.children, "reacquired": self.reacquired,
                 "ambiguous": self.ambiguous, "fallback_team": self.fallback_team,
-                "unknown": dict(self.unknown)}
+                "unknown": dict(self.unknown), "unknown_plays": self.unknown_plays}
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +747,8 @@ class _Rec:
     seen_team: int = UNKNOWN_TEAM     # the tracker's latest team
     team: int = UNKNOWN_TEAM          # the team it was classified under
     state: str = PENDING
-    how: str = ""                     # play | merged | child | reacquired | landing | unknown | primed
+    how: str = ""                     # play | merged | child | reacquired | landing | unknown |
+    #                                   unknown_play | ignored | primed (EventDeriver.how_of)
     card: int | None = None
     play: _Play | None = None
     succeeded: bool = False           # a newer track was taken as this one re-acquired
@@ -836,9 +870,23 @@ class EventDeriver:
 
     # -- outputs --------------------------------------------------------------
     def card_of(self, uid: int) -> int | None:
-        """The card that put track `uid` on the board, once classified."""
+        """The card that put track `uid` on the board, once classified (None for the tracks of
+        an UNKNOWN play, rule 6: the deriver does not know their card)."""
         rec = self._recs.get(uid)
         return None if rec is None else rec.card
+
+    def how_of(self, uid: int) -> str | None:
+        """Which rule explained track `uid` (module doc, THE RULES): "reacquired" (1), "merged"
+        (2, or a further unit of an UNKNOWN play), "child" (3), "landing" (4, one of our taps),
+        "play" (5: a new play's first track, ours without a tap too), "unknown_play" (6: the
+        first track of an UNKNOWN play), "unknown" (no rule; an enemy one is counted in
+        OppStats.unknown), "ignored" (EventTables.ignore), "primed" (on the board at the first
+        update); "pending" while it waits for its team; None for a uid this battle has not
+        shown, or one forgotten after ``forget_ticks``."""
+        rec = self._recs.get(int(uid))
+        if rec is None:
+            return None
+        return rec.how if rec.state == DONE else HOW_PENDING
 
     def card_for(self, track: Track) -> int | None:
         """card_of(track.uid), or the tables' best guess for its class while it is
@@ -947,6 +995,8 @@ class EventDeriver:
             rec.how = "unknown"
             if enemy:
                 self.opp_stats.unknown[rec.cls] += 1
+                if self.config.unknown_plays:
+                    self._unknown_play(rec, team)
             return
         play = _Play(team, KIND_SPELL if spell else KIND_UNIT, rec.first_tick, rec.bx, rec.by,
                      rec.last_tick, [rec.uid], candidates=cands, counts=Counter({rec.cls: 1}))
@@ -956,6 +1006,33 @@ class EventDeriver:
             self._resolve(play)
         else:
             play.resolve_at = rec.first_tick + self.config.ambiguity_wait_ticks
+
+    def _unknown_play(self, rec: _Rec, team: int) -> None:
+        """Rule 6 (EventConfig.unknown_plays): enemy track `rec`, which no card explains, joins
+        the newest UNKNOWN play of `team` first seen less than play_window_ticks from it and
+        within merge_radius_mt of its birth point, or starts one, reported at once as
+        OppPlay(card=UNKNOWN_CARD, cost=unknown_cost). card_of stays None for its tracks."""
+        cfg = self.config
+        for play in reversed(self._plays):
+            if (play.team == team and play.card == UNKNOWN_CARD
+                    and abs(rec.first_tick - play.tick) < cfg.play_window_ticks
+                    and _dist(play.x, play.y, rec.bx, rec.by) <= cfg.merge_radius_mt):
+                self._attach(rec, play, None, "merged")
+                play.counts[rec.cls] += 1
+                self.opp_stats.merged += 1
+                return
+        play = _Play(team, KIND_UNIT, rec.first_tick, rec.bx, rec.by, rec.last_tick, [rec.uid],
+                     card=UNKNOWN_CARD, candidates=(UNKNOWN_CARD,), counts=Counter({rec.cls: 1}))
+        self._plays.append(play)
+        rec.play, rec.how = play, "unknown_play"
+        opp = OppPlay(card=UNKNOWN_CARD, tick=play.tick,
+                      exec_tick=self.exec_tick(UNKNOWN_CARD, KIND_UNIT, play.tick),
+                      x_mt=play.x, y_mt=play.y, kind=KIND_UNIT, uids=list(play.uids),
+                      cost=int(cfg.unknown_cost))
+        play.record = opp
+        self.opp_stats.unknown_plays += 1
+        self._out_opp.append(opp)
+        self._opp_history.append(opp)
 
     def _attach(self, rec: _Rec, play: _Play | None, card: int | None, how: str) -> None:
         rec.how, rec.play, rec.card = how, play, card
@@ -1084,9 +1161,11 @@ class EventDeriver:
             if rec is not None and rec.play is play:
                 rec.card = play.card
         if play.team == self.enemy_team:
+            # cost: a form's own cost (EventTables.variant_costs), else None (the catalogue's)
             opp = OppPlay(card=play.card, tick=play.tick,
                           exec_tick=self.exec_tick(play.card, play.kind, play.tick),
-                          x_mt=play.x, y_mt=play.y, kind=play.kind, uids=list(play.uids))
+                          x_mt=play.x, y_mt=play.y, kind=play.kind, uids=list(play.uids),
+                          cost=self.tables.play_cost(play.card, play.counts))
             play.record = opp
             self.opp_stats.plays += 1
             if play.kind == KIND_SPELL:
@@ -1126,7 +1205,7 @@ class EventDeriver:
 
 
 def _copy_opp(p: OppPlay) -> OppPlay:
-    return OppPlay(p.card, p.tick, p.exec_tick, p.x_mt, p.y_mt, p.kind, list(p.uids))
+    return OppPlay(p.card, p.tick, p.exec_tick, p.x_mt, p.y_mt, p.kind, list(p.uids), p.cost)
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +1214,9 @@ def _copy_opp(p: OppPlay) -> OppPlay:
 def record_plays(memory: Any, plays: Iterable[OppPlay], *, team: int = ENEMY_TEAM,
                  token_offset: int = TOKEN_OFFSET) -> int:
     """Record opponent plays into a PublicMemory-like object: memory.record(team,
-    card + token_offset, exec_tick) (the first sighting when exec_tick is None).
+    card + token_offset, exec_tick) (the first sighting when exec_tick is None). An
+    UNKNOWN play (card -1) is row token 1, rs_memory.UNKNOWN, the token the model reads
+    for a play perception could not name (legacy and v2 rows alike: opp_seen / opp_last).
     `team` is the opponent's RoyaleSim team (0 live). Returns how many were recorded."""
     n = 0
     for p in plays:

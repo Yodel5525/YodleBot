@@ -311,6 +311,34 @@ def test_priming_ignored_classes_and_backwards_ticks():
     assert d.opp_plays() == [] and d.update([tk(9, "Knight", E, 9000, 8000, 5, 6)], 6).opp_plays == []
 
 
+def test_how_of_names_the_rule_that_explained_each_track():
+    """N05: EventDeriver.how_of(uid), the hook the harvest tools read (rule 6's "unknown_play"
+    is in test_events_unknown.py)."""
+    p = EV.EventDeriver(tables())
+    p.update([tk(1, "Knight", E, 9000, 8000, 50, 60)], 60)
+    assert p.how_of(1) == "primed"
+    d = deriver(own_deck=HOG26)
+    d.update([tk(2, "Knight", U, 9000, 8000, 100, 101)], 101)
+    assert d.how_of(2) == "pending" and d.how_of(99) is None
+    d.update([tk(2, "Knight", U, 9000, 8000, 100, 110)], 110)          # the fallback: their half
+    d.update([tk(3, "Witch", E, 9000, 8000, 200, 201)], 201)
+    d.update([tk(3, "Witch", E, 9000, 8000, 200, 221), tk(4, "Skeleton", E, 8000, 8000, 220, 221)], 221)
+    d.update([tk(5, "Knight", E, 3500, 10000, 300, 301, hp=0.8)], 301)
+    d.update([tk(5, "Knight", E, 3500, 10500, 300, 305, hp=0.8)], 305)
+    d.update([tk(6, "Knight", E, 3500, 11000, 315, 316)], 316)          # 5, lost 10 ticks
+    d.update([tk(7 + i, "Skeleton", E, 14000 + 400 * i, 9000, 400, 401) for i in range(3)], 401)
+    d.note_own_tap(HOG, 500, slot=2, aim_x_mt=14500, aim_y_mt=17500)
+    d.update([tk(10, "HogRider", O, 14400, 17300, 526, 527)], 527)
+    d.update([tk(11, "TowerPrincess", E, 3500, 6500, 600, 601)], 601)
+    d.update([tk(12, "Golemite", E, 3000, 5000, 700, 701)], 701)
+    assert {u: d.how_of(u) for u in range(2, 13)} == {
+        2: "play", 3: "play", 4: "child", 5: "play", 6: "reacquired", 7: "play", 8: "merged",
+        9: "merged", 10: "landing", 11: "ignored", 12: "unknown"}
+    assert [p.card for p in d.opp_plays()] == [KNIGHT, WITCH, KNIGHT, SKELETONS]
+    d.update([], 1400)                                                   # 600 ticks unseen: forgotten
+    assert d.how_of(2) is None and d.how_of(12) is None
+
+
 # ---------------------------------------------------------------------------
 # execution ticks and public memory
 # ---------------------------------------------------------------------------

@@ -24,6 +24,15 @@ not tap. F8, the control window's button or a MANUAL file in the repo root switc
 back; a switch drops a tap decided before it. Own plays the bot did not tap are logged as the
 human's, next to what the bot would have played.
 
+UNKNOWN PLAYS (--unknown-plays, off by default; docs/NEW_CARDS_PLAN.md 2.2). An enemy unit no
+card of the event tables explains (a card the detector names and the tables lack, a hero's extra
+unit, a misread) is reported as an UNKNOWN play, card -1: the model reads it as row token 1 in
+the opponent's memory (opp_seen / opp_last, legacy and v2 rows), a v2 row's opponent elixir is
+charged events.UNKNOWN_PLAY_COST for it and is no longer exact, it is not added to the
+opponent's known cards, and an enemy label the class table cannot place stays on the board as
+an unknown unit. Without the flag such units are dropped, as before. Each battle's end record
+then counts the UNKNOWN plays (opp_unknown).
+
 THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipped):
 
   FrameSource (scripts/vision/capture.py open_source, "auto": PrintWindow at the window size,
@@ -329,7 +338,8 @@ class BattleContext:
     opp_cards: list[int] = field(default_factory=list)   # opponent cards seen, in order
     decisions: int = 0
     taps: int = 0
-    opp_plays: int = 0
+    opp_plays: int = 0                # UNKNOWN plays (card -1) included
+    opp_unknown: int = 0              # UNKNOWN plays (--unknown-plays)
     own_plays: int = 0
     last_hud: Hud | None = None
     observer: Any = None              # v2 rows: the battle's public_state.LiveObserver
@@ -879,6 +889,8 @@ class VisionPlay:
     seconds / battles   stop after this long / after this many battle results (0: never)
     clock       the vision clock (types.now); frame times are on it
     out         where the status lines go (print)
+    unknown_plays  the deriver reports UNKNOWN plays (--unknown-plays, N02): each battle's end
+                record then also counts them ("opp_unknown")
     """
 
     def __init__(self, *, source: Any, perception: Any, decider: Decider, control: Any,
@@ -889,7 +901,9 @@ class VisionPlay:
                  clock: Callable[[], float] = now, sleep: Callable[[float], None] = time.sleep,
                  out: Callable[[str], Any] = print, poll_s: float = 0.002, max_error_logs: int = 50,
                  max_stale_s: float = MAX_STALE_S,
-                 tap_guard: Callable[[Any], str | None] | None = None):
+                 tap_guard: Callable[[Any], str | None] | None = None,
+                 unknown_plays: bool = False):
+        self.unknown_plays = bool(unknown_plays)
         self.source = source
         self.perception = perception
         self.decider = decider
@@ -1050,10 +1064,12 @@ class VisionPlay:
         if vf.screen == SCREEN_BATTLE:
             ctx.last_hud = vf.hud
         if vf.events.opp_plays:
-            EV.record_plays(ctx.memory, vf.events.opp_plays)
+            EV.record_plays(ctx.memory, vf.events.opp_plays)     # an UNKNOWN play: token 1
             for p in vf.events.opp_plays:
                 ctx.opp_plays += 1
-                if int(p.card) not in ctx.opp_cards:
+                if int(p.card) < 0:                    # UNKNOWN: no card to add to their deck
+                    ctx.opp_unknown += 1
+                elif int(p.card) not in ctx.opp_cards:
                     ctx.opp_cards.append(int(p.card))
         if vf.events.own_landings:
             ctx.own_plays += sum(1 for x in vf.events.own_landings if x.land_tick is not None)
@@ -1169,6 +1185,8 @@ class VisionPlay:
         stats = {} if ctx is None else {"decisions": ctx.decisions, "taps": ctx.taps,
                                         "opp_plays": ctx.opp_plays, "own_plays": ctx.own_plays,
                                         "opp_cards": [self.name(c) for c in ctx.opp_cards]}
+        if ctx is not None and self.unknown_plays:
+            stats["opp_unknown"] = ctx.opp_unknown
         self.results.open(n, self.battle.ended_reason, float(vf.t_capture), hud.crowns,
                           last_tick=self.battle.last_tick, towers=towers, **stats)
         self._log("battle_end", battle=n, reason=self.battle.ended_reason, tick=self.battle.last_tick,
@@ -1305,6 +1323,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-lane-guard", action="store_true", help="turn off the Cannon lane guard")
     ap.add_argument("--no-cap-rule", action="store_true",
                     help="allow waiting at full elixir with a playable card")
+    ap.add_argument("--unknown-plays", action="store_true",
+                    help="an enemy unit no card explains is an UNKNOWN play (row token 1, charged "
+                         f"{EV.UNKNOWN_PLAY_COST} elixir; the count is then not exact) and an "
+                         "unplaceable enemy label stays on the board; default: dropped, as before")
     CT.add_control_args(ap)
     import rs_engine
     rs_engine.add_engine_args(ap)
@@ -1405,12 +1427,17 @@ def _main(args: argparse.Namespace) -> int:
     store = TPL.TemplateStore()
     hud_reader = HUD.HudReader(store, {n: ids[n] for n in args.deck}, deck=deck_ids)
     tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck))
-    deriver = EV.EventDeriver(tables, own_deck=deck_ids)
+    # N02 (--unknown-plays): UNKNOWN plays and unknown units; without it, the calls as before
+    unknown = bool(args.unknown_plays)
+    deriver = EV.EventDeriver(tables, EV.EventConfig(unknown_plays=True) if unknown else None,
+                              own_deck=deck_ids)
     perception = LivePerception(hud_reader=hud_reader, tracker=tracker, deriver=deriver,
                                 geometry=geometry, detector=detector)
     # v2 rows (E14) also show the spells in flight: spell tracks become "spells" rows in the
     # engine's SPELL_FIELDS layout (rs_rows.SF, filled by _setup). Legacy: as before.
     spell_kw = {"spell_fields": RR.SF} if plan.v2 else {}
+    if unknown:
+        spell_kw["unknown_units"] = True
     builder = PS.PublicStateBuilder(table, spawn, deck=deck_ids, levels=args.level, catalogue=cat,
                                     fields=RR.F, sub=sub, **spell_kw)
     observer = make_observer(cat, plan, fields=list(getattr(royalesim, "CATALOGUE_FIELDS", ()) or ())
@@ -1466,6 +1493,10 @@ def _main(args: argparse.Namespace) -> int:
         if plan.v2:
             lines.append(f"  v2 rows    opponent elixir counted from the plays seen; our taps in flight "
                          f"until they land (--obs-delay {plan.obs_delay} ticks); spells in flight")
+        if unknown:
+            lines.append(f"  unknown    ON: an enemy unit no card explains is an UNKNOWN play (token 1, "
+                         f"{deriver.config.unknown_cost} elixir, count not exact); "
+                         "unplaceable enemy labels stay on the board")
         if detector is None:
             lines.append("  no detector: the board stays empty for the model and taps are refused")
         if not hud_reader.clock_reader.ready:
@@ -1479,7 +1510,8 @@ def _main(args: argparse.Namespace) -> int:
                      tap_refusal=refusal, start_mode=args.start_mode, decide=dcfg.name,
                      engine=eng.to_json(), vocab_drift=list(loaded.drift),
                      clock_templates=bool(hud_reader.clock_reader.ready),
-                     **({"rows": plan.to_json()} if plan.v2 else {}))
+                     **({"rows": plan.to_json()} if plan.v2 else {}),
+                     **({"unknown_plays": {"cost": deriver.config.unknown_cost}} if unknown else {}))
         if detector is None:
             recorder.log("no_detector", error=det_error)
         for name, state in ctl.start(**CT.start_kwargs(args)).items():
@@ -1490,7 +1522,8 @@ def _main(args: argparse.Namespace) -> int:
                             recorder=recorder, geometry=geometry, tapper=tapper, card_names=names,
                             seconds=args.seconds, battles=args.battles,
                             out=lambda s: print(s, flush=True),
-                            tap_guard=None if tapper is None else ScreenGuard(source))
+                            tap_guard=None if tapper is None else ScreenGuard(source),
+                            unknown_plays=unknown)
         return runner.run()
     finally:
         if ctl is not None:

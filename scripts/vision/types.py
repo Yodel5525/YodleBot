@@ -20,7 +20,9 @@ Conventions (the same as scripts/vision/geometry.py):
 * Teams are RoyaleSim team ids: OWN_TEAM = 1 (us), ENEMY_TEAM = 0, and
   UNKNOWN_TEAM = -1 while a track's team vote is undecided.
 * Card ids are RoyaleSim catalogue ids, as in rs_state players[t]["hand"];
-  EMPTY_CARD = -1 is an empty hand slot (between a play and its refill).
+  EMPTY_CARD = -1 is an empty hand slot (between a play and its refill), and
+  UNKNOWN_CARD = -1 an opponent play perception saw but could not name
+  (OppPlay.card; it becomes row token 1, "unknown", in the public memory).
 * Forms: FORM_BASE 0, FORM_EVO 1, FORM_HERO 2 (tools/vision_classes).
 * Tower keys name SCREEN sides, which are world sides: slot 1 of
   players[t]["tower_hp"] is "left", slot 2 is "right", for both teams.
@@ -50,6 +52,9 @@ ENEMY_TEAM = 0
 UNKNOWN_TEAM = -1
 
 EMPTY_CARD = -1
+#: OppPlay.card of a play no card explains (scripts/vision/events EventConfig.unknown_plays);
+#: + rs_memory.TOKEN_OFFSET (2) gives rs_memory.UNKNOWN, the row token 1.
+UNKNOWN_CARD = -1
 HAND_SIZE = 4
 
 FORM_BASE, FORM_EVO, FORM_HERO = 0, 1, 2
@@ -219,7 +224,12 @@ class OppPlay:
 
     tick is when it was first seen; exec_tick the estimated execution tick
     (what PublicMemory.record takes). kind is "unit" or "spell"; uids are the
-    tracks that make up the play.
+    tracks that make up the play. card is UNKNOWN_CARD for a play no card
+    explains. cost is the elixir the play cost when it is not the catalogue's
+    price of `card`: the form's cost of a card with forms (the Spirit Empress, 3
+    or 6), the expected cost of an UNKNOWN play; None (the default) means the
+    catalogue's price. to_dict leaves cost out when it is None, so frames
+    without one are written as they always were.
     """
     card: int
     tick: int
@@ -228,16 +238,20 @@ class OppPlay:
     y_mt: float | None = None
     kind: str = "unit"
     uids: list[int] = field(default_factory=list)
+    cost: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"card": self.card, "tick": self.tick, "exec_tick": self.exec_tick,
-                "x_mt": self.x_mt, "y_mt": self.y_mt, "kind": self.kind, "uids": list(self.uids)}
+        d = {"card": self.card, "tick": self.tick, "exec_tick": self.exec_tick,
+             "x_mt": self.x_mt, "y_mt": self.y_mt, "kind": self.kind, "uids": list(self.uids)}
+        if self.cost is not None:
+            d["cost"] = self.cost
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "OppPlay":
         return cls(int(d["card"]), int(d["tick"]), _opt_int(d.get("exec_tick")),
                    _opt_float(d.get("x_mt")), _opt_float(d.get("y_mt")), str(d.get("kind", "unit")),
-                   [int(u) for u in d.get("uids", [])])
+                   [int(u) for u in d.get("uids", [])], _opt_int(d.get("cost")))
 
 
 @dataclass(slots=True)

@@ -57,6 +57,12 @@ the summary's "detector" line and "detector_config" say what ran. Leave them out
 exactly what vision_play runs live (the plays gate scores the live settings); a harvest scan
 asks for a low --conf.
 
+UNKNOWN PLAYS. --unknown-plays turns on the event deriver's safety net, as vision_play
+--unknown-plays does live (scripts/vision/events.py rule 6, docs/NEW_CARDS_PLAN.md 2.2): an
+enemy track no card explains becomes an UNKNOWN play (card -1, "UNKNOWN" in the summary's
+opp_cards), and the summary's events add "opp_unknown" (how many) and "unknown_tracks" (the
+enemy tracks no card explained, by class). Leave it out to replay the default chain.
+
 Not here: fitting the perception noise profile (V11's fit_noise_profile, from these errors
 and own-tap ground truth) needs E17's profile format, which is not built yet.
 
@@ -107,6 +113,7 @@ NAME_FILES = ("detector_labels.json", "classes.txt", "names.txt", "cr.yaml", "da
 SHORT_TRACK_TICKS = 10           # a track living shorter than this: a flicker or a fragment
 CLOCK_TOL_TICKS = 2              # live and replayed clock reads agree within this
 ELIXIR_TOL_MILLI = 300           # ... elixir within this
+UNKNOWN_NAME = "UNKNOWN"         # the opp_cards key of an UNKNOWN play (card -1, --unknown-plays)
 
 
 # ---------------------------------------------------------------------------
@@ -716,16 +723,22 @@ class Replay:
     a VisionRecorder (its clock must be this object's log_clock) or None. taps: the
     recording's "tap" records. labels: a LabelIndex or None. card_ids: card name -> this
     run's card id (taps are mapped by name); card_names: this run's id -> name; live_names:
-    the recording's id -> name (vision_play's config deck); limit: stop after N images."""
+    the recording's id -> name (vision_play's config deck); limit: stop after N images.
+    unknown_plays: the deriver reports UNKNOWN plays (--unknown-plays, N02); the summary's
+    events then also count them ("opp_unknown") and the enemy tracks no card explained, by
+    class ("unknown_tracks"). An UNKNOWN play is "UNKNOWN" in opp_cards either way."""
 
     def __init__(self, source: Any, perception: ReplayPerception, *, battle: Any = None,
                  recorder: Any = None, taps: Iterable[Mapping[str, Any]] = (), labels: LabelIndex | None = None,
                  names: Names | None = None, iou: float = 0.5, pr_types: Iterable[str] | None = PR_TYPES,
                  card_ids: Mapping[str, int] | None = None, card_names: Mapping[int, str] | None = None,
                  live_names: Mapping[int, str] | None = None, limit: int = 0,
-                 out: Callable[[str], Any] = print, progress_every: int = 0, max_error_logs: int = 20):
+                 out: Callable[[str], Any] = print, progress_every: int = 0, max_error_logs: int = 20,
+                 unknown_plays: bool = False):
         self.source = source
         self.perception = perception
+        self.unknown_plays = bool(unknown_plays)       # N02: the summary counts UNKNOWN plays
+        self.unknown_tracks: Counter = Counter()       # class -> enemy tracks no card explains
         self.battle = battle if battle is not None else VP.BattleState()
         self.recorder = recorder
         self.labels = labels
@@ -816,6 +829,10 @@ class Replay:
     def _events(self, vf: VisionFrame) -> dict[str, int]:
         for p in vf.events.opp_plays:
             self.events["opp_plays"] += 1
+            if int(p.card) < 0:                            # an UNKNOWN play (N02)
+                self.events["opp_unknown"] += 1
+                self.opp_cards[UNKNOWN_NAME] += 1
+                continue
             self.opp_cards[self.card_names.get(int(p.card), str(p.card))] += 1
         landed = missed = human = 0
         for x in vf.events.own_landings:
@@ -869,9 +886,11 @@ class Replay:
             self.tick_sources[step.tick_source] += 1
         events = self.battle.update(step.battle_vf)
         if "end" in events:
+            self._keep_unknown_tracks()                # the deriver forgets them at a reset
             self.perception.end_battle()
             self.segment += 1
         if "start" in events:
+            self._keep_unknown_tracks()
             self.perception.new_battle()
             self.segment += 1
             self.battles += 1
@@ -898,6 +917,14 @@ class Replay:
             except Exception:
                 self.errors["record"] += 1
 
+    def _opp_unknown_now(self) -> Counter:
+        """The deriver's enemy tracks no card explained since its last reset (OppStats.unknown)."""
+        stats = getattr(getattr(self.perception, "deriver", None), "opp_stats", None)
+        return Counter(getattr(stats, "unknown", None) or {})
+
+    def _keep_unknown_tracks(self) -> None:
+        self.unknown_tracks.update(self._opp_unknown_now())
+
     def summary(self) -> dict[str, Any]:
         gaps = describe(self.intervals)
         tracker = getattr(self.perception, "tracker", None)
@@ -913,14 +940,18 @@ class Replay:
                   "labelled_not_scored": self.unscored_labelled, "bad_lines": self.labels.bad_lines,
                   "unknown_names": dict(self.labels.unknown), "duplicates": list(self.labels.duplicates),
                   "overall": self.pr.overall(), "per_class": self.pr.per_class()}
+        events = {"opp_plays": self.events["opp_plays"], "opp_cards": dict(self.opp_cards),
+                  "own_landed": self.events["own_landed"], "own_missed": self.events["own_missed"],
+                  "own_unmatched": self.events["own_unmatched"], "landing_stats": landing}
+        if self.unknown_plays:
+            events["opp_unknown"] = self.events["opp_unknown"]
+            events["unknown_tracks"] = dict(sorted((self.unknown_tracks + self._opp_unknown_now()).items()))
         return {"schema": SCHEMA, "frames": self.frames, "errors": dict(self.errors),
                 "screens": dict(self.screens), "ticks": self.perception.ticks,
                 "tick_sources": dict(self.tick_sources), "battles": self.battles,
                 "image_interval_s": gaps, "sparse": sparse,
                 "hud": self.hud.summary(), "detections": self.dets.summary(), "tracker": self.tracks.summary(),
-                "events": {"opp_plays": self.events["opp_plays"], "opp_cards": dict(self.opp_cards),
-                           "own_landed": self.events["own_landed"], "own_missed": self.events["own_missed"],
-                           "own_unmatched": self.events["own_unmatched"], "landing_stats": landing},
+                "events": events,
                 "taps": {"replayed": self.taps_replayed, "skipped": self.taps_skipped, "left": len(self._taps)},
                 "precision_recall": pr}
 
@@ -964,6 +995,9 @@ def format_summary(s: Mapping[str, Any]) -> list[str]:
     e = s["events"]
     lines.append(f"events: {e['opp_plays']} opponent plays {e['opp_cards'] or ''}; own landed {e['own_landed']}, "
                  f"missed {e['own_missed']}, not ours to match {e['own_unmatched']}; taps replayed {s['taps']['replayed']}")
+    if "opp_unknown" in e:
+        lines.append(f"  UNKNOWN plays (--unknown-plays): {e['opp_unknown']}; enemy tracks no card explained: "
+                     + (", ".join(f"{k} {v}" for k, v in e["unknown_tracks"].items()) or "none"))
     pr = s["precision_recall"]
     if pr is not None:
         o = pr["overall"]
@@ -1037,6 +1071,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"detector input size, a multiple of 32 (default: the live {DetectorConfig.imgsz})")
     ap.add_argument("--max-det", type=int, default=None,
                     help=f"most boxes per image (default: the live {DetectorConfig.max_det})")
+    ap.add_argument("--unknown-plays", action="store_true",
+                    help="report an enemy track no card explains as an UNKNOWN play (card -1), as "
+                         "vision_play --unknown-plays does; default: counted, not reported")
     ap.add_argument("--no-detector", action="store_true", help="screen cues and HUD only")
     ap.add_argument("--recorded", action="store_true",
                     help="use the recording's detections (a vision_play session) instead of the detector")
@@ -1122,8 +1159,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     live_names = {}
     if config and config.get("deck") and config.get("deck_ids"):
         live_names = {int(i): str(n) for n, i in zip(config["deck"], config["deck_ids"])}
+    unknown = bool(args.unknown_plays)
+    ev_config = EV.EventConfig(unknown_plays=True) if unknown else None      # None: the live default
     perception = ReplayPerception(hud_reader=hud_reader, tracker=Tracker(own_classes=table.deck_labels(deck)),
-                                  deriver=EV.EventDeriver(tables, own_deck=deck_ids), geometry=geometry,
+                                  deriver=EV.EventDeriver(tables, ev_config, own_deck=deck_ids), geometry=geometry,
                                   detector=detector, names=names, ticks=ticks, recorded=args.recorded)
     source = CAP.FileReplaySource(rec_path, realtime=False, fps=args.fps)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1135,12 +1174,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  detector   {det_note}")
     print(f"  hud        clock templates {'ok' if hud_reader.clock_reader.ready else 'MISSING'}; ticks from the {ticks}")
     print(f"  card ids   {ids_from}; deck {', '.join(deck)}")
+    if unknown:
+        print(f"  unknown    UNKNOWN plays on (card -1, {ev_config.unknown_cost} elixir each)")
     if labels is not None:
         print(f"  labels     {len(labels)} label files under {args.labels}")
     replay = Replay(source, perception, recorder=recorder, taps=taps, labels=labels, names=names, iou=args.iou,
                     pr_types=None if args.pr_all else PR_TYPES, card_ids=card_ids,
                     card_names={i: n for n, i in card_ids.items()}, live_names=live_names, limit=args.limit,
-                    progress_every=1000)
+                    progress_every=1000, unknown_plays=unknown)
     holder["r"] = replay
     try:
         summary = replay.run()
@@ -1149,6 +1190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if det_config is not None:
             summary["detector_config"] = {"conf": det_config.conf, "imgsz": det_config.imgsz,
                                           "max_det": det_config.max_det, "used": detector is not None}
+        if unknown:
+            summary["unknown_plays"] = {"cost": ev_config.unknown_cost}
         recorder.log("replay_summary", **summary)
     finally:
         source.close()
