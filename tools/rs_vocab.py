@@ -537,9 +537,12 @@ def reset_cold(blob: Mapping[str, Any], cards: Iterable[str], *, units: Iterable
     new_state = dict(state)
     for key, tokens in ((CARD_EMB, card_tokens), (UNIT_EMB, unit_tokens)):
         if tokens:
-            table = state[key].clone()
-            table[tokens] = table[UNKNOWN]
-            new_state[key] = table
+            # a new table, as grow builds one (take_rows: None takes the unknown row), not an
+            # indexed write of the table's own row into itself: torch refuses that write
+            # (index_put_'s value would alias the tensor it writes)
+            reset = set(tokens)
+            new_state[key] = take_rows(state[key], [None if t in reset else t
+                                                    for t in range(int(state[key].shape[0]))])
     record = {"op": "reset-cold", "tool": TOOL, "from": shown, "from_sha256": _source_sha(source),
               "cards": [n for n in names if n in set(cards)], "was": was,
               "unit_tokens": unit_tokens, "rows": "the unknown row (token 1)"}
