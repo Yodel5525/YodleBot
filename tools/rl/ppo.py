@@ -68,7 +68,8 @@ any order; an episode is one battle seen from one learner seat.
   meta          the .npz entry "rollout_json", JSON text: {"format", "schema": "rs_rows/v2",
                 "wait_bias", "explore", "tile_temp", ...} (rollout_meta(DecideConfig), plus
                 anything R01 adds, e.g. the checkpoint, engine, delay and noise it ran under)
-Other entries are kept when every file has them, and ignored.
+Other entries are kept when every file has them, and ignored; write_rollout(extra=) writes such
+entries (the R05 teacher's: tools/rl/teacher.FIELDS, read only with --teacher-coef).
 
 REWARD. r_t = result on the done row (+1 / 0 / -1) + gamma * Phi(s_t+1) - Phi(s_t), with
 Phi = 0.1 * (own - enemy tower-hp fraction) + 0.2 * (own - enemy crowns) / 3 and Phi of the
@@ -118,8 +119,14 @@ minibatch goes to the device. Before loading, the uncompressed size of the rollo
 .npy headers) plus what the update derives is checked against --ram-budget-gb (default 6: the
 learner runs while the rollout workers are idle; close MuMu and the browser for big iterations).
 
-Not here: mirror augmentation (it would change the action's probability), the R05 search
-teacher. Pure numpy until a model is involved; torch is imported where it is used.
+THE SEARCH TEACHER (R05, tools/rl/teacher.py; OFF by default, an A/B arm): with --teacher-coef c
+> 0 the loss adds c x KL(teacher || policy), teacher.kl_term over the rows whose rollout carries
+a search target (the teacher_* entries, write_rollout(extra=teacher.FIELDS)), on the same masks
+and candidates as the terms above. teacher.ppo_inputs checks the targets before the epochs;
+--teacher-coef on rollouts without them is refused. With c = 0 nothing here reads them.
+
+Not here: mirror augmentation (it would change the action's probability). Pure numpy until a
+model is involved; torch is imported where it is used.
 """
 from __future__ import annotations
 
@@ -336,12 +343,14 @@ def _column(records: Sequence[Mapping[str, Any]], name: str, dtype: str,
     return np.stack([one(i, r) for i, r in enumerate(records)])
 
 
-def write_rollout(path: Any, records: Iterable[Mapping[str, Any]], meta: Mapping[str, Any]
-                  ) -> Path:
+def write_rollout(path: Any, records: Iterable[Mapping[str, Any]], meta: Mapping[str, Any],
+                  *, extra: Mapping[str, str] | None = None) -> Path:
     """One .npz of FORMAT from row dicts (each: the observation columns, decision_record's
     fields and episode, step, done, result, hp_frac, crowns), checked by check_rollout first.
     The observation is cast to the schema dtypes: obs_row's rows already are, so nothing the
-    model saw changes. Returns the path written (np.savez_compressed adds .npz)."""
+    model saw changes. `extra` (name -> dtype, e.g. tools/rl/teacher.FIELDS): more entries,
+    each written when any row has it, and then every row must. Returns the path written
+    (np.savez_compressed adds .npz)."""
     records = list(records)
     if not records:
         raise RolloutError("no rows to write")
@@ -353,6 +362,11 @@ def write_rollout(path: Any, records: Iterable[Mapping[str, Any]], meta: Mapping
     for name, (dtype, shape, default) in OPTIONAL_FIELDS.items():
         if any(name in r for r in records):
             out[name] = _column(records, name, dtype, default, shape)
+    for name, dtype in (extra or {}).items():
+        if name in KNOWN_FIELDS or name == META_KEY:
+            raise ValueError(f"write_rollout: extra entry {name!r} is one of the format's own")
+        if any(name in r for r in records):
+            out[name] = _column(records, name, dtype)
     meta = dict(meta)
     problems = check_rollout(out, meta)
     if problems:
@@ -956,6 +970,7 @@ class PPOConfig:
     values: str = "recompute"
     precision: str = "bf16"
     seed: int = 0
+    teacher_coef: float = 0.0        # R05: KL(search teacher || policy); 0 is off (module doc)
 
     def __post_init__(self) -> None:
         problems = []
@@ -973,7 +988,7 @@ class PPOConfig:
         if self.value_clip is not None and not self.value_clip > 0:
             problems.append("value_clip > 0 (or None)")
         for name in ("lr", "critic_lr", "ent_coef", "vf_coef", "kl_budget", "wait_kl_budget",
-                     "kl_start", "wait_kl_start"):
+                     "kl_start", "wait_kl_start", "teacher_coef"):
             if not float(getattr(self, name)) >= 0:
                 problems.append(f"{name} >= 0")
         if not self.max_grad_norm > 0:
@@ -1196,9 +1211,15 @@ def ppo_terms(gate: Any, tile: Any, value: Any, mb: Mapping[str, Any], dist: Sam
     v_loss = err.mean()
     loss = (pg + cfg.vf_coef * v_loss - cfg.ent_coef * entropy
             + float(mb["kl_coef"]) * kl + float(mb["wait_coef"]) * kl_wait)
+    teach = {}
+    if "teacher_gate" in mb:                  # R05, only with teacher_coef > 0 (module doc)
+        from tools.rl import teacher as R05
+        kl_teacher, n_teacher = R05.kl_term(lq, lpt, mb)
+        loss = loss + float(mb["teacher_coef"]) * kl_teacher
+        teach = {"kl_teacher": kl_teacher, "n_teacher": n_teacher}
     return {"loss": loss, "pg": pg, "value": v_loss, "entropy": entropy, "kl": kl,
             "kl_wait": kl_wait, "ratio": ratio, "logp": logp, "n_learn": learn.sum(),
-            "n_choice": choice.sum(), "rows": logp.shape[0]}
+            "n_choice": choice.sum(), "rows": logp.shape[0], **teach}
 
 
 def _f(x: Any, nd: int = 6) -> float | None:
@@ -1245,6 +1266,10 @@ def update(model: Any, ref: Any, rollout: Rollout, cfg: PPOConfig, state: PPOSta
     choice = masks.choice & valid
     tile_rows = masks.tile & valid
     adv = standardise(ret.advantages, learn)
+    teach = None
+    if cfg.teacher_coef > 0:                  # R05: the search teacher's targets, checked
+        from tools.rl import teacher as R05
+        teach = R05.ppo_inputs(arrays, choice, tile_rows)
     drift = np.abs(pre.logp - old_logp)[learn]
     vdrift = np.abs(pre.value - stored)[has_stored]
     if optimizer is None:
@@ -1273,6 +1298,11 @@ def update(model: Any, ref: Any, rollout: Rollout, cfg: PPOConfig, state: PPOSta
                       v_old=col(pre.value, idx), ref_gate=col(pre.ref_gate, idx),
                       ref_tile=col(pre.ref_tile, idx), learn=col(learn, idx),
                       choice=col(choice, idx), kl_coef=kl_coef, wait_coef=wait_coef)
+            if teach is not None:
+                mb.update(teacher_gate=col(teach.gate, idx), teacher_tile=col(teach.tile, idx),
+                          teacher_gate_ok=col(teach.gate_ok, idx, bool),
+                          teacher_tile_ok=col(teach.tile_ok, idx, bool),
+                          teacher_rows=col(teach.rows, idx), teacher_coef=cfg.teacher_coef)
             with _autocast(device, cfg.precision):
                 out = model.outputs(b, card_ids=mb["card"])
                 raw = (model.value2(out["cls"].detach()) if cfg.critic_trunk == "detach"
@@ -1295,6 +1325,9 @@ def update(model: Any, ref: Any, rollout: Rollout, cfg: PPOConfig, state: PPOSta
                 sums.add("entropy", float(terms["entropy"]) * nc, nc)
                 sums.add("kl", float(terms["kl"]) * nc, nc)
                 sums.add("kl_wait", float(terms["kl_wait"]) * nc, nc)
+                if "kl_teacher" in terms:
+                    nt = float(terms["n_teacher"])
+                    sums.add("kl_teacher", float(terms["kl_teacher"]) * nt, nt)
                 if nl > 0:
                     r = ratio[lmask]
                     sums.add("approx_kl", float(((r - 1) - r.log()).sum()), nl)
@@ -1357,6 +1390,12 @@ def update(model: Any, ref: Any, rollout: Rollout, cfg: PPOConfig, state: PPOSta
         "epochs": epochs_run, "stopped_early": stopped, "updates": state.updates,
         "seconds": round(time.time() - t0, 1),
     }
+    if teach is not None:
+        stats.update({"teacher_coef": cfg.teacher_coef, "rows_teacher": int(teach.rows.sum()),
+                      "rows_teacher_gate": int(teach.gate_ok.sum()),
+                      "rows_teacher_tile": int(teach.tile_ok.sum()),
+                      "kl_teacher": _f(first.mean("kl_teacher")),
+                      "kl_teacher_last": _f(last.mean("kl_teacher"))})
     return stats
 
 
@@ -1448,6 +1487,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--critic-trunk", choices=CRITIC_TRUNKS, default=d.critic_trunk)
     ap.add_argument("--values", choices=VALUE_SOURCES, default=d.values)
     ap.add_argument("--seed", type=int, default=d.seed)
+    ap.add_argument("--teacher-coef", type=float, default=d.teacher_coef,
+                    help="R05: weight of KL(search teacher || policy) on the rows the rollout's "
+                         "teacher searched (tools/rl/teacher.py); 0 (default): off")
     return ap
 
 
@@ -1462,7 +1504,7 @@ def config_from_args(args: argparse.Namespace) -> PPOConfig:
         wait_kl_start=args.wait_kl_start, kl_band=args.kl_band, kl_up=args.kl_up,
         kl_down=args.kl_down, kl_min=args.kl_min, kl_max=args.kl_max,
         target_kl=args.target_kl or None, critic_trunk=args.critic_trunk, values=args.values,
-        precision=args.precision, seed=args.seed)
+        precision=args.precision, seed=args.seed, teacher_coef=args.teacher_coef)
 
 
 def _device(name: str) -> str:
@@ -1498,6 +1540,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         rollout = load_rollout(files)
     except RolloutError as exc:
         return _err(str(exc))
+    if cfg.teacher_coef > 0:                  # R05: refused here (exit 2), not mid-update
+        from tools.rl import teacher as R05
+        masks = row_masks(rollout.arrays)
+        try:
+            R05.ppo_inputs(rollout.arrays, masks.choice, masks.tile)
+        except ValueError as exc:             # RolloutError, of either import of this module
+            return _err(str(exc))
     if args.check:
         print(json.dumps({**summary(rollout), "ram_gb": round(need / GB, 3)}), flush=True)
         return 0
