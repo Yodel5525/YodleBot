@@ -81,6 +81,19 @@ Full corpus (E18; tokens-13). By default the kept rows are loaded into RAM (load
 args.json records these flags; the checkpoint meta does not change (the store's vocab.json is a
 copy of the rows').
 
+--drop-pending-waits (the decision-time diagnosis of 2026-10-30, docs/SPARRING_RUNBOOK.md section
+19). Decision-time rows (tools/rs_rows.py --obs-delay 24, E11) keep a wait row on the 20-tick grid
+wherever the side taps nothing in the next 10 ticks, so the waits between a tap and the tick its
+play runs are kept and labelled wait. The engine re-drive has no command delay: in those rows the
+tapped card is still in hand, the bar unspent and its unit not on the board, the tap row's state a
+little later, and only own_pending (which the legacy model does not read) tells them apart. The
+flag leaves those waits (act_card 0 and an own_pending slot > 0, pending_waits) out of the
+TRAINING split, after the same wait draws, so every other row is the one the run without it
+trains on; the validation sets keep them (their card and tile figures, and best.pt, read plays
+only). Legacy schema only: SystemExit for v2 rows (the v2 model reads own_pending and learns from
+these waits not to tap twice) and for rows without the column (rows at execution). args.json
+gets "pending_waits_dropped", the count before --max-rows. Off (the default): the rows of before.
+
 Output in <--runs>/<--name>/:
 * ep01.pt, ep02.pt, ...: the model after each epoch (ep01.pt is the one printed
   as "epoch 0"; the "epoch" stored inside a checkpoint stays 0-based);
@@ -144,6 +157,11 @@ PRESS_TRAINED = "trained"
 TRAIN_ROWS_KEY = "train_rows"
 #: The row record key a v2 record adds: the press rows the buttons train on.
 PRESS_TRAINED_KEY = "press_rows_trained"
+#: --drop-pending-waits (tokens-dt diagnosis, docs/SPARRING_RUNBOOK.md section 19): the column of
+#: decision-time rows (tools/rs_rows.py --obs-delay > 0, E11) holding the side's own plays tapped
+#: and not yet run, card tokens, 0 for an empty slot; and the args.json key of the waits dropped.
+PENDING_COLUMN = "own_pending"
+PENDING_DROPPED_KEY = "pending_waits_dropped"
 
 
 def cols_for(schema=None) -> tuple:
@@ -208,13 +226,26 @@ def missing_trust(trust: str, missing: list, root, shards: int | None = None) ->
             f"or train with --trust {TRUST_LEGACY} (the `trusted` column).")
 
 
+def pending_waits(z) -> np.ndarray:
+    """Bool per row of shard `z`: a wait row (act_card 0) while the side has a play of its own
+    tapped and not yet run (any own_pending slot > 0). Decision-time rows only (PENDING_COLUMN)."""
+    pend = np.asarray(z[PENDING_COLUMN])
+    return (np.asarray(z["act_card"]) == 0) & (pend.reshape(len(pend), -1) > 0).any(axis=1)
+
+
 def _keep_mask(z, split: str, wait_keep: float, trusted_only: bool, hog_only: bool, rng,
-               trust_col: str = "trusted", presses: str = PRESS_EXCLUDED):
+               trust_col: str = "trusted", presses: str = PRESS_EXCLUDED,
+               drop_pending: bool = False, counts: dict | None = None):
     """The rows of one shard the loader keeps. One rng draw per row of the shard,
     whatever the other filters say, so the same seed keeps the same waits.
     `trust_col` is the trusted-rows column (trust_column). Press rows (act_press > 0,
     when the shard has that column) are left out after the draw: they are not waits.
-    presses PRESS_TRAINED (schema v2, E15): press rows are kept, and not thinned as waits."""
+    presses PRESS_TRAINED (schema v2, E15): press rows are kept, and not thinned as waits.
+
+    `drop_pending` (--drop-pending-waits; legacy schema only, ValueError under PRESS_TRAINED):
+    after the same draws, the wait rows with an own play in flight (pending_waits) are left out
+    too; `counts` (a dict) then gets PENDING_DROPPED_KEY += the rows this leaves out (rows the
+    other filters and the draw had kept). False: the mask of before."""
     keep = z["split"] == split
     if trusted_only:
         keep &= z[trust_col]
@@ -222,13 +253,56 @@ def _keep_mask(z, split: str, wait_keep: float, trusted_only: bool, hog_only: bo
         keep &= z["hog"]
     waits = z["act_card"] == 0
     if presses == PRESS_TRAINED:
+        if drop_pending:
+            raise ValueError("--drop-pending-waits is for legacy-schema rows: a v2 model reads "
+                             "own_pending and learns from these waits not to tap twice")
         waits &= ~(z[PRESS_COLUMN] > 0)
         keep &= ~waits | (rng.random(len(waits)) < wait_keep)
         return keep
     keep &= ~waits | (rng.random(len(waits)) < wait_keep)
     if PRESS_COLUMN in _files(z):
         keep &= ~(z[PRESS_COLUMN] > 0)
+    if drop_pending:
+        pend = pending_waits(z)
+        if counts is not None:
+            counts[PENDING_DROPPED_KEY] = (counts.get(PENDING_DROPPED_KEY, 0)
+                                           + int((keep & pend).sum()))
+        keep &= ~pend
     return keep
+
+
+def missing_pending(missing: list, root, shards: int | None = None) -> str:
+    """The error for --drop-pending-waits on rows without an own_pending column: `missing` shard
+    names, out of `shards` (None: the loader, which stops at the first)."""
+    where = (f"{len(missing)} of {shards} shard(s) in {root} have no {PENDING_COLUMN} column "
+             f"(first: {missing[0]})" if shards is not None
+             else f"{missing[0]} in {root} has no {PENDING_COLUMN} column")
+    return (f"--drop-pending-waits: {where}. Only decision-time rows (tools/rs_rows.py "
+            f"--obs-delay 24) have own plays in flight; train these rows without the flag.")
+
+
+def check_drop_pending(root=None, store=None, schema=None) -> None:
+    """SystemExit unless --drop-pending-waits can run: legacy-schema rows (`schema`, a v2 model
+    reads own_pending itself) whose every shard in `root` (or the compact `store`) has the
+    own_pending column."""
+    spec = _spec(schema)
+    if spec.v2:
+        raise SystemExit(f"--drop-pending-waits: these rows are {spec.name}. The v2 model reads "
+                         f"{PENDING_COLUMN}, and the waits with a play in flight teach it not to "
+                         "tap twice: train v2 rows without the flag.")
+    if store is not None:
+        if PENDING_COLUMN not in store:
+            names = store.shard_names
+            raise SystemExit(missing_pending(names, store.root, len(names)))
+        return
+    paths = sorted(Path(root).glob("shard-*.npz"))
+    missing = []
+    for path in paths:
+        with np.load(path) as z:
+            if PENDING_COLUMN not in _files(z):
+                missing.append(path.name)
+    if missing:
+        raise SystemExit(missing_pending(missing, root, len(paths)))
 
 
 def row_record(root: Path, trust: str = TRUST_LEGACY, schema=None) -> dict:
@@ -329,7 +403,8 @@ def _cap(picks: list, max_rows: int, seed: int) -> list:
 
 
 def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed: int = 0,
-         root: Path = DATA, *, max_rows: int = 0, trust: str = TRUST_LEGACY, schema=None):
+         root: Path = DATA, *, max_rows: int = 0, trust: str = TRUST_LEGACY, schema=None,
+         drop_pending: bool = False, counts: dict | None = None):
     """The rows of one split, every column in COLS, shards in name order.
 
     The same rows, order and dtypes as concatenating every shard's kept rows and
@@ -343,10 +418,16 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
 
     `schema` (None: the rows' own, rows_schema) v2: the columns are cols_for("v2"), press rows
     are kept (and not thinned), and a shard without one of those columns is a ValueError.
+
+    `drop_pending` (--drop-pending-waits) leaves out the waits with an own play in flight as
+    _keep_mask does, after the same draws (`counts` gets how many); ValueError for v2 rows or a
+    shard without own_pending. False (the default): the rows of before.
     """
     spec = rows_schema(root) if schema is None else _spec(schema)
     cols = cols_for(spec)
     presses = PRESS_TRAINED if spec.v2 else PRESS_EXCLUDED
+    if drop_pending and spec.v2:
+        raise ValueError(f"--drop-pending-waits: {root} holds {spec.name} rows; legacy only")
     col = trust_column(trust)
     rng = np.random.default_rng(seed)
     paths = sorted(Path(root).glob("shard-*.npz"))
@@ -362,8 +443,11 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
                 if lacking:
                     raise ValueError(f"{path.name} in {root} has no {lacking}: not rows of "
                                      f"{spec.name} (tools/rs_rows.py --schema v2)")
+            if drop_pending and PENDING_COLUMN not in _files(z):
+                raise ValueError(missing_pending([path.name], root))
             picks.append(np.flatnonzero(_keep_mask(z, split, wait_keep, trusted_only,
-                                                   hog_only, rng, col, presses)))
+                                                   hog_only, rng, col, presses,
+                                                   drop_pending, counts)))
     found = sum(len(p) for p in picks)
     picks = _cap(picks, max_rows, seed)
     total = sum(len(p) for p in picks)
@@ -518,11 +602,13 @@ def open_store(root):
 
 def memmap_keep(store, split: str, wait_keep: float, trusted_only: bool, hog_only: bool,
                 seed: int = 0, *, max_rows: int = 0, trust: str = TRUST_LEGACY, schema=None,
-                chunk: int = KEEP_CHUNK) -> np.ndarray:
+                chunk: int = KEEP_CHUNK, drop_pending: bool = False,
+                counts: dict | None = None) -> np.ndarray:
     """The store rows load() keeps for the same arguments, as ascending int64 row ids: the same
     filters (_keep_mask on `chunk` rows at a time, so one wait draw per row in row order, the
     stream load() draws a shard at a time) and the same --max-rows sample (_cap), so gather()
-    of these ids is load()'s rows in load()'s order. ValueError where load() raises one."""
+    of these ids is load()'s rows in load()'s order. ValueError where load() raises one.
+    `drop_pending` and `counts` as load()'s; only then is own_pending read."""
     spec = rows_schema(store.root) if schema is None else _spec(schema)
     presses = PRESS_TRAINED if spec.v2 else PRESS_EXCLUDED
     col = trust_column(trust)
@@ -533,14 +619,20 @@ def memmap_keep(store, split: str, wait_keep: float, trusted_only: bool, hog_onl
         if lacking:
             raise ValueError(f"the compact store in {store.root} has no {lacking}: not rows of "
                              f"{spec.name} (tools/rs_rows.py --schema v2)")
+    if drop_pending and spec.v2:
+        raise ValueError(f"--drop-pending-waits: {store.root} holds {spec.name} rows; legacy only")
+    if drop_pending and PENDING_COLUMN not in store:
+        raise ValueError(missing_pending(["the compact store"], store.root))
     need = (["split", "act_card", "hog"] + ([col] if trusted_only else [])
-            + ([PRESS_COLUMN] if PRESS_COLUMN in store else []))
+            + ([PRESS_COLUMN] if PRESS_COLUMN in store else [])
+            + ([PENDING_COLUMN] if drop_pending else []))
     rng = np.random.default_rng(seed)
     picks = []
     for a in range(0, store.rows, chunk):
         z = {c: np.asarray(store[c][a:a + chunk]) for c in need}
         z["split"] = store.decode_split(z["split"])
-        keep = _keep_mask(z, split, wait_keep, trusted_only, hog_only, rng, col, presses)
+        keep = _keep_mask(z, split, wait_keep, trusted_only, hog_only, rng, col, presses,
+                          drop_pending, counts)
         picks.append(np.flatnonzero(keep) + a)
     found = sum(len(p) for p in picks)
     picks = _cap(picks, max_rows, seed)
@@ -1048,6 +1140,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mirror", type=float, default=0.0, metavar="P",
                     help="E18: flip each training row left-right with probability P (default 0, "
                          "as before; 0.5 doubles the data the model sees)")
+    ap.add_argument("--drop-pending-waits", action="store_true",
+                    help="legacy-schema decision-time rows only (tools/rs_rows.py --obs-delay "
+                         "24): leave the wait rows with an own play in flight (own_pending) out "
+                         "of training, after the same wait draws; the validation sets keep "
+                         "them. A legacy model cannot see own_pending, so such a wait looks like "
+                         "the tap it follows (runbook section 19). Refused for v2 rows and for "
+                         "rows without own_pending")
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be 0 (all rows) or more")
@@ -1095,8 +1194,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"{args.data} is a compact store (tools/rs_rows_compact.py): train "
                              "on it with --memmap")
         rows_rec = row_record(args.data, args.trust, schema)   # SystemExit: --trust v2, no column
+    if args.drop_pending_waits:       # before anything is loaded or written
+        check_drop_pending(args.data, store, schema)
     if not legacy_rows(rows_rec):
         print(f"rows: {describe_rows(rows_rec)}", flush=True)
+    dropped: dict = {}                # --drop-pending-waits: the train waits it left out
+    dkw = ({"drop_pending": True, "counts": dropped} if args.drop_pending_waits else {})
     # v2: whether the press head learns (the rows carry press labels); None: the legacy losses.
     presses = rows_rec["press_rows"] == PRESS_TRAINED if schema.v2 else None
     lkw = {} if presses is None else {"presses": presses}
@@ -1105,7 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     if store is None:
         train = load("train", keep_p, not args.all_rows, args.finetune_hog, args.seed, args.data,
-                     max_rows=args.max_rows, trust=args.trust, schema=schema)
+                     max_rows=args.max_rows, trust=args.trust, schema=schema, **dkw)
         val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=val_cap,
                    trust=args.trust, schema=schema)
         val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=val_cap,
@@ -1119,7 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
         train = None
         train_ids = memmap_keep(store, "train", keep_p, not args.all_rows, args.finetune_hog,
                                 args.seed, max_rows=args.max_rows, trust=args.trust,
-                                schema=schema)
+                                schema=schema, **dkw)
         val_ids = memmap_keep(store, "val", keep_p, True, args.finetune_hog, 1,
                               max_rows=val_cap, trust=args.trust, schema=schema)
         hog_ids = memmap_keep(store, "val", keep_p, True, True, 1, max_rows=val_cap,
@@ -1141,6 +1244,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"rows: train {n_train:,}  val {len(val['act_card']):,}  "
           f"val(hog) {len(val_hog['act_card']):,}  ({mb:,.0f} MB, {time.time() - t0:.0f}s)"
           + where, flush=True)
+    if args.drop_pending_waits:
+        print(f"--drop-pending-waits: {dropped.get(PENDING_DROPPED_KEY, 0):,} wait rows with an "
+              f"own play in flight left out of training (before --max-rows); the validation "
+              f"sets keep theirs", flush=True)
     if not n_train:
         raise SystemExit(f"no training rows in {args.data} (split 'train' after the filters)")
     if args.gpu_resident:
@@ -1170,6 +1277,8 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.runs) / args.name
     out.mkdir(parents=True, exist_ok=True)
     record = run_record(args, device, wait_keep, keep_p, at_build, rows=rows_rec)
+    if args.drop_pending_waits:       # the count only with the flag
+        record[PENDING_DROPPED_KEY] = int(dropped.get(PENDING_DROPPED_KEY, 0))
     (out / "args.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     best = -1.0
     step = 0

@@ -33,8 +33,8 @@ $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, roy
 | 14: first model | done: `runs\tokens\live_big_hog\best.pt` (Hog card 66.8%, tile-within-1 55.7%) |
 | 10, 13 | not reported back. Section 16 covers what step 10 was for. |
 | 15-18: detector, calibration, dry run, first friendly with taps | to do |
-| 19: second model (decision-time rows) | to do |
-| 20: third model (v2 rows, the whole corpus) | to do, after 19 |
+| 19: second model (decision-time rows) | done 2026-10-30: `dt_big_hog` 29.3% against `live_big_hog`'s 46.0% at a 21-tick delay. The checks of "Why the second model lost" (`scripts\dt_diagnose.ps1`) are to do |
+| 20: third model (v2 rows, the whole corpus) | to do, after the section 19 checks |
 | 21: RL fine-tuning (bench, then days of training) | to do, after 20 |
 
 ## 1. GPU driver
@@ -747,6 +747,78 @@ Send back the log, `reports\second_model_<time>.log`. If you cannot send all of 
 - the three `rs_eval` result lines (`...: N/300 wins (...)`);
 - with `-League`, the gate decision and the `report:` line.
 
+### Why the second model lost (run this before section 20)
+
+The second model came back on 2026-10-30 (`reports\second_model_20261030_101529.log`):
+
+| Run | Win rate | Crown difference | Plays per match |
+|---|---|---|---|
+| A `live_big_hog`, 21-tick delay | 46.0% [40.4, 51.7] | -0.34 | 33.3 |
+| B `dt_big_hog`, 21-tick delay | 29.3% [24.5, 34.7] | -1.02 | 28.7 |
+| C `dt_big_hog`, no delay | 21.0% [16.8, 26.0] | -1.25 | 30.4 |
+
+B was meant to beat A. It lost by 17 points, far outside the noise. Section 20 uses the same decision-time rows, so find out why first.
+
+**The leading explanation** (likely, not yet proven):
+- A decision-time row is taken where the player tapped, about 24 ticks before the play lands. The rows also take a "wait" row every 20 ticks wherever the player taps nothing in the next 10 ticks. That includes the ticks just after a tap, while the play is still in flight.
+- In those rows the tapped card is still in hand, the elixir is not yet spent and the unit is not on the board: the simulator changes the hand and the elixir only when a play lands, as the client does. So they look like the tap row a moment later, and they say "wait".
+- The second model does not read the column that says a play is in flight (`own_pending`), so it cannot tell the two apart. It learns to hold back just when the moment to play has come or passed: fewer and later plays, no quick follow-ups, missed defences. That fits B's 28.7 plays and its crown difference of -1.02.
+
+Ruled out by reading the code:
+- The evaluation: under `--delay 21`, `rs_eval` shows the bot's own plays in flight the way the rows do (card in hand, elixir unspent). The wait bias, the decision cadence and the decision rule are the same for A and B.
+- What IL_Replay's play tick means (the tick a play ran, or the tap) does not shift the board, because every play of both sides moves together. It can shift only the elixir, by about 1 s. The `headroom` check settles it.
+
+The third model reads `own_pending`, so it should not have this problem. These checks confirm that before a night is spent on it.
+
+After `git pull`, run the tests of section 12 first. The new tests are `tests\pipeline\test_drop_pending_waits.py` and `tests\pipeline\test_rs_dt_diag.py`.
+
+**One script runs the checks, about 75 minutes.** Close MuMu and the browser first. It writes `reports\dt_diagnose_<time>.log`, goes on to the next check when one fails, and ends with a summary of the result lines:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\dt_diagnose.ps1
+```
+
+The two optional checks take about 30 minutes more: add `-Steps trust,ticks` (or `-Steps all` for everything). `-Steps ablation` runs one check alone; `-Workers 6` uses less RAM.
+
+| Check | What it runs | Time | What the result means |
+|---|---|---|---|
+| headroom | `tools\rs_dt_diag.py rows` on `data\rs_rows_dt`, then on `data\rs_rows_live` | a few min | `pending waits:` is the share of wait rows with an own play in flight; expect about 15-20%. On `rs_rows_live`, the `headroom:` shares say what the recorded tick is. A floor near 15-21 ticks, with few rows below it, means the tick a play ran, as assumed. Many rows below 6, with counts from 0, mean the tap. On `rs_rows_dt`, `< 0` is the share of play labels the evaluation masks at the tap for lack of elixir (they turn into waits or a cheaper card): the larger it is, the more of B's loss comes from the elixir rather than from the waits. |
+| waitbias | `dt_big_hog` with `wait_keep` 0.5 and 1.0 (copies in `runs\tokens\dt_big_hog_wk050`, `_wk100`), `--delay 21` | 16 min | Plays per match up to 33-38 and wins clearly above 29.3%: the gate is too lazy. Plays up but wins flat: the play rate is not the cause. |
+| live | `live_big_hog` and `dt_big_hog` at `--delay 21 --decide live` (the live runner's rule: no wait at a full bar, no second tap of a card in flight) | 18 min | Compare these two with each other only: both seats change rule. If `dt_big_hog` gains clearly more than `live_big_hog`, decisions lost around its own plays in flight are part of the cause. These are also the numbers closest to live play. |
+| offset | `dt_big_hog` at `--delay 24` | 8 min | Within about 3 points of 29.3%: the 24-tick lead it was trained for against the 21-tick delay is not the cause. |
+| ablation | the Hog 2.6 fine-tune again with `--drop-pending-waits` (`runs\tokens\dt_big_hog_np`), then `--delay 21` | 20 min | The decisive check. 40% or more, with more plays: the explanation holds, and the third model should fix it. Near 29%: the cause is elsewhere. |
+| trust (optional) | the Hog 2.6 fine-tune again with `--trust legacy` (`runs\tokens\dt_big_hog_tl`), then `--delay 21` | 20 min | Within about 5 points of 29.3%: trust v2's smaller training set is not the cause. |
+| ticks (optional) | `rs_eval --pro` (the recorded plays, no model) with and without `--delay 21`, then `tools\rs_dt_diag.py ghost` | 10 min | A second check of the tick meaning. The same result on nearly every match (a few percent differ either way, from plays in the first seconds): the tick a play ran. Many matches differing: the tap. |
+
+The ablation's training prints `--drop-pending-waits: N wait rows with an own play in flight left out`. Its validation uses the same rows as `dt_big_hog`'s, waits in flight included, so its `gate` figure may read lower. Card and tile compare directly. Judge it by its `rs_eval` line.
+
+The same checks one by one, in the shorthand at the top of this file (the wait-bias copies are easiest with `-Steps waitbias`):
+
+```powershell
+$OPP = 'runs\tokens\live_big\ep01.pt'
+& $RG tools\rs_dt_diag.py rows data\rs_rows_dt
+& $RG tools\rs_dt_diag.py rows data\rs_rows_live
+& $RG tools\rs_eval.py --ckpt runs\tokens\live_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 24
+& $BB -m sim.train_tokens --name dt_big_hog_np --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\dt_big\best.pt --trust v2 --drop-pending-waits
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
+& $BB -m sim.train_tokens --name dt_big_hog_tl --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\dt_big\best.pt --trust legacy
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_tl\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
+& $RG tools\rs_eval.py --pro --matches 300 --workers 8
+& $RG tools\rs_eval.py --pro --matches 300 --workers 8 --delay 21
+& $RG tools\rs_dt_diag.py ghost --delay 21
+```
+
+**What to do next:**
+- `headroom` on `rs_rows_live` has many rows near 0 (the tick is the tap): do not run section 20. Send the log back. The rows then need a re-drive with the delay first.
+- `ablation` (or `waitbias`) lifts `dt_big_hog` clearly, to about 40% or more: run section 20. Start with `-Others 20000`, which is the second model's corpus size, about 3-4 hours instead of a night (add `-SkipDiskCheck` if `C:` has less than the 90 GB the full run needs). Run the whole corpus only once `v2_hog` beats `live_big_hog`.
+- Neither moves it: hold section 20, run `-Steps trust`, and send the log back.
+
+Keep `live_big_hog` in the live runner meanwhile.
+
+Send back `reports\dt_diagnose_<time>.log`. If you cannot send all of it, send the `== summary` block at its end.
+
 ## 20. Third model: v2 rows from the whole corpus
 
 **Close MuMu and the browser first.** These jobs use most of the RAM. Do not run this while the live runner is running. The whole run takes most of a night.
@@ -775,12 +847,15 @@ Unit tokens stay `--live-compat`, as in sections 14 and 19, for two reasons:
 - The live runner reads either kind. But the simulator's evaluators (`rs_eval`, `rs_match`, `rs_league_eval`) and the RL workers build only `--live-compat` or unit-type rows: a `--units vision` model could not be evaluated or trained by RL.
 - What the vision classes would add, the unit's form, is in every v2 row anyway.
 
+Run section 19's checks ("Why the second model lost") first. These rows are decision-time rows too, and the checks say whether the v2 model should fix what went wrong there.
+
 It needs:
-- section 19's `runs\tokens\dt_big_hog\best.pt` (the champion);
-- section 14's `runs\tokens\live_big_hog\best.pt` (the anchor) and `runs\tokens\live_big\ep01.pt` (the reactive opponent of `rs_eval`);
+- section 14's `runs\tokens\live_big_hog\best.pt` (the champion: the live model and the best so far) and `runs\tokens\live_big\ep01.pt` (the anchor, and the reactive opponent of `rs_eval`);
 - about 90 GB free on `C:` (below).
 
-The script checks all three before it starts. Do not change `data\engine.json` or the card table between sections 19 and 20: the league refuses checkpoints made under another engine.
+The script checks these before it starts. Keep `data\engine.json` and the card table as they were for section 14: the league refuses checkpoints made under another engine.
+
+The champion used to be section 19's `dt_big_hog`. At 29.3% against `live_big_hog`'s 46.0%, beating it would not mean v2_hog is better than the live model, so the gate now compares with `live_big_hog`.
 
 After `git pull`, run the tests of section 12 first. None of this batch's code (v2 rows, compaction, `--memmap`, the v2 model) has run on the PC yet. Paste any failure back before you start the script.
 
@@ -796,10 +871,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.p
 | compact | `tools\rs_rows_compact.py --rows data\rs_rows_v2 --out data\rs_cols_v2 --force` | about 30 min |
 | general | `sim.train_tokens --name v2_big --data data\rs_cols_v2 --epochs 2 --memmap --mirror 0.5 --trust v2 --wait-keep 0.25 --d 256 --layers 6 --heads 8 --val-max-rows 500000` | about 3 h |
 | hog | the same with `--name v2_hog --epochs 3 --finetune-hog --init runs\tokens\v2_big\best.pt` | about 15 min |
-| eval | `tools\rs_eval.py --ckpt runs\tokens\v2_hog\best.pt --opponent-ckpt runs\tokens\live_big\ep01.pt --matches 300 --workers 8 --delay 21` | about 10 min |
-| league | `tools\rs_league_eval.py run --candidate v2_hog=runs\tokens\v2_hog\best.pt --champion dt_big_hog=runs\tokens\dt_big_hog\best.pt --anchor live_big_hog=runs\tokens\live_big_hog\best.pt --delay 24 --noise data\noise\default_prior.json --champion-games 1000 --anchor-games 400 --full --workers 6 --log runs\league\third_model.jsonl` | about 1-1.5 h |
+| eval | five runs of `tools\rs_eval.py`, 300 matches each, against `live_big\ep01.pt` (`--ckpt runs\tokens\v2_hog\best.pt --opponent-ckpt runs\tokens\live_big\ep01.pt --matches 300 --workers 8`): `v2_hog` at `--delay 21`, with no delay, at `--delay 24`, and at `--delay 21 --decide live`; then `live_big_hog` at `--delay 21 --decide live` for reference | about 45 min |
+| league | `tools\rs_league_eval.py run --candidate v2_hog=runs\tokens\v2_hog\best.pt --champion live_big_hog=runs\tokens\live_big_hog\best.pt --anchor live_big=runs\tokens\live_big\ep01.pt --delay 24 --noise data\noise\default_prior.json --champion-games 1000 --anchor-games 400 --full --workers 6 --log runs\league\third_model.jsonl` | about 1-1.5 h |
 
-That is about 9 hours in all, and anywhere from 7 to 12. Start it in the evening.
+That is about 9.5 hours in all, and anywhere from 7.5 to 12.5. Start it in the evening.
 
 None of these times is measured yet. They are the first model's measured times (section 14 and `docs/SPARRING_PLAN.md`, "Results so far"), scaled by the data:
 - **rows**: the first model's 33,659 matches took 20 min. Here there are about 7 times the matches, with about 1.5 times the work per match (the trust check, the presses, the noise, the v2 columns).
@@ -811,11 +886,11 @@ None of these times is measured yet. They are the first model's measured times (
 
   In all, about 5.5 times the work.
 - **hog**: every Hog 2.6 match was already in the first model's rows, so this is about the first model's 9.4 min with the larger rows.
-- **eval**: one run of 300 matches. The first model's two runs took 13 min.
+- **eval**: five runs of 300 matches. Section 19's runs took 8-9.5 min each.
 - **league**: 1,800 games at most 6 at a time:
-  - 1,000 of v2_hog against dt_big_hog;
-  - 400 of v2_hog against live_big_hog;
-  - 400 of dt_big_hog against live_big_hog.
+  - 1,000 of v2_hog against live_big_hog;
+  - 400 of v2_hog against live_big;
+  - 400 of live_big_hog against live_big.
 
   Each game takes about 10-13 s of one CPU core, as an `rs_eval` match does, with the noise on both seats. `rs_league_eval` runs fewer workers when free memory is short (it keeps 3 GB free, about 1.2 GB per worker).
 
@@ -844,12 +919,14 @@ If space runs short:
 - `data\rs_rows_live` and `data\rs_rows_dt` are needed only to retrain the first or second model. No evaluation reads them.
 
 **Reading the result.**
-- **eval** is section 19's instrument: the same reactive opponent, the same 300 held-out matches and the same 21-tick delay as its run B (`dt_big_hog`). Compare the two numbers. Each interval is about +-5.6 points, so a difference of less than about 8 points is not conclusive.
+- **eval** is section 19's instrument: the same reactive opponent, the same 300 held-out matches and the same 21-tick delay as its runs A (`live_big_hog`, 46.0%) and B (`dt_big_hog`, 29.3%). Compare the first line with those. Each interval is about +-5.6 points, so a difference of less than about 8 points is not conclusive. The other lines:
+  - **no delay** and **24-tick delay**: a model trained for the 24-tick lead should do best at 21-24 ticks and worse without a delay, as `dt_big_hog` did (21.0% without one). If v2_hog does much better without a delay than at 21, its timing is off.
+  - **live rule**: the two `decide live` lines compare only with each other, because both seats change rule. v2_hog should be at least level with `live_big_hog` there, since these are the numbers closest to live play. The `plays/match` figures show a lazy gate directly: the pros play about 35-40 cards a match.
 - **league** is the real test. It plays at a 24-tick delay with perception noise on every seat, from both seats, on deck pairings and seeds that are the same for every player. Against the champion, each pairing is also played with the decks exchanged. Its `gate:` lines give the decision for `v2_hog`:
-  - **PASS**: v2_hog beats `dt_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `dt_big_hog` against `live_big_hog`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
+  - **PASS**: v2_hog beats `live_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `live_big_hog` against `live_big`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
   - **FAIL**, **CYCLE** or **INCOMPLETE**: keep the live model you have.
 
-  The `paired` lines show v2_hog's score minus dt_big_hog's against the same opponent on the same positions, with an interval.
+  The `paired` lines show v2_hog's score minus live_big_hog's against the same opponent on the same positions, with an interval.
 - The report is also written to `runs\league\third_model.report.json`.
 
 If the league step fails, the trained models are kept. Send the log back, and after the fix restart with `-From league`. The league log resumes: games already played are not played again.

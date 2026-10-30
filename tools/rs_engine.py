@@ -46,8 +46,11 @@ ProcessPoolExecutor(..., initializer=rs_engine.set_active, initargs=(cfg.to_json
 the worker reads it with active(). Environment variables reach workers anyway.
 
 Re-drives of recordings (rs_rows, royalesim_redrive, rs_shadow, rs_eval's rebuilt look-ahead)
-send each play at its recorded tick, which IL_Replay logs as the tick it executed. They run
-with no command delay whatever the config says (EngineConfig.undelayed()).
+send each play at its recorded tick, which this code takes to be the tick it executed. That is
+an assumption, not a measurement: tools/rs_dt_diag.py checks it from the elixir headroom of the
+rows (docs/SPARRING_RUNBOOK.md section 19). A shift of every play by the same ticks would leave
+the board's timing as it is and move only the elixir and the clock. They run with no command
+delay whatever the config says (EngineConfig.undelayed()).
 
 fingerprint(battle) says which engine a battle is: royalesim version, card table name and
 FNV-1a 64, unit_types_digest (FNV-1a 64 of unit_types_json(), computed here on engines that do

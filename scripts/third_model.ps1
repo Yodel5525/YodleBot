@@ -26,9 +26,17 @@
 
     The evaluation: first tools\rs_eval.py, 300 held-out matches against
     runs\tokens\live_big\ep01.pt at a 21-tick delay (the same instrument as section 19's
-    run B, so the numbers compare); then the league (tools\rs_league_eval.py): v2_hog as
-    the candidate, dt_big_hog (section 19) as the champion and live_big_hog (section 14)
-    as the anchor, paired games on both seats at a 24-tick delay with perception noise.
+    runs A and B, so the numbers compare), then the same without a delay, at a 24-tick
+    delay, and at a 21-tick delay under the live runner's decision rule (--decide live),
+    with live_big_hog under that rule for reference: a lazy gate or a timing offset shows
+    up in the same log. Then the league (tools\rs_league_eval.py): v2_hog as the candidate,
+    live_big_hog (section 14, the live model and the best so far) as the champion and
+    live_big ep01 as the anchor, paired games on both seats at a 24-tick delay with
+    perception noise. dt_big_hog (section 19, 29.3%) is not the champion: beating it would
+    not mean v2_hog is better than the live model.
+
+    Run scripts\dt_diagnose.ps1 first (section 19, "Why the second model lost"): this
+    script uses the same decision-time rows, and the checks say whether v2 should fix them.
 
     Close MuMu and the browser first: these jobs use most of a 16 GB PC's memory.
 
@@ -139,8 +147,12 @@ $fromKey = $From.ToLowerInvariant()
 $start = [array]::IndexOf($order, $fromKey)
 $rowsDir = 'data\rs_rows_v2'
 $colsDir = 'data\rs_cols_v2'
-$champion = 'runs\tokens\dt_big_hog\best.pt'       # the second model (scripts\second_model.ps1)
-$anchor = 'runs\tokens\live_big_hog\best.pt'       # the first model (scripts\first_model.ps1)
+# The champion is the live model, the first model (scripts\first_model.ps1): the second model
+# (dt_big_hog, 29.3% against its 46.0%) would make the gate easy to pass and the pass mean
+# nothing. The anchor is the first model's general checkpoint, which is also rs_eval's
+# reactive opponent.
+$champion = 'runs\tokens\live_big_hog\best.pt'
+$anchor = 'runs\tokens\live_big\ep01.pt'
 $opponent = 'runs\tokens\live_big\ep01.pt'         # rs_eval's reactive opponent, as in section 19
 $general = 'runs\tokens\v2_big\best.pt'
 $candidate = 'runs\tokens\v2_hog\best.pt'
@@ -166,7 +178,7 @@ if ($start -eq 3) { $need += $general }
 if ($start -ge 4) { $need += $candidate }
 foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $root $f))) {
-        Stop-Run ("ERROR: {0} is missing. dt_big_hog comes from scripts\second_model.ps1 (runbook section 19); live_big_hog and live_big from scripts\first_model.ps1 (section 14); the v2_ files, {1} and {2} from the earlier steps of this script (start without -From)." -f $f, $rowsDir, $colsDir)
+        Stop-Run ("ERROR: {0} is missing. live_big_hog and live_big come from scripts\first_model.ps1 (runbook section 14); the v2_ files, {1} and {2} from the earlier steps of this script (start without -From)." -f $f, $rowsDir, $colsDir)
     }
 }
 # The names tools\perception_noise.py reads as the prior or as no noise; anything else is a file.
@@ -243,9 +255,17 @@ if ($start -le 3) {
 }
 if ($start -le 4) {
     # Section 19's instrument: the same reactive opponent, the same 300 held-out matches and the
-    # same 21-tick delay as its run B (dt_big_hog), so the two numbers compare directly.
-    Invoke-Step 'evaluation: v2_hog, 21-tick delay' $RG (@('tools\rs_eval.py', '--ckpt', $candidate,
-        '--opponent-ckpt', $opponent, '--matches', '300', '--workers', "$Workers", '--delay', '21'))
+    # same 21-tick delay as its runs A (live_big_hog) and B (dt_big_hog), so the numbers compare
+    # directly. Then the arms that tell a lazy gate or a timing offset apart (section 19, "Why the
+    # second model lost"): no delay, a 24-tick delay, and the live runner's rule. --decide live
+    # switches the opponent seat too, so the two live-rule runs compare only with each other.
+    $vs = @('--opponent-ckpt', $opponent, '--matches', '300', '--workers', "$Workers")
+    $evalNew = @('tools\rs_eval.py', '--ckpt', $candidate) + $vs
+    Invoke-Step 'evaluation: v2_hog, 21-tick delay' $RG ($evalNew + @('--delay', '21'))
+    Invoke-Step 'evaluation: v2_hog, no delay' $RG $evalNew
+    Invoke-Step 'evaluation: v2_hog, 24-tick delay' $RG ($evalNew + @('--delay', '24'))
+    Invoke-Step 'evaluation: v2_hog, 21-tick delay, live rule' $RG ($evalNew + @('--delay', '21', '--decide', 'live'))
+    Invoke-Step 'evaluation: live_big_hog, 21-tick delay, live rule (reference)' $RG (@('tools\rs_eval.py', '--ckpt', $champion) + $vs + @('--delay', '21', '--decide', 'live'))
 }
 if ($start -le 5) {
     # The gate: 1,000 paired games against the champion (both seats, both decks), 400 against
@@ -255,9 +275,9 @@ if ($start -le 5) {
         Stop-Run ("ERROR: {0}. v2_big and v2_hog are trained and kept: update the branch (git pull), then run -From league. Send this log back: {1}" -f $leagueV2Text, $log)
     }
     $leagueWorkers = [Math]::Min($Workers, 6)
-    Invoke-Step 'league: v2_hog vs dt_big_hog, anchor live_big_hog' $RG (@('tools\rs_league_eval.py', 'run',
-        '--candidate', "v2_hog=$candidate", '--champion', "dt_big_hog=$champion",
-        '--anchor', "live_big_hog=$anchor", '--delay', '24', '--noise', $Noise,
+    Invoke-Step 'league: v2_hog vs live_big_hog, anchor live_big' $RG (@('tools\rs_league_eval.py', 'run',
+        '--candidate', "v2_hog=$candidate", '--champion', "live_big_hog=$champion",
+        '--anchor', "live_big=$anchor", '--delay', '24', '--noise', $Noise,
         '--champion-games', '1000', '--anchor-games', '400', '--full',
         '--workers', "$leagueWorkers", '--log', 'runs\league\third_model.jsonl'))
 }

@@ -11,7 +11,10 @@ crowns 49.0% on the author's b2000 matches) was measured on royalesim 0.1.22, an
 calibration values changed in 0.1.42; the card table is now a choice (15.535 or 16.402.22),
 ability presses can be replayed (E10), and whether IL_Replay's play ticks are execution ticks
 or tap ticks is an open question. Phase 2 of docs/SPARRING_PLAN.md picks the card table and
-settings from this grid.
+settings from this grid. The grid's exec / tap axis says little about that question: moving
+every play by the same ticks keeps the board's timing, so the endings and the elixir refusals
+hardly change. tools/rs_dt_diag.py's elixir headroom of the rows (and its ghost comparison of
+rs_eval --pro with and without --delay) is the check (docs/SPARRING_RUNBOOK.md section 19).
 
 What it does:
 

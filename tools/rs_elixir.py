@@ -32,7 +32,8 @@ for itself). It is a pure function of a seed and a log of dated events, so a pla
 late (vision lag) or out of order gives the same bar as one reported on time:
 
     play(tick, card)       a card play, paid when it EXECUTES (under a command delay that is
-                           the accepted tick + the delay; IL_Replay logs execution ticks).
+                           the accepted tick + the delay; IL_Replay's ticks are taken to be
+                           execution ticks, an assumption tools/rs_dt_diag.py checks).
                            Priced from `costs`; a MIRROR costs the side's last non-Mirror
                            play plus its own 1 (match.MIRROR_COST_RULE, MIRROR_RECORD); a
                            Mirror with nothing to copy means a play was missed. cost=

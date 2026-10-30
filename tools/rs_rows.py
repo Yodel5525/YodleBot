@@ -155,7 +155,9 @@ from the row's tick, as before. vocab.json: obs_delay ticks and jitter, "decisio
 (DecisionRule.to_json) and DECISION_FIELDS last in "extra_columns" (decision_vocab);
 rows_for's info and manifest.json get "decision" counts (play_rows, press_rows, not_in_hand,
 clamped, pending_rows, exact_rows). sim/train_tokens.py reads none of the new columns (E14 /
-E15 will): the legacy model trains on decision-time rows as they are, schema rs_rows/legacy.
+E15 will): the legacy model trains on decision-time rows as they are, schema rs_rows/legacy;
+only its --drop-pending-waits (a diagnosis option, off by default) reads own_pending, to leave
+out the waits with an own play in flight (tools/rs_dt_diag.py counts them).
 
 Schema v2 (E14; tools/rs_schema.py, which holds both layouts as data; tokens-14): `--schema
 legacy` (the default) writes the rows above, schema rs_rows/legacy, so the rows, vocab.json and
@@ -1800,7 +1802,8 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
 def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, presses=None,
              info=None, decision=None, schema=None, noise=None, noise_seed=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
-    since the recorded ticks are the ticks the plays executed. `decision` as --obs-delay
+    since the recorded ticks are taken to be the ticks the plays executed (an assumption until
+    tools/rs_dt_diag.py's headroom check reports, runbook section 19). `decision` as --obs-delay
     (decision_rule; None: DECISION): a delay > 0 observes each play and press at its tap,
     exec - D_i, and gives every row own_pending, own_pending_land and an honest hand_exact
     (module doc, "Decision time"); 0 keeps the rows at execution, as before. `mem_lag` as --mem-lag

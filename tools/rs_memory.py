@@ -102,8 +102,9 @@ class PublicMemory:
 
     def record(self, team: int, card: int, exec_tick: int) -> None:
         """`team` played row token `card` (catalogue id + 2), which runs on `exec_tick`: the
-        recorded tick for IL_Replay rows (it logs execution ticks), send tick + command delay
-        in a delayed battle, the tick perception first saw it live."""
+        recorded tick for IL_Replay rows (taken to be its execution tick, an assumption
+        tools/rs_dt_diag.py checks), send tick + command delay in a delayed battle, the tick
+        perception first saw it live."""
         team = _team(team)
         card = _int(card, "card")
         exec_tick = _int(exec_tick, "exec_tick")
