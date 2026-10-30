@@ -395,7 +395,7 @@ $SID = '20261029_R0_1'
 
 **This table is current: fitted to the main account's collection, 2026-10-30** (4.8.7). It replaces the clan-data table of the same day, which assumed every hero owned, and the ladder-based table before it. Every form below is owned, so no deck needs a fallback.
 
-Deck lists use RoyaleAPI keys, as in `data/ladder/battles_2p6.csv`; Minion Giant has no key yet, so it is given by its catalogue name. Slot 1 takes an evolution, slot 2 a hero or champion, slot 3 any of them (4.8.3).
+Deck lists use RoyaleAPI keys, as in `data/ladder/battles_2p6.csv`. Minion Giant is given by its catalogue name, `MinionGiant`; since 2026-10-30 (commit 0f3a56e) its key `minion-giant` maps to it too (`data/cards/replay_cards_extra.json`, still `"verified": false` until a corpus deck shows the card), and `tools/vision_autolabel.py` takes either. Slot 1 takes an evolution, slot 2 a hero or champion, slot 3 any of them (4.8.3).
 
 | Deck | Slot 1 (evo) | Slot 2 | Slot 3 | Slots 4-8 | Shape (evo, hero, champion) |
 |---|---|---|---|---|---|

@@ -2,6 +2,11 @@
 
 Status: design, 2026-10-30. Nothing in this plan is built yet. The code is written in the cloud sandbox, which cannot run it, and every number is measured on the owner's PC.
 
+**Note, 2026-10-30 (evening): the champion changed.** Since its league PASS that night, the champion and the next live model is `v2_hog_20k` (`runs\tokens\v2_hog_20k\best.pt`): a v2 model trained on decision-time rows, 70.6% over 1,000 league games against `live_big_hog` (`docs/SPARRING_RUNBOOK.md` section 20, "Result of step 1 (2026-10-30)"). This plan was written when `live_big_hog`, a landing-time model, held both places. So:
+- **The commands below that name `runs\tokens\live_big_hog\best.pt`** (the arms of 7.1, the M-phase commands of section 10) are now a landing-time reference. Run them as written only to measure what the root look-ahead gives a landing-time model (M2a, M5 (c)).
+- **For everything meant to go live, use the champion:** `runs\tokens\v2_hog_20k\best.pt`, or whichever model is the champion by then (the last one whose league said PASS), in place of `runs\tokens\live_big_hog\best.pt`, for the searching seat and for `plain` alike: M1, M2b, M3-M7, the dry run and the friendlies. The opponent model (`--opp-ckpt runs\tokens\live_big\best.pt`) and the anchors stay as written.
+- **The look-ahead does not apply to it.** A decision-time checkpoint decides on the present board (section 3.1, step 5; `tools/rs_search.py`, `landing=RD.obs_delay_ticks(meta) == 0`), and `tools/rs_match.py` wants lead 0 for one. So `s_root` on `v2_hog_20k` decides as `plain` does, and `author_la`'s `lead=-24` would count the delay twice. With `v2_hog_20k` the open question is the search itself: `s_idle` and `s_reply` against `plain` (M4, M5 (b)), with `s_true` as the ceiling (M2b).
+
 The hard rules in `CLAUDE.md` apply to every item:
 - friendly battles only;
 - no memory reading;

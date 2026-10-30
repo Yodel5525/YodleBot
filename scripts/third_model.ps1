@@ -29,27 +29,29 @@
     runs\tokens\live_big\ep01.pt at a 21-tick delay (the same instrument as section 19's
     runs A and B, so the numbers compare), then the same without a delay, at a 24-tick
     delay, and at a 21-tick delay under the live runner's decision rule (--decide live),
-    with live_big_hog under that rule for reference: a lazy gate or a timing offset shows
+    with the champion under that rule for reference: a lazy gate or a timing offset shows
     up in the same log. Then the league (tools\rs_league_eval.py): v2_hog as the candidate,
-    live_big_hog (section 14, the live model and the best so far) as the champion and
-    live_big ep01 as the anchor, paired games on both seats at a 24-tick delay with
-    perception noise. dt_big_hog (section 19, 29.3%) is not the champion: beating it would
-    not mean v2_hog is better than the live model.
+    the -Champion (default v2_hog_20k, the champion since its league PASS of 2026-10-30) as
+    the champion and live_big ep01 as the anchor, paired games on both seats at a 24-tick
+    delay with perception noise. The champion is the last model whose league said PASS, never
+    a former one: a pass against a former champion would not make v2_hog the best model.
 
     Run scripts\dt_diagnose.ps1 first (section 19, "Why the second model lost"): this
     script uses the same decision-time rows, and the checks say whether v2 should fix them.
 
     Close MuMu and the browser first: these jobs use most of a 16 GB PC's memory. The
-    shorter first run (section 20), then the whole corpus once its v2_hog_20k beats
-    live_big_hog:
+    shorter first run (section 20, -Others 20000 -Tag 20k) ran on 2026-10-30 against
+    live_big_hog, the champion then, and its v2_hog_20k passed. The whole corpus, against
+    the champion of the day (v2_hog_20k by default):
 
-        powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1 -Others 20000 -Tag 20k
-        powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1
+        powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1 -Workers 4
 
 .PARAMETER Workers
-    Processes for row building and rs_eval (default 8). Use 6 if RAM runs short. The
-    league step uses at most 6, and tools\rs_league_eval.py lowers that further when free
-    memory is short.
+    Processes for row building and rs_eval (default 4: the PC froze at 8 rs_eval workers on
+    2026-10-30, docs\SPARRING_RUNBOOK.md "If something breaks", "If the PC freezes"). 6 only
+    after a watched 4-worker run left more than about 7 GB of memory available; not 8 until
+    the freeze is explained. The league step uses at most 6, and tools\rs_eval.py and
+    tools\rs_league_eval.py lower the count further when free memory is short.
 
 .PARAMETER Others
     0 (default): every usable match (--all-matches). N: every Hog 2.6 match plus N others
@@ -81,22 +83,40 @@
     default): data\rs_rows_v2, data\rs_cols_v2, runs\tokens\v2_big and v2_hog, and the
     league player v2_hog. -Tag 20k: data\rs_rows_v2_20k, data\rs_cols_v2_20k,
     runs\tokens\v2_big_20k and v2_hog_20k, and the league player v2_hog_20k. Every run
-    shares the league log runs\league\third_model.jsonl, so live_big_hog's games against
-    live_big are played once. The league refuses a name whose games it holds when the
-    checkpoint has changed, so the script stops at the start when it would train a
-    candidate whose name already has games there. Letters, digits, _ and - only.
-    Example: the shorter first run, -Others 20000 -Tag 20k, then the whole corpus with no
-    -Tag.
+    shares the league log runs\league\third_model.jsonl, so a champion's games against
+    live_big are played once (v2_hog_20k's are there from the -Tag 20k run). The league
+    refuses a name whose games it holds when the checkpoint has changed, so the script stops
+    at the start when it would train a candidate whose name already has games there (a
+    -Tag 20k run now stops so). Letters, digits, _ and - only. Example: the shorter first
+    run was -Others 20000 -Tag 20k; the whole corpus has no -Tag.
+
+.PARAMETER Champion
+    The league's champion and the eval step's live-rule reference run (default
+    runs\tokens\v2_hog_20k\best.pt, the champion since 2026-10-30). Give the champion of the
+    day: the last model whose league said PASS (docs\SPARRING_RUNBOOK.md section 19, "Result
+    (2026-10-30)", Decisions). Its league name is its folder's for best.pt, else its folder
+    and file name (runs\rl\hog_rl1\it0010.pt plays as hog_rl1_it0010), as
+    scripts\model_check.ps1 names it, and the tools get it relative to the repo root, so one
+    name means one path in every league log. It must exist and must not be the candidate,
+    the anchor or this run's general model. When runs\league\third_model.jsonl already holds
+    games of its name, they must have been played with the same file and the same path as
+    written (case and all), or the league would refuse it at its step: the script checks this
+    at the start. The -Tag 20k run's league played -Champion runs\tokens\live_big_hog\best.pt.
+    The league's report goes next to its log as
+    third_model.<candidate>_vs_<champion>.report.json (step 2:
+    third_model.v2_hog_vs_v2_hog_20k.report.json), the name scripts\model_check.ps1 gives a
+    report on that log; third_model.report.json keeps step 1's.
 #>
 param(
-    [ValidateRange(1, 64)][int]$Workers = 8,
+    [ValidateRange(1, 64)][int]$Workers = 4,
     [ValidateRange(0, 1000000)][int]$Others = 0,
     [ValidateRange(1, 20)][int]$Epochs = 2,
     [long]$MaxRows = 0,
     [ValidateNotNullOrEmpty()][string]$Noise = 'data\noise\default_prior.json',
     [ValidateSet('rows', 'compact', 'general', 'hog', 'eval', 'league')][string]$From = 'rows',
     [switch]$SkipDiskCheck,
-    [ValidatePattern('^[A-Za-z0-9_-]*$')][string]$Tag = ''
+    [ValidatePattern('^[A-Za-z0-9_-]*$')][string]$Tag = '',
+    [ValidateNotNullOrEmpty()][string]$Champion = 'runs\tokens\v2_hog_20k\best.pt'
 )
 
 # Continue, not Stop: native programs write warnings to stderr, and under Stop
@@ -182,11 +202,21 @@ $sfx = $(if ($Tag) { "_$Tag" } else { '' })
 $tagArg = $(if ($Tag) { " -Tag $Tag" } else { '' })      # for the restart advice
 $rowsDir = "data\rs_rows_v2$sfx"
 $colsDir = "data\rs_cols_v2$sfx"
-# The champion is the live model, the first model (scripts\first_model.ps1): the second model
-# (dt_big_hog, 29.3% against its 46.0%) would make the gate easy to pass and the pass mean
-# nothing. The anchor is the first model's general checkpoint, which is also rs_eval's
-# reactive opponent.
-$champion = 'runs\tokens\live_big_hog\best.pt'
+# The champion (-Champion): the last model whose league said PASS, v2_hog_20k since 2026-10-30.
+# A former champion would make the gate easy to pass and the pass mean nothing. The tools get
+# its path as scripts\model_check.ps1's Resolve-Model gives it (relative to the repo root when
+# under it, with backslashes; else absolute), so that one name means one path in every league
+# log, and its league name is that function's too: the folder for best.pt, else folder_file.
+# $championCkpt, not $champion: PowerShell names ignore case, so $champion is the parameter.
+# The anchor is the first model's general checkpoint, which is also rs_eval's reactive opponent.
+$championText = $Champion.Trim().Trim([char[]]('"', "'"))
+$championJoined = $(if ([System.IO.Path]::IsPathRooted($championText)) { $championText } else { Join-Path $root $championText })
+$championFull = [System.IO.Path]::GetFullPath($championJoined)
+$rootPrefix = $root.TrimEnd('\') + '\'
+$championCkpt = $(if ($championFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $championFull.Substring($rootPrefix.Length) } else { $championFull })
+$championFile = [System.IO.Path]::GetFileName($championFull)
+$championFolder = Split-Path -Leaf (Split-Path -Parent $championFull)
+$championName = $(if ($championFile -ieq 'best.pt') { $championFolder } else { '{0}_{1}' -f $championFolder, [System.IO.Path]::GetFileNameWithoutExtension($championFull) })
 $anchor = 'runs\tokens\live_big\ep01.pt'
 $opponent = 'runs\tokens\live_big\ep01.pt'         # rs_eval's reactive opponent, as in section 19
 $generalName = "v2_big$sfx"
@@ -194,6 +224,10 @@ $candidateName = "v2_hog$sfx"
 $general = "runs\tokens\$generalName\best.pt"
 $candidate = "runs\tokens\$candidateName\best.pt"
 $leagueLog = 'runs\league\third_model.jsonl'
+# The league's report, one per matchup next to the log and named as scripts\model_check.ps1
+# names its own (<log name>.<candidate>_vs_<champion>.report.json): rs_league_eval's default,
+# third_model.report.json, holds step 1's PASS, and every later run would write over it.
+$leagueReport = 'runs\league\third_model.{0}_vs_{1}.report.json' -f $candidateName, $championName
 # d256, 6 layers, 8 heads as live_big and dt_big: the comparison is then about the rows, and
 # the simulator's CPU workers (league, later RL) run the model as fast as the champion. About
 # 3-4 GB of the 12 GB VRAM at batch 512. --wait-keep 0.25 equals --wait-keep-at-build, so the
@@ -203,7 +237,7 @@ $model = @('--memmap', '--mirror', '0.5', '--trust', 'v2', '--wait-keep', '0.25'
            '--d', '256', '--layers', '6', '--heads', '8', '--val-max-rows', '500000')
 if ($MaxRows -gt 0) { $model += @('--max-rows', "$MaxRows") }
 $matchText = $(if ($Others -gt 0) { "Hog 2.6 + $Others others" } else { 'all' })
-Write-Both ("third_model.ps1: from '{0}', workers {1}, matches {2}, epochs {3}, max rows {4}, noise {5}, models {6} and {7}, rows {8}. Log: {9}" -f $fromKey, $Workers, $matchText, $Epochs, $(if ($MaxRows -gt 0) { $MaxRows } else { 'all' }), $Noise, $generalName, $candidateName, $rowsDir, $log) 'Cyan'
+Write-Both ("third_model.ps1: from '{0}', workers {1}, matches {2}, epochs {3}, max rows {4}, noise {5}, models {6} and {7}, rows {8}, champion {9}={10}. Log: {11}" -f $fromKey, $Workers, $matchText, $Epochs, $(if ($MaxRows -gt 0) { $MaxRows } else { 'all' }), $Noise, $generalName, $candidateName, $rowsDir, $championName, $championCkpt, $log) 'Cyan'
 
 # A run that trains the candidate (it starts at the hog step or before) gives it a new
 # checkpoint. If the league log already holds games of that name, tools\rs_league_eval.py
@@ -217,10 +251,60 @@ if ($start -le 3) {
     }
 }
 
+# The champion: a file, not the candidate (a model cannot be its own champion: -Tag 20k with the
+# default -Champion) nor the anchor, and a name the league can tell from theirs.
+if (-not (Test-Path -LiteralPath $championFull -PathType Leaf)) {
+    Stop-Run ("ERROR: the champion {0} is missing (-Champion). Give the champion of the day, the last model whose league said PASS: runs\tokens\v2_hog_20k\best.pt since 2026-10-30 (runbook section 19, 'Result (2026-10-30)', Decisions)." -f $championFull)
+}
+if (-not [regex]::IsMatch($championName, '^[A-Za-z0-9_.-]+$')) {
+    Stop-Run ("ERROR: the champion {0}: the league name '{1}' made from its path is not letters, digits, '.', '_' and '-' only; move the checkpoint into a folder with such a name." -f $championFull, $championName)
+}
+$candidateFull = [System.IO.Path]::GetFullPath((Join-Path $root $candidate))
+$anchorFull = [System.IO.Path]::GetFullPath((Join-Path $root $anchor))
+if ($championFull -ieq $candidateFull -or $championName -ieq $candidateName) {
+    Stop-Run ("ERROR: the champion {0} (league name {1}) is this run's candidate {2} ({3}), or has its league name: a model cannot be its own champion. Give -Champion the champion of the day; the -Tag 20k run's league played -Champion runs\tokens\live_big_hog\best.pt." -f $championCkpt, $championName, $candidateName, $candidate)
+}
+if ($championFull -ieq $anchorFull -or $championName -ieq 'live_big') {
+    Stop-Run ("ERROR: the champion {0} (league name {1}) is the anchor live_big ({2}): give -Champion another checkpoint." -f $championCkpt, $championName, $anchor)
+}
+$generalFull = [System.IO.Path]::GetFullPath((Join-Path $root $general))
+if ($championFull -ieq $generalFull -or $championName -ieq $generalName) {
+    Stop-Run ("ERROR: the champion {0} (league name {1}) is this run's general model {2} ({3}), which the run trains again in place and which is no Hog 2.6 model: give -Champion the champion of the day." -f $championCkpt, $championName, $generalName, $general)
+}
+# The champion's games already in the league log: tools\rs_league_eval.py refuses a player whose
+# games there were played under another checkpoint path (as given, case and all) or another file
+# (its SHA-256 digest), but only at the league step, hours in. Its run headers say so now, read
+# as scripts\model_check.ps1's Find-NameClashes reads them: one "league_run" JSON line per run,
+# with each player's ckpt and ckpt_digest (16 hex digits of SHA-256, rs_league_eval ckpt_digest).
+$leagueLogFull = Join-Path $root $leagueLog
+if (Test-Path -LiteralPath $leagueLogFull) {
+    $championDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $championFull).Hash.ToLowerInvariant().Substring(0, 16)
+    $runHeaders = @(Select-String -LiteralPath $leagueLogFull -SimpleMatch -Pattern '"kind":"league_run"' -ErrorAction SilentlyContinue)
+    foreach ($hit in $runHeaders) {
+        $header = $null
+        try { $header = $hit.Line | ConvertFrom-Json } catch { $header = $null }
+        if ($null -eq $header -or $null -eq $header.players) {
+            Write-Both ("warning: {0} line {1}: a run header that could not be read; the champion's games in it are not checked" -f $leagueLog, $hit.LineNumber) 'Yellow'
+            continue
+        }
+        foreach ($prop in $header.players.PSObject.Properties) {
+            if ($prop.Name -cne $championName) { continue }
+            $oldCkpt = [string]$prop.Value.ckpt
+            $oldDigest = [string]$prop.Value.ckpt_digest
+            if ($oldDigest -and $oldDigest -ne $championDigest) {
+                Stop-Run ("ERROR: {0} line {1} holds league games of the champion {2} played with another file: {3}, digest {4}; {5} now has digest {6} (retrained or replaced since). The league would refuse it under that name after hours of work. Nothing has run yet. Restore the checkpoint those games were played with, or give the new one its own folder (its league name) as -Champion." -f $leagueLog, $hit.LineNumber, $championName, $oldCkpt, $oldDigest, $championCkpt, $championDigest)
+            }
+            if ($oldCkpt -cne $championCkpt) {
+                Stop-Run ("ERROR: {0} line {1} holds league games of the champion {2} under the path '{3}'; this run gives '{4}'. The league compares the path as written, case and all, so it would refuse it after hours of work. Nothing has run yet. Give -Champion {3}." -f $leagueLog, $hit.LineNumber, $championName, $oldCkpt, $championCkpt)
+            }
+        }
+    }
+}
+
 # What the steps after -From read, checked now rather than after hours of work.
 # manifest.json, not vocab.json: rs_rows writes vocab.json first and manifest.json only once
 # every shard is done; compact.json is likewise the last file rs_rows_compact writes.
-$need = @($champion, $anchor)
+$need = @($anchor)
 if ($start -le 4) { $need += $opponent }
 if ($start -eq 1) { $need += "$rowsDir\manifest.json" }
 if ($start -eq 2 -or $start -eq 3) { $need += "$colsDir\compact.json" }
@@ -228,7 +312,7 @@ if ($start -eq 3) { $need += $general }
 if ($start -ge 4) { $need += $candidate }
 foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $root $f))) {
-        Stop-Run ("ERROR: {0} is missing. live_big_hog and live_big come from scripts\first_model.ps1 (runbook section 14); the v2_ files, {1} and {2} from the earlier steps of this script (start without -From)." -f $f, $rowsDir, $colsDir)
+        Stop-Run ("ERROR: {0} is missing. live_big comes from scripts\first_model.ps1 (runbook section 14); the v2_ files, {1} and {2} from the earlier steps of this script (start without -From)." -f $f, $rowsDir, $colsDir)
     }
 }
 # The names tools\perception_noise.py reads as the prior or as no noise; anything else is a file.
@@ -316,7 +400,7 @@ if ($start -le 4) {
     Invoke-Run "evaluation: $candidateName, no delay" $RG $evalNew
     Invoke-Run "evaluation: $candidateName, 24-tick delay" $RG ($evalNew + @('--delay', '24'))
     Invoke-Run "evaluation: $candidateName, 21-tick delay, live rule" $RG ($evalNew + @('--delay', '21', '--decide', 'live'))
-    Invoke-Run 'evaluation: live_big_hog, 21-tick delay, live rule (reference)' $RG (@('tools\rs_eval.py', '--ckpt', $champion) + $vs + @('--delay', '21', '--decide', 'live'))
+    Invoke-Run "evaluation: $championName (the champion), 21-tick delay, live rule (reference)" $RG (@('tools\rs_eval.py', '--ckpt', $championCkpt) + $vs + @('--delay', '21', '--decide', 'live'))
 }
 if ($start -le 5) {
     # The gate: 1,000 paired games against the champion (both seats, both decks), 400 against
@@ -326,11 +410,11 @@ if ($start -le 5) {
         Stop-Run ("ERROR: {0}. {1} and {2} are trained and kept: update the branch (git pull), then run -From league{3}. Send this log back: {4}" -f $leagueV2Text, $generalName, $candidateName, $tagArg, $log)
     }
     $leagueWorkers = [Math]::Min($Workers, 6)
-    Invoke-Step "league: $candidateName vs live_big_hog, anchor live_big" $RG (@('tools\rs_league_eval.py', 'run',
-        '--candidate', "$candidateName=$candidate", '--champion', "live_big_hog=$champion",
+    Invoke-Step "league: $candidateName vs $championName, anchor live_big" $RG (@('tools\rs_league_eval.py', 'run',
+        '--candidate', "$candidateName=$candidate", '--champion', "$championName=$championCkpt",
         '--anchor', "live_big=$anchor", '--delay', '24', '--noise', $Noise,
         '--champion-games', '1000', '--anchor-games', '400', '--full',
-        '--workers', "$leagueWorkers", '--log', $leagueLog))
+        '--workers', "$leagueWorkers", '--report', $leagueReport, '--log', $leagueLog))
 }
 
 if ($failedRuns.Count -gt 0) {

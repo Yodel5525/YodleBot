@@ -17,7 +17,7 @@
     Close MuMu and the browser first: the workers use about 8 GB.
 
         powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Bench
-        powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Workers 8 -Hours 48
+        powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Workers 4 -Hours 48
         powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -From resume -Hours 24
 
     To stop cleanly: New-Item -ItemType File -Force C:\hcr\runs\rl\hog_rl1\STOP
@@ -25,14 +25,18 @@
 
 .PARAMETER Bench
     Measure instead of training (about -BenchMinutes): matches/hour, RAM per worker and a
-    recommended -Workers. Writes runs\rl\<Name>\bench-<time>\bench.json. Run it first.
+    recommended -Workers. Writes runs\rl\<Name>\bench-<time>\bench.json. Run it first. It
+    plays at 1, half and all of -Workers: 1, 2 and 4 by default (-Workers 0: the driver's own
+    1, half and all that RAM and CPU allow, about 9 on a 16 GB PC).
 
 .PARAMETER BenchMinutes
     How long the bench measures (default 10).
 
 .PARAMETER Workers
-    Rollout worker processes (default 0: the driver's 8, lowered when RAM is short). Use the
-    bench's recommendation.
+    Rollout worker processes (default 4: the PC froze at 8 engine workers on 2026-10-30,
+    docs\SPARRING_RUNBOOK.md "If something breaks", "If the PC freezes"). 0: the driver's own
+    default, 8. The driver lowers the count when RAM is short, and the gate uses at most 6 of
+    them. Use the bench's recommendation, but at most 4 until the freeze is explained.
 
 .PARAMETER Hours
     Stop before a new collection once this launch has run this long (default 0: no limit).
@@ -68,7 +72,7 @@
 param(
     [switch]$Bench,
     [ValidateRange(1, 240)][int]$BenchMinutes = 10,
-    [ValidateRange(0, 64)][int]$Workers = 0,
+    [ValidateRange(0, 64)][int]$Workers = 4,
     [ValidateRange(0, 10000)][double]$Hours = 0,
     [ValidateRange(0, 1000000)][int]$Iterations = 0,
     [Alias('Matches')][ValidateRange(1, 100000)][int]$MatchCount = 400,
@@ -233,6 +237,13 @@ if (-not $newRun -and ($Start -or $Noise -or $NoAnchors)) {
 }
 if ($Bench) {
     $argList += @('--bench', ("{0}m" -f $BenchMinutes))
+    # The counts the bench plays: 1, half and all of -Workers (1,2,4 by default). train_loop's
+    # own counts without --bench-workers are 1, half and all that RAM and CPU allow, about 9 on
+    # the 16 GB PC: more than the 8 that froze it on 2026-10-30. -Workers 0 leaves them to it.
+    if ($Workers -gt 0) {
+        $benchCounts = @(@(1, [Math]::Max(1, [int][Math]::Floor($Workers / 2.0)), $Workers) | Sort-Object -Unique)
+        $argList += @('--bench-workers', ($benchCounts -join ','))
+    }
 }
 
 $title = $(if ($Bench) { 'bench' } else { 'RL training' })
@@ -241,7 +252,7 @@ $code = Invoke-Py $title $RG $argList
 if ($Bench -and $code -eq 0 -and $script:lastJson) {
     try {
         $result = $script:lastJson | ConvertFrom-Json
-        Write-Both ("bench done. Next: powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Workers {0} -Hours 48" -f $result.recommended_workers) 'Green'
+        Write-Both ("bench done. Next: powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Workers {0} -Hours 48 (but at most -Workers 4 until the freeze of 2026-10-30 is explained: docs\SPARRING_RUNBOOK.md, 'If the PC freezes')" -f $result.recommended_workers) 'Green'
     } catch {
         Write-Both 'bench done (its summary line did not parse; see the lines above).' 'Yellow'
     }

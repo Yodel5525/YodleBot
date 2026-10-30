@@ -92,6 +92,16 @@ name; reports/rs_ghost.jsonl then records "noise" (perception_noise.vocab_entry)
 counts ("noise_stats"; per match in each row's "noise"), and likewise "opponent_noise".
 
 The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
+
+Workers (capped_workers): --workers is capped by the free memory and the CPUs the way
+tools/rs_league_eval.py caps its own (worker_cap: the free memory less RESERVE_MB, at WORKER_MB a
+worker, which holds torch, royalesim and two policies as a league worker does, and the CPUs less
+one), but not at the league's MAX_WORKERS; the run prints "workers: ..." with the reason. With
+--search or --shadow a worker counts SEARCH_WORKER_MB, as a league worker with a searching player
+does: the search's copies or rebuild, or the shadow's re-drive, are a second battle. The
+results do not depend on the count: match k of the held-out list is played with seed k (the
+battle's reset, the agent; the reactive opponent k + 7) and its noise is seeded by its replay
+tag, every match builds its own agents, and pool.map returns the results in the list's order.
 """
 from __future__ import annotations
 
@@ -728,6 +738,21 @@ class RSSearchAgent(RSAgent):
 
 
 
+def capped_workers(requested, *, available=None, cpus=None, search=False) -> tuple[int, str]:
+    """(workers, why): `requested` capped as tools/rs_league_eval.py worker_cap caps the league's
+    workers (the free memory less its reserve, at WORKER_MB a worker, and the CPUs less one; at
+    least 1), but not at its MAX_WORKERS: the count asked for is the most (module doc, Workers).
+    `search`: the agent keeps a second battle besides the policies (--search's copies or rebuild,
+    --shadow's re-drive), so a worker counts SEARCH_WORKER_MB, as a league worker with a
+    searching player does. `available` (MB) and `cpus` default to the machine's. rs_league_eval
+    imports numpy and modules this file imports already; no engine, no torch."""
+    import rs_league_eval as LE
+    want = max(1, int(requested))
+    per = LE.SEARCH_WORKER_MB if search else LE.WORKER_MB
+    return LE.worker_cap(want, available=available, cpus=cpus, per_worker_mb=per,
+                         max_workers=want)
+
+
 def check_noise_seats(noise, opp_noise, mode_, opp_ckpt="", shadow=False) -> None:
     """ValueError when a perception-noise profile (E17; None: none) goes to a seat that is not
     there or does not decide through RSAgent.act (module doc, "Perception noise"): `noise`, the
@@ -994,7 +1019,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--matches", type=int, default=300)
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=6,
+                    help="worker processes (default 6), capped by the free memory and the CPUs "
+                         "as tools/rs_league_eval.py caps its own; the results do not depend on "
+                         "the count")
     ap.add_argument("--pro", action="store_true", help="run the recorded-pro baseline instead")
     ap.add_argument("--search", action="store_true", help="decision-time search")
     ap.add_argument("--spell-aim", action="store_true",
@@ -1101,8 +1129,13 @@ def main() -> int:
     if noise is not None or opp_noise is not None:
         extra = (None if noise is None else noise.to_dict(),
                  None if opp_noise is None else opp_noise.to_dict(), args.noise_seed)
+    # Capped by free memory and CPUs (module doc, Workers): match k is seeded k whatever the count.
+    # A search or a shadow keeps a second battle in each worker: the league's search memory.
+    second_battle = mode_ in ("search", "search_rebuild") or bool(args.shadow)
+    workers, why = capped_workers(args.workers, search=second_battle)
+    print(f"workers: {why}", flush=True)
     t0 = time.time()
-    with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
+    with ProcessPoolExecutor(workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
         rows, skipped = split_results(list(pool.map(
             play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,

@@ -8,10 +8,10 @@
     For each checkpoint (-Ckpt), each wait_keep (-Keeps) and each decision rule (-Rules), one
     rs_eval run: -Matches held-out Hog 2.6 matches against the reactive -Opponent at a -Delay
     tick command delay, the instrument of docs\SPARRING_RUNBOOK.md section 19. Right after each
-    setting the champion (-Champion, default live_big_hog, the live model) runs under the same
-    setting as the control, so every number has its control in the same log (-NoBaseline
-    leaves the control out). A run that was already made earlier in the same run is not made
-    again; the summary repeats its numbers.
+    setting the champion (-Champion, default v2_hog_20k, the champion since 2026-10-30) runs
+    under the same setting as the control, so every number has its control in the same log
+    (-NoBaseline leaves the control out). A run that was already made earlier in the same run
+    is not made again; the summary repeats its numbers.
 
     wait_keep: rs_eval and the live runner add log(1 / wait_keep) to the wait logit, with
     wait_keep read from the args.json next to the checkpoint (tools\rs_decide.py wait_keep_for;
@@ -38,7 +38,10 @@
     name of this run for another checkpoint, or another league log uses the candidate's; for
     the champion's or the anchor's name in another log it prints a warning. Every candidate
     plays the current champion (the last model that passed), never a former one: give it with
-    -Champion once live_big_hog is no longer the champion.
+    -Champion once v2_hog_20k is no longer the champion. The league's report goes next to its
+    log as <log name>.<candidate>_vs_<champion>.report.json (rs_league_eval --report), so a run
+    on runs\league\third_model.jsonl leaves step 1's third_model.report.json alone;
+    scripts\third_model.ps1 names its own reports the same way since 2026-10-30.
 
     Everything printed also goes to reports\model_check_<time>.log; its last block is a summary
     table. A run that fails is logged and the script goes on with the next; it exits 1 at the
@@ -46,10 +49,12 @@
 
         powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\model_check.ps1 -League
 
-    Time: an rs_eval run of 300 matches takes about 10 minutes at 8 workers, so the default (2
-    wait_keeps x 2 rules, for the checkpoint and the control) takes about 80 minutes. The league
-    takes about 1-1.5 hours for its 1,800 games on a new log (an estimate until a league has
-    been timed on the PC), less when the log holds some.
+    Time, measured at 4 workers on 2026-10-30: an rs_eval run of 300 matches takes about 10-13
+    minutes (the one run timed at 8 workers too was no faster there), so the default (2
+    wait_keeps x 2 rules, for the checkpoint and the control: 8 runs) takes about 1.5 hours. The
+    league plays about 2.2 s a game at 4 workers: about 66 minutes for 1,800 games when the
+    champion is new to the log, about 51 for 1,400 when its anchor games are there, less when
+    the log holds more.
 
 .PARAMETER Ckpt
     One or more checkpoints, comma-separated (default runs\tokens\dt_big_hog_np\best.pt).
@@ -70,8 +75,11 @@
     rs_eval matches per run (default 300).
 
 .PARAMETER Workers
-    rs_eval processes (default 8). Use 6 if RAM runs short. The league uses at most 6, and
-    tools\rs_league_eval.py lowers that further when free memory is short.
+    rs_eval processes (default 4: the PC froze at 8 rs_eval workers on 2026-10-30,
+    docs\SPARRING_RUNBOOK.md "If something breaks", "If the PC freezes"). 6 only after a watched
+    4-worker run left more than about 7 GB of memory available; not 8 until the freeze is
+    explained. The league uses at most 6, and tools\rs_eval.py and tools\rs_league_eval.py lower
+    the count further when free memory is short.
 
 .PARAMETER Opponent
     rs_eval's reactive opponent (default runs\tokens\live_big\ep01.pt).
@@ -91,12 +99,16 @@
     '_' and '-'), for when a league log already uses that name for another checkpoint.
 
 .PARAMETER LeagueLog
-    The league's JSONL log (default runs\league\model_check.jsonl). Its pairings and report go
-    next to it. runs\league\third_model.jsonl reuses the games scripts\third_model.ps1 played.
+    The league's JSONL log (default runs\league\model_check.jsonl). Its pairings go next to it,
+    and the report as <log name>.<candidate>_vs_<champion>.report.json, one per matchup.
+    runs\league\third_model.jsonl reuses the games scripts\third_model.ps1 played; a matchup
+    that script played writes the file its league wrote, from the same games, and step 1's
+    third_model.report.json stays as it is.
 
 .PARAMETER Champion
-    The league's champion and the rs_eval control (default runs\tokens\live_big_hog\best.pt).
-    Give the current champion's checkpoint: the last model whose league said PASS.
+    The league's champion and the rs_eval control (default runs\tokens\v2_hog_20k\best.pt, the
+    champion since its league PASS of 2026-10-30). Give the current champion's checkpoint: the
+    last model whose league said PASS.
 
 .PARAMETER Noise
     The league's perception-noise profile (default data\noise\default_prior.json, the prior, as
@@ -111,14 +123,14 @@ param(
     [string]$Rules = 'plain,live',
     [ValidateRange(0, 200)][int]$Delay = 21,
     [ValidateRange(1, 100000)][int]$Matches = 300,
-    [ValidateRange(1, 64)][int]$Workers = 8,
+    [ValidateRange(1, 64)][int]$Workers = 4,
     [ValidateNotNullOrEmpty()][string]$Opponent = 'runs\tokens\live_big\ep01.pt',
     [switch]$League,
     [switch]$LeagueOnly,
     [ValidateNotNullOrEmpty()][string]$LeagueKeep = 'own',
     [ValidatePattern('^[A-Za-z0-9_.-]*$')][string]$LeagueName = '',
     [ValidateNotNullOrEmpty()][string]$LeagueLog = 'runs\league\model_check.jsonl',
-    [ValidateNotNullOrEmpty()][string]$Champion = 'runs\tokens\live_big_hog\best.pt',
+    [ValidateNotNullOrEmpty()][string]$Champion = 'runs\tokens\v2_hog_20k\best.pt',
     [ValidateNotNullOrEmpty()][string]$Noise = 'data\noise\default_prior.json',
     [switch]$NoBaseline
 )
@@ -454,7 +466,7 @@ if (($runSweep -and $useBaseline) -or $runLeague) { $need += $championModel }
 if ($runLeague) { $need += $anchorModel }
 foreach ($m in $need) {
     if (-not (Test-Path -LiteralPath $m.Full -PathType Leaf)) {
-        Stop-Run ("ERROR: {0} is missing. live_big_hog and live_big come from scripts\first_model.ps1 (runbook section 14), dt_big_hog_np from scripts\dt_diagnose.ps1 (section 19), v2_hog_20k and v2_hog from scripts\third_model.ps1 (section 20)." -f $m.Full)
+        Stop-Run ("ERROR: {0} is missing. live_big_hog and live_big come from scripts\first_model.ps1 (runbook section 14), dt_big_hog_np from scripts\dt_diagnose.ps1 (section 19), v2_hog_20k (the default -Champion) and v2_hog from scripts\third_model.ps1 (section 20)." -f $m.Full)
     }
 }
 # The checkpoints and the champion as one plain array. Not '@($models) + @($championModel)':
@@ -544,6 +556,11 @@ if ($runLeague) {
             }
         }
     }
+    # The report, one per matchup next to the log, so that a run on runs\league\third_model.jsonl
+    # does not write over step 1's third_model.report.json (rs_league_eval's default).
+    # scripts\third_model.ps1's $leagueReport is the same name for its matchup.
+    $leagueReportFile = '{0}.{1}_vs_{2}.report.json' -f [System.IO.Path]::GetFileNameWithoutExtension($leagueLogModel.Full), $candName, $championModel.Name
+    $leagueReportModel = Resolve-Model (Join-Path (Split-Path -Parent $leagueLogModel.Full) $leagueReportFile)
     $clashes = @(Find-NameClashes $leaguePlayers $leagueLogModel.Full)
     foreach ($c in @($clashes | Where-Object { -not $_.Fatal })) {
         Write-Both ("warning: name clash in another log: {0}. This run's games go to {1}, which the league checks; that other log keeps its own games." -f $c.Text, $leagueLogModel.Rel) 'Yellow'
@@ -553,16 +570,27 @@ if ($runLeague) {
         foreach ($c in $fatalClashes) { Write-Both ("name clash: {0}" -f $c.Text) 'Red' }
         Stop-Run ("ERROR: a player name of this run already means another checkpoint (above): in {0}, where the league would refuse it, or for the candidate in another log, where one name must mean one checkpoint. For the candidate give another name with -LeagueName. For the champion or the anchor in {0}, its checkpoint changed since those games were played: restore it, or give another -LeagueLog (or another -Champion). Nothing has run yet." -f $leagueLogModel.Rel)
     }
-    Write-Both ("league: {0}={1} (wait_keep {2}) against the champion {3}={4} (wait_keep {5}), anchor {6}={7}; 24-tick delay, noise {8}, 1,000 + 400 games (--full), at most {9} workers; log {10}" -f
+    Write-Both ("league: {0}={1} (wait_keep {2}) against the champion {3}={4} (wait_keep {5}), anchor {6}={7}; 24-tick delay, noise {8}, 1,000 + 400 games (--full), at most {9} workers; log {10}, report {11}" -f
         $candName, $candModel.Rel, $candEval.Text, $championModel.Name, $championModel.Rel,
         $champOwn.Text, $anchorModel.Name, $anchorModel.Rel, $Noise, $leagueWorkers,
-        $leagueLogModel.Rel)
+        $leagueLogModel.Rel, $leagueReportModel.Rel)
 }
 
-$evalMinutes = [Math]::Ceiling($toRun * 10.0 * ($matchCount / 300.0) * (8.0 / $Workers))
-Write-Both ("plan: {0} rs_eval run(s), about {1} min (about 10 min per 300 matches at 8 workers){2}" -f
-    $toRun, $evalMinutes,
-    $(if ($runLeague) { '; then the league, about 1-1.5 h for 1,800 games on a new log (the games its log holds are not played again)' } else { '' }))
+# The times measured at 4 workers on 2026-10-30 (runbook section 19, model_check.ps1's table):
+# rs_eval about 10-13 min per 300 matches (the one run timed at 8 workers too was no faster),
+# the league about 2.2 s a game. Fewer workers take longer in proportion; more are not counted
+# as faster, since none was measured so.
+$evalScale = ($matchCount / 300.0) * [Math]::Max(1.0, 4.0 / $Workers)
+$evalLow = [Math]::Ceiling($toRun * 10.0 * $evalScale)
+$evalHigh = [Math]::Ceiling($toRun * 13.0 * $evalScale)
+$leagueScale = [Math]::Max(1.0, 4.0 / $leagueWorkers)
+$leagueText = ''
+if ($runLeague) {
+    $leagueText = ('; then the league, about {0} min for 1,800 games when the champion is new to the log, about {1} for 1,400 when its anchor games are there (about 2.2 s a game at 4 workers; the games its log holds are not played again)' -f
+        [Math]::Round(1800 * 2.2 * $leagueScale / 60.0), [Math]::Round(1400 * 2.2 * $leagueScale / 60.0))
+}
+Write-Both ("plan: {0} rs_eval run(s), about {1}-{2} min (about 10-13 min per 300 matches at 4 workers, measured 2026-10-30; 8 were no faster){3}" -f
+    $toRun, $evalLow, $evalHigh, $leagueText)
 foreach ($e in $plan) {
     $note = $(if ($e.Same) { '  the same run as ' + $e.Same + ': not run again' } else { '' })
     Write-Both ("  {0}  ({1}){2}" -f $e.Label, $e.Ckpt, $note)
@@ -629,7 +657,8 @@ if ($runLeague) {
                     '--anchor', ('{0}={1}' -f $anchorModel.Name, $anchorModel.Rel),
                     '--delay', '24', '--noise', $Noise,
                     '--champion-games', '1000', '--anchor-games', '400', '--full',
-                    '--workers', "$leagueWorkers", '--log', $leagueLogModel.Rel)
+                    '--workers', "$leagueWorkers", '--log', $leagueLogModel.Rel,
+                    '--report', $leagueReportModel.Rel)
 #endregion
     $leagueCheck = Invoke-Check ("league: {0} vs {1}, anchor {2}" -f $candName, $championModel.Name, $anchorModel.Name) $RG $leagueArgs
 }
@@ -690,7 +719,7 @@ if ($runLeague) {
     } elseif ($decision -eq 'INCOMPLETE') {
         Write-Both ("league verdict: INCOMPLETE: games are missing (see the error lines above). Run it again with -LeagueOnly and the same -Ckpt, -LeagueKeep, -LeagueName, -LeagueLog and -Champion: the league plays only the games its log lacks. {0}" -f $rule) 'Yellow'
     } elseif ($decision) {
-        Write-Both ("league verdict: {0}. Keep {1} in the live runner. The beats_champion and anchor lines above say which condition decided it. {2}" -f $decision, $championModel.Name, $rule) 'Yellow'
+        Write-Both ("league verdict: {0}. Keep {1} as the champion. The beats_champion and anchor lines above say which condition decided it. {2}" -f $decision, $championModel.Name, $rule) 'Yellow'
     } else {
         Write-Both "league verdict: none: the league step gave no gate line for the candidate (see its output above)." 'Red'
         if ($null -eq $leagueCheck -or $leagueCheck.Ok) { $failedSteps.Add('league: no gate decision') }

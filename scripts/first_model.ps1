@@ -14,7 +14,10 @@
         powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\first_model.ps1
 
 .PARAMETER Workers
-    Processes for row building and evaluation (default 8). Use 6 if RAM runs short.
+    Processes for row building and evaluation (default 4: the PC froze at 8 rs_eval workers
+    on 2026-10-30, docs\SPARRING_RUNBOOK.md "If something breaks", "If the PC freezes"). 6
+    only after a watched 4-worker run left more than about 7 GB of memory available; not 8
+    until the freeze is explained.
 
 .PARAMETER Others
     Non-Hog matches added to the rows (default 20000, as the author used).
@@ -28,7 +31,7 @@
     Example: -From hog re-runs the fine-tune and the evaluations only.
 #>
 param(
-    [int]$Workers = 8,
+    [int]$Workers = 4,
     [int]$Others = 20000,
     [long]$MaxRows = 0,
     [ValidateSet('rows', 'general', 'hog', 'eval')][string]$From = 'rows'

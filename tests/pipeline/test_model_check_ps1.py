@@ -8,7 +8,8 @@ PATH, as tests/pipeline/test_requirements.py does for scripts/setup_windows.ps1)
   tools/rs_league_eval.py is one their argparse defines. Those flags sit in two #region blocks,
   and no flag literal sits outside them;
 - the league step plays at scripts/third_model.ps1's settings (the same flags, delay, games,
-  worker cap, noise default, champion and anchor);
+  worker cap, noise default, champion and anchor), and both write their report per matchup
+  under one name (--report), so neither writes over step 1's third_model.report.json;
 - its parameters are the documented ones, and the runbook's model_check.ps1 commands use only
   those;
 - PS 5.1 reads a .ps1 without a byte-order mark in the ANSI code page, so the file is ASCII; it
@@ -28,12 +29,22 @@ PATH, as tests/pipeline/test_requirements.py does for scripts/setup_windows.ps1)
   changed source, and two checkpoints of one run never share a name;
 - a name clash stops the run only where the league would refuse it (-LeagueLog) or for the
   candidate, and no advice moves a league log;
-- scripts/dt_diagnose.ps1's summary pattern is no longer shadowed by a parameter.
+- scripts/dt_diagnose.ps1's summary pattern is no longer shadowed by a parameter;
+- since 2026-10-30 (the freeze at 8 rs_eval workers; the champion v2_hog_20k): model_check.ps1,
+  third_model.ps1, dt_diagnose.ps1, rl_train.ps1, first_model.ps1 and second_model.ps1 default
+  to 4 workers, with a help line that points at the runbook's freeze note, and rl_train.ps1's
+  bench plays at most -Workers; model_check.ps1's plan: line counts the times measured at 4
+  workers; third_model.ps1 takes -Champion (default v2_hog_20k), names it as model_check.ps1's
+  Resolve-Model does, checks it before any step (a file; not the candidate, the anchor or the
+  general model; its games in the league log of the same file and path), and plays it in the
+  eval step's reference run and the league; its start-of-run refusal of a candidate name with
+  games in the log stays.
 """
 from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -277,10 +288,10 @@ def test_param_block_and_help():
     assert sorted(helped) == sorted(PARAMS)
     for needle in ("[string[]]$Ckpt = @('runs\\tokens\\dt_big_hog_np\\best.pt')",
                    "[string]$Keeps = 'own,1.0'", "[string]$Rules = 'plain,live'",
-                   "[int]$Delay = 21", "[int]$Matches = 300", "[int]$Workers = 8",
+                   "[int]$Delay = 21", "[int]$Matches = 300", "[int]$Workers = 4",
                    "$Opponent = 'runs\\tokens\\live_big\\ep01.pt'",
                    "$LeagueLog = 'runs\\league\\model_check.jsonl'",
-                   "$Champion = 'runs\\tokens\\live_big_hog\\best.pt'",
+                   "$Champion = 'runs\\tokens\\v2_hog_20k\\best.pt'",
                    "$Noise = 'data\\noise\\default_prior.json'"):
         assert needle in text, needle
 
@@ -341,7 +352,11 @@ def test_league_step_matches_third_model():
     third = THIRD.read_text(encoding="utf-8")
     m = re.search(r"Invoke-Step \"league:.*?'--log', \$leagueLog\)\)", third, re.S)
     assert m, "third_model.ps1's league step"
+    # The same flags, --report too: both scripts write one report per matchup next to the log,
+    # under the same name (test_league_report_goes_next_to_the_log_per_matchup), so neither
+    # writes over step 1's third_model.report.json, rs_league_eval's default.
     assert set(FLAG.findall(ours)) == set(FLAG.findall(m.group(0)))
+    assert "'--report', $leagueReport, '--log', $leagueLog))" in m.group(0)
     for needle in ("'--delay', '24'", "'--champion-games', '1000'", "'--anchor-games', '400'",
                    "'--full'", "'--noise', $Noise"):
         assert needle in ours and needle in m.group(0), needle
@@ -349,8 +364,12 @@ def test_league_step_matches_third_model():
     assert "[Math]::Min($Workers, 6)" in text and "[Math]::Min($Workers, 6)" in third
     assert "$Noise = 'data\\noise\\default_prior.json'" in third
     # The champion and the anchor under third_model.ps1's names and paths, so that one name
-    # means one checkpoint in both logs.
-    assert "$champion = 'runs\\tokens\\live_big_hog\\best.pt'" in third
+    # means one checkpoint in both logs: the same -Champion default, named the same way
+    # (test_third_model_names_the_champion_as_resolve_model_does).
+    default = "[ValidateNotNullOrEmpty()][string]$Champion = 'runs\\tokens\\v2_hog_20k\\best.pt'"
+    assert default in third and default in text
+    assert "'--champion', \"$championName=$championCkpt\"" in m.group(0)
+    assert "('{0}={1}' -f $championModel.Name, $championModel.Rel)" in ours
     assert "$anchor = 'runs\\tokens\\live_big\\ep01.pt'" in third
     assert "\"live_big=$anchor\"" in third
     assert "$anchorModel = Resolve-Model 'runs\\tokens\\live_big\\ep01.pt'" in text
@@ -537,7 +556,9 @@ def test_keep_copy_never_replaces_another_or_a_changed_source():
 
 def test_two_checkpoints_of_one_run_never_share_a_name():
     rest, _ = _script_level(_text())
-    m = re.search(r"\$byName = @\{\}\s*foreach \(\$m in @\(\$models\) \+ @\(\$championModel\)\) \{"
+    # $checkModels: the checkpoints and the champion as one plain array (44e7c02; see
+    # test_no_addition_onto_a_generic_list).
+    m = re.search(r"\$byName = @\{\}\s*foreach \(\$m in \$checkModels\) \{"
                   r"\s*\$nameKey = \$m\.Name\.ToLowerInvariant\(\)\s*"
                   r"if \(\$byName\.ContainsKey\(\$nameKey\) -and \$byName\[\$nameKey\]\.Full -ine "
                   r"\$m\.Full\) \{\s*Stop-Run", rest)
@@ -561,6 +582,9 @@ def test_verdict_lines_name_the_champion_rule_and_a_league_only_rerun():
     text = _text()
     assert "is the new champion: every later candidate plays it (-Champion {2})" in text
     assert "after a section 17 dry run" in text
+    # A FAIL keeps the champion; which model the live runner plays is the runbook's business.
+    assert "league verdict: {0}. Keep {1} as the champion." in text
+    assert "in the live runner. The beats_champion" not in text
     assert "Run it again with -LeagueOnly and the same -Ckpt, -LeagueKeep, -LeagueName, -LeagueLog and -Champion" in text
     # 'own' refusal: the live runner refuses taps only when args.json is missing.
     assert "the live runner refuses taps only when args.json is missing" in text
@@ -586,3 +610,415 @@ def test_dt_diagnose_summary_pattern_is_not_shadowed():
     assert "$line -match $script:keep" in body
     assert not re.search(r"(?<![\w:`])\$keep\b", body, re.I)
     assert "$script:summary.Add(" in body and "$script:failed.Add(" in body
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-30: 4 workers, the per-matchup report, the champion in third_model.ps1
+# ---------------------------------------------------------------------------
+
+RL_TRAIN = ROOT / "scripts" / "rl_train.ps1"
+TRAIN_LOOP = ROOT / "tools" / "rl" / "train_loop.py"
+FIRST = ROOT / "scripts" / "first_model.ps1"
+SECOND = ROOT / "scripts" / "second_model.ps1"
+#: Each engine script and the line in its param block that sets the -Workers default.
+WORKER_DEFAULTS = {SCRIPT: "[ValidateRange(1, 64)][int]$Workers = 4",
+                   THIRD: "[ValidateRange(1, 64)][int]$Workers = 4",
+                   DT_DIAGNOSE: "[ValidateRange(1, 64)][int]$Workers = 4",
+                   RL_TRAIN: "[ValidateRange(0, 64)][int]$Workers = 4",
+                   FIRST: "[int]$Workers = 4",
+                   SECOND: "[int]$Workers = 4"}
+
+
+def _help_block(text: str, name: str) -> str:
+    """The text of a .PARAMETER block, up to the next one or the end of the help."""
+    m = re.search(r"^\.PARAMETER " + name + r"\n(.*?)(?=^\.PARAMETER |^#>)", text, re.M | re.S)
+    assert m, f".PARAMETER {name}"
+    return " ".join(m.group(1).split())
+
+
+def test_engine_scripts_default_to_4_workers():
+    # The PC froze 6 minutes into an 8-worker v2 rs_eval run on 2026-10-30; runs at 4 since were
+    # stable and as fast (runbook, "If something breaks", "If the PC freezes").
+    for path, line in WORKER_DEFAULTS.items():
+        text = path.read_text(encoding="utf-8")
+        assert text.isascii(), path.name
+        m = re.search(r"^param\((.*?)^\)", text, re.M | re.S)
+        assert m and line in m.group(1), path.name
+        assert len(re.findall(r"\]\$Workers = ", m.group(1))) == 1, path.name
+        block = _help_block(text, "Workers")
+        assert "default 4" in block and '"If the PC freezes"' in block, (path.name, block)
+        assert "default 8" not in block and "default 0" not in block, (path.name, block)
+        # The examples in the help start no 8-worker run.
+        assert "-Workers 8" not in text, path.name
+    # A -Workers 0 still means the RL driver's own default.
+    assert "0: the driver's own" in _help_block(RL_TRAIN.read_text(encoding="utf-8"), "Workers")
+    assert "if ($Workers -gt 0) { $argList += @('--workers', \"$Workers\") }" in \
+        RL_TRAIN.read_text(encoding="utf-8")
+    # The runbook's commands of the scripts and tools start no 8-worker job either.
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert not re.search(r"--workers 8\b|-Workers 8\b|default 8\b", runbook)
+    for stale in ("uses less RAM", "re-run with `--workers 6`"):
+        assert stale not in runbook, stale
+
+
+def test_rl_bench_measures_at_most_the_workers_asked_for():
+    # Without --bench-workers, train_loop's bench plays 1, half and all of what RAM and CPU allow
+    # (bench_counts), about 9 workers on the 16 GB PC: more than the 8 that froze it. rl_train.ps1
+    # passes 1, half and all of -Workers instead (1,2,4 by default); -Workers 0 leaves it.
+    text = RL_TRAIN.read_text(encoding="utf-8")
+    m = re.search(r"^if \(\$Bench\) \{\n(.*?)^\}", text, re.M | re.S)
+    assert m, "rl_train.ps1's bench arguments"
+    block = m.group(1)
+    assert "$argList += @('--bench', (\"{0}m\" -f $BenchMinutes))" in block
+    counts_line = ("$benchCounts = @(@(1, [Math]::Max(1, [int][Math]::Floor($Workers / 2.0)), "
+                   "$Workers) | Sort-Object -Unique)")
+    assert re.search(r"if \(\$Workers -gt 0\) \{\s*" + re.escape(counts_line) + r"\s*"
+                     + re.escape("$argList += @('--bench-workers', ($benchCounts -join ','))")
+                     + r"\s*\}", block)
+    assert text.index("'--bench-workers'") < text.index("$code = Invoke-Py $title $RG $argList")
+
+    def ps_counts(workers):        # the line above: Floor of a positive int / 2 is //, -Unique sorts
+        return ",".join(str(c) for c in sorted({1, max(1, workers // 2), workers}))
+
+    assert ps_counts(4) == "1,2,4"            # the default
+    assert [ps_counts(w) for w in (1, 2, 3, 5, 6)] == ["1", "1,2", "1,3", "1,2,5", "1,3,6"]
+    for w in range(1, 65):
+        assert max(int(c) for c in ps_counts(w).split(",")) == w
+    # train_loop reads them as its --bench-workers (comma-separated counts) before its own caps.
+    assert "--bench-workers" in _argparse_flags(TRAIN_LOOP)
+    loop = TRAIN_LOOP.read_text(encoding="utf-8")
+    body = loop[loop.index("    def bench_counts(self)"):loop.index("    def bench(self)")]
+    assert body.index("if a.bench_workers:") < body.index("R.ram_check(")
+    assert ('counts = sorted({int(x) for x in str(a.bench_workers).split(",") if x.strip()})'
+            in body)
+    assert sorted({int(x) for x in ps_counts(4).split(",") if x.strip()}) == [1, 2, 4]
+    help_block = _help_block(text, "Bench")
+    assert "1, 2 and 4 by default" in help_block
+
+
+def _ps_number(expr: str, env: dict) -> float:
+    """A PowerShell arithmetic expression of this script ([Math]::Max / Ceiling / Round, $names)
+    evaluated in Python. .NET's Math.Round rounds half to even, as Python's round does."""
+    py = (expr.replace("[Math]::Max", "max").replace("[Math]::Ceiling", "math.ceil")
+          .replace("[Math]::Round", "round"))
+    py = re.sub(r"\$(\w+)", r"\1", py)
+    return eval(py, {"__builtins__": {}, "max": max, "round": round, "math": math}, env)
+
+
+def test_plan_line_counts_the_times_measured_at_4_workers():
+    text = _text()
+    rest, _ = _script_level(text)
+    # rs_eval about 10-13 min per 300 matches at 4 workers (8 were no faster), the league about
+    # 2.2 s a game at 4: 1,000 games in 37 min, 1,400 in about 51, 1,800 in about 66.
+    assert "8.0 / $Workers" not in text and "at 8 workers){2}" not in text
+    assert "about 10-13 min per 300 matches at 4 workers, measured 2026-10-30" in text
+    exprs = {}
+    for name in ("evalScale", "evalLow", "evalHigh", "leagueScale"):
+        m = re.search(r"^\$" + name + r" = (.+)$", rest, re.M)
+        assert m, name
+        exprs[name] = m.group(1)
+    m = re.search(r"\$leagueText = \('[^']*' -f\s*(\[Math\]::Round\([^\n]*?\)), "
+                  r"(\[Math\]::Round\([^\n]*\))\)\s*\}", text)
+    assert m, "the league's part of the plan line"
+    games_1800, games_1400 = m.group(1), m.group(2)
+    assert "1800 * 2.2" in games_1800 and "1400 * 2.2" in games_1400
+
+    def plan(runs, matches, workers):
+        env = {"toRun": runs, "matchCount": matches, "Workers": workers,
+               "leagueWorkers": min(workers, 6)}
+        for name in ("evalScale", "evalLow", "evalHigh", "leagueScale"):
+            env[name] = _ps_number(exprs[name], env)
+        return (env["evalLow"], env["evalHigh"], _ps_number(games_1800, env),
+                _ps_number(games_1400, env))
+
+    assert plan(8, 300, 4) == (80, 104, 66, 51)          # the default run: about 1.5 h, then the league
+    assert plan(8, 300, 6) == (80, 104, 66, 51)          # more workers: not counted as faster
+    assert plan(8, 300, 8) == (80, 104, 66, 51)
+    assert plan(8, 300, 2) == (160, 208, 132, 103)       # fewer: slower in proportion
+    assert plan(1, 150, 4) == (5, 7, 66, 51)
+    assert plan(0, 300, 4)[:2] == (0, 0)                 # -LeagueOnly
+
+
+def test_league_report_goes_next_to_the_log_per_matchup(monkeypatch):
+    text = _text()
+    region = _regions(text)["rs_league_eval"][0]
+    assert "'--report', $leagueReportModel.Rel" in region
+    m = re.search(r"\$leagueReportFile = '([^']*)' -f \[System\.IO\.Path\]::"
+                  r"GetFileNameWithoutExtension\(\$leagueLogModel\.Full\), \$candName, "
+                  r"\$championModel\.Name", text)
+    assert m, "the report's file name"
+    pattern = m.group(1)
+    assert ("$leagueReportModel = Resolve-Model (Join-Path (Split-Path -Parent "
+            "$leagueLogModel.Full) $leagueReportFile)") in text
+    # Named at plan time, before the clash checks and long before the league step uses it.
+    rest, _ = _script_level(text)
+    assert rest.index("$leagueReportModel = ") < rest.index("$clashes = @(Find-NameClashes")
+    assert rest.index("$leagueReportModel = ") < rest.index("$leagueArgs = @(")
+
+    def name(log_stem, cand, champ):        # PowerShell's -f with {0} {1} {2}, as str.format
+        return pattern.format(log_stem, cand, champ)
+
+    # Section 20 step 2's v2_hog against the champion on the third model's log, and the default.
+    assert name("third_model", "v2_hog", "v2_hog_20k") == "third_model.v2_hog_vs_v2_hog_20k.report.json"
+    assert name("model_check", "dt_big_hog_np", "v2_hog_20k") == \
+        "model_check.dt_big_hog_np_vs_v2_hog_20k.report.json"
+    # third_model.ps1 names its league's report the same way on its own log (a literal there: its
+    # log is fixed), so one matchup on that log has one report file, whichever script wrote it.
+    third = _third()
+    t = re.search(r"^\$leagueReport = '([^']*)' -f \$candidateName, \$championName$", third, re.M)
+    assert t, "third_model.ps1's report name"
+    assert "$leagueLog = 'runs\\league\\third_model.jsonl'" in third
+    for cand, champ in (("v2_hog", "v2_hog_20k"), ("v2_hog_full", "dt_big_hog_np")):
+        assert t.group(1).format(cand, champ) == \
+            "runs\\league\\" + name("third_model", cand, champ)
+    third_code = _strip(third)
+    assert third_code.index("$leagueReport = ") < third_code.index("Invoke-Step '")
+    pytest.importorskip("numpy")
+    monkeypatch.syspath_prepend(str(ROOT / "tools"))
+    import argparse
+    import importlib
+    LE = importlib.import_module("rs_league_eval")
+    log = Path("runs/league/third_model.jsonl")
+    # Without --report the league writes next to its log: step 1's third_model.report.json.
+    assert LE._report_path(argparse.Namespace(report=None), log).name == "third_model.report.json"
+    assert name("third_model", "v2_hog", "v2_hog_20k") != "third_model.report.json"
+    args = LE.build_parser().parse_args(["run", "--candidate", "a=x.pt", "--champion", "b=y.pt",
+                                         "--report", "runs/league/r.report.json"])
+    assert LE._report_path(args, log) == Path("runs/league/r.report.json")
+
+
+def _third() -> str:
+    return THIRD.read_text(encoding="utf-8")
+
+
+def test_third_model_champion_parameter_and_help():
+    third = _third()
+    params = _params(third)
+    assert params[-1] == "Champion" and params.count("Champion") == 1
+    helped = re.findall(r"^\.PARAMETER\s+(\w+)", third, re.M)
+    assert sorted(helped) == sorted(params)
+    block = _help_block(third, "Champion")
+    assert "default runs\\tokens\\v2_hog_20k\\best.pt" in block
+    assert "must not be the candidate" in block
+    # live_big_hog is a former champion: no help or comment calls it the live model or the best.
+    for stale in ("the live model and the best so far", "beats live_big_hog:",
+                  "hard-wired"):
+        assert stale not in third, stale
+    # PowerShell names ignore case: $champion would be the -Champion parameter, so no script code
+    # assigns it (the path the tools get is $championCkpt); the one match is the default.
+    rest, assigned = _script_level(third)
+    assert re.findall(r"(?<![\w:`])\$champion\s*[-+*/]?=(?!=)", rest, re.I) == ["$Champion ="]
+    assert {"championckpt", "championname", "championfull"} <= assigned
+
+
+def test_third_model_names_the_champion_as_resolve_model_does():
+    """Resolve-Model's lines, renamed, are third_model.ps1's: one path form and one league name
+    for a checkpoint in both scripts' logs."""
+    raw, _ = _function(_text(), "Resolve-Model")
+    rename = {"PathText": "Champion", "clean": "championText", "joined": "championJoined",
+              "full": "championFull", "prefix": "rootPrefix", "rel": "championCkpt",
+              "file": "championFile", "folder": "championFolder", "modelName": "championName",
+              "script:root": "root"}
+    lines = [ln.strip() for ln in raw.splitlines()
+             if re.match(r"\s*\$(clean|joined|full|prefix|rel|file|folder|modelName) = ", ln)]
+    assert len(lines) == 8
+    third = _third()
+    for line in lines:
+        ours = re.sub(r"\$(script:root|\w+)", lambda m: "$" + rename.get(m.group(1), m.group(1)),
+                      line)
+        assert ours in third, ours
+
+    # The same rules in Python (ntpath: the PC's paths), for the names the runbook uses.
+    import ntpath
+
+    def resolve(text, root="C:\\hcr"):
+        clean = text.strip().strip("\"'")
+        full = ntpath.normpath(clean if ntpath.isabs(clean) else ntpath.join(root, clean))
+        prefix = root.rstrip("\\") + "\\"
+        rel = full[len(prefix):] if full.lower().startswith(prefix.lower()) else full
+        file, folder = ntpath.basename(full), ntpath.basename(ntpath.dirname(full))
+        name = folder if file.lower() == "best.pt" else f"{folder}_{ntpath.splitext(file)[0]}"
+        return rel, name
+
+    assert resolve("runs\\tokens\\v2_hog_20k\\best.pt") == ("runs\\tokens\\v2_hog_20k\\best.pt",
+                                                            "v2_hog_20k")
+    assert resolve("C:\\hcr\\runs\\tokens\\live_big_hog\\best.pt") == \
+        ("runs\\tokens\\live_big_hog\\best.pt", "live_big_hog")
+    assert resolve("runs/rl/hog_rl1/it0010.pt") == ("runs\\rl\\hog_rl1\\it0010.pt",
+                                                    "hog_rl1_it0010")
+    assert resolve("D:\\keep\\v2_hog_20k\\best.pt") == ("D:\\keep\\v2_hog_20k\\best.pt",
+                                                        "v2_hog_20k")
+
+
+def test_third_model_checks_the_champion_before_any_step():
+    third = _third()
+    code = _strip(third)
+    first_step = code.index("Invoke-Step '")
+    checks = [
+        r"if \(-not \(Test-Path -LiteralPath \$championFull -PathType Leaf\)\) \{\s*Stop-Run",
+        r"if \(-not \[regex\]::IsMatch\(\$championName, '[^']*'\)\) \{\s*Stop-Run",
+        r"if \(\$championFull -ieq \$candidateFull -or \$championName -ieq \$candidateName\) "
+        r"\{\s*Stop-Run",
+        r"if \(\$championFull -ieq \$anchorFull -or \$championName -ieq '[^']*'\) \{\s*Stop-Run",
+        # Not this run's general model either: the run retrains it in place (-Champion
+        # runs\tokens\v2_big\best.pt), and an all-deck model is no Hog 2.6 champion.
+        r"if \(\$championFull -ieq \$generalFull -or \$championName -ieq \$generalName\) "
+        r"\{\s*Stop-Run",
+    ]
+    for pattern in checks:
+        m = re.search(pattern, code)
+        assert m and m.start() < first_step, pattern
+    assert "$candidateFull = [System.IO.Path]::GetFullPath((Join-Path $root $candidate))" in third
+    assert "$anchorFull = [System.IO.Path]::GetFullPath((Join-Path $root $anchor))" in third
+    assert "$generalFull = [System.IO.Path]::GetFullPath((Join-Path $root $general))" in third
+    assert code.index("$general = ") < code.index("$generalFull = ")
+    assert "-ieq 'live_big')" in third              # the anchor's league name
+    # The checks use the champion's own full path, not Join-Path $root (an absolute -Champion).
+    m = re.search(r"^\$need = @\(([^)]*)\)", third, re.M)
+    assert m and "champion" not in m.group(1).lower()
+
+
+def test_third_model_checks_the_champions_games_in_the_league_log(tmp_path, monkeypatch):
+    """rs_league_eval refuses a player whose games in the log were played under another identity
+    (check_identities: the AgentSpec with the checkpoint path as given, and the file's digest),
+    but only at the league step, after rows, training and eval. third_model.ps1 reads the log's
+    run headers at the start, as model_check.ps1's Find-NameClashes does, and stops on another
+    file (digest) or another spelling of the path for the champion's name."""
+    third = _third()
+    code = _strip(third)
+    first_step = code.index("Invoke-Step '")
+    seq = ["$leagueLogFull = Join-Path $root $leagueLog",
+           "if (Test-Path -LiteralPath $leagueLogFull) {",
+           "$championDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $championFull).Hash"
+           ".ToLowerInvariant().Substring(0, 16)",
+           "$runHeaders = @(Select-String -LiteralPath $leagueLogFull -SimpleMatch -Pattern '",
+           "foreach ($hit in $runHeaders) {",
+           "try { $header = $hit.Line | ConvertFrom-Json } catch { $header = $null }",
+           "foreach ($prop in $header.players.PSObject.Properties) {",
+           "if ($prop.Name -cne $championName) { continue }",
+           "$oldCkpt = [string]$prop.Value.ckpt",
+           "$oldDigest = [string]$prop.Value.ckpt_digest"]
+    at = 0
+    for needle in seq:
+        at = code.index(needle, at)
+        assert at < first_step, needle
+    for pattern in (r"if \(\$oldDigest -and \$oldDigest -ne \$championDigest\) \{\s*Stop-Run",
+                    r"if \(\$oldCkpt -cne \$championCkpt\) \{\s*Stop-Run"):
+        m = re.search(pattern, code)
+        assert m and at < m.start() < first_step, pattern
+    assert "-SimpleMatch -Pattern '\"kind\":\"league_run\"'" in third
+    # The digest as model_check.ps1 takes it (Get-CkptDigest) and rs_league_eval's ckpt_digest.
+    assert ("(Get-FileHash -Algorithm SHA256 -LiteralPath $DigestPath).Hash.ToLowerInvariant()"
+            ".Substring(0, 16)") in _text()
+    league = LEAGUE.read_text(encoding="utf-8")
+    for needle in ('KIND_RUN, KIND_GAME, KIND_ERROR = "league_run", "league_game", "league_error"',
+                   '"players": {n: {**i, "id": ids[n]} for n, i in idents.items()}',
+                   'return {**agent.to_dict(), "ckpt_digest": digest}',
+                   "return h.hexdigest()[:16]"):
+        assert needle in league, needle
+
+    import hashlib
+    import ntpath
+
+    def resolve(text, root="C:\\hcr"):          # Resolve-Model's Rel and Name (ntpath: the PC)
+        clean = text.strip().strip("\"'")
+        full = ntpath.normpath(clean if ntpath.isabs(clean) else ntpath.join(root, clean))
+        prefix = root.rstrip("\\") + "\\"
+        rel = full[len(prefix):] if full.lower().startswith(prefix.lower()) else full
+        file, folder = ntpath.basename(full), ntpath.basename(ntpath.dirname(full))
+        return rel, folder if file.lower() == "best.pt" else f"{folder}_{ntpath.splitext(file)[0]}"
+
+    def refusal(lines, champion_text, digest):
+        """The script's loop: None, or why it stops."""
+        ckpt, name = resolve(champion_text)
+        for line in lines:
+            if '"kind":"league_run"' not in line:
+                continue
+            for player, value in json.loads(line)["players"].items():
+                if player != name:                      # -cne: names are case-sensitive
+                    continue
+                old_ckpt, old_digest = str(value.get("ckpt") or ""), str(value.get("ckpt_digest") or "")
+                if old_digest and old_digest != digest:
+                    return "file"
+                if old_ckpt != ckpt:
+                    return "path"
+        return None
+
+    blob = b"v2_hog_20k weights"
+    d20k = hashlib.sha256(blob).hexdigest()[:16]
+
+    def header(players):
+        return json.dumps({"kind": "league_run", "players": players}, separators=(",", ":"))
+
+    step1 = header({"v2_hog_20k": {"ckpt": "runs\\tokens\\v2_hog_20k\\best.pt", "ckpt_digest": d20k},
+                    "live_big_hog": {"ckpt": "runs\\tokens\\live_big_hog\\best.pt",
+                                     "ckpt_digest": "1" * 16},
+                    "live_big": {"ckpt": "runs\\tokens\\live_big\\ep01.pt", "ckpt_digest": "2" * 16}})
+    game = json.dumps({"kind": "league_game", "teams": ["v2_hog_20k", "live_big"]},
+                      separators=(",", ":"))
+    log = [step1, game]
+    # Step 2 with the default: the same path and file as step 1's candidate games.
+    assert refusal(log, "runs\\tokens\\v2_hog_20k\\best.pt", d20k) is None
+    assert refusal(log, "C:\\hcr\\runs\\tokens\\v2_hog_20k\\best.pt", d20k) is None
+    # Another spelling of the path: the league compares it as written.
+    assert refusal(log, "Runs\\Tokens\\v2_hog_20k\\best.pt", d20k) == "path"
+    assert refusal(log, "D:\\keep\\v2_hog_20k\\best.pt", d20k) == "path"
+    # The same path, another file (retrained or restored from elsewhere).
+    assert refusal(log, "runs\\tokens\\v2_hog_20k\\best.pt", "f" * 16) == "file"
+    # A champion new to the log, or a name the league tells apart (case-sensitive), plays.
+    assert refusal(log, "runs\\tokens\\dt_big_hog_np\\best.pt", "3" * 16) is None
+    assert refusal(log, "runs\\tokens\\V2_hog_20k\\best.pt", "f" * 16) is None
+    assert refusal([], "runs\\tokens\\v2_hog_20k\\best.pt", d20k) is None
+
+    pytest.importorskip("numpy")
+    monkeypatch.syspath_prepend(str(ROOT / "tools"))
+    import importlib
+    LE = importlib.import_module("rs_league_eval")
+    ck = tmp_path / "best.pt"
+    ck.write_bytes(blob)
+    assert LE.ckpt_digest(str(ck)) == d20k                 # Get-FileHash, lower-cased, 16 digits
+    # The path's spelling alone changes the identity the league compares (check_identities).
+    same = {"ckpt": "runs\\tokens\\v2_hog_20k\\best.pt", "ckpt_digest": d20k}
+    assert LE.identity_digest(same) != LE.identity_digest(
+        {**same, "ckpt": "Runs\\Tokens\\v2_hog_20k\\best.pt"})
+    assert LE.identity_digest(same) != LE.identity_digest({**same, "ckpt_digest": "f" * 16})
+
+
+def test_third_model_plays_the_champion_in_the_reference_run_and_the_league():
+    third = _third()
+    runs = [ln for ln in third.splitlines() if ln.strip().startswith("Invoke-Run ")]
+    assert len(runs) == 5
+    reference = runs[-1]
+    assert "(reference)" in reference and "$championName" in reference
+    assert "'--ckpt', $championCkpt" in reference and "'--decide', 'live'" in reference
+    m = re.search(r"Invoke-Step \"league: \$candidateName vs \$championName, anchor live_big\".*?"
+                  r"'--log', \$leagueLog\)\)", third, re.S)
+    assert m and "'--champion', \"$championName=$championCkpt\"" in m.group(0)
+    assert "'--report', $leagueReport" in m.group(0)
+    for line in third.splitlines():
+        if re.match(r"\s*(Invoke-Run|Invoke-Step)\b", line) or "'--champion'" in line:
+            assert "live_big_hog" not in line, line
+    # The start line names the champion.
+    assert "champion {9}={10}. Log: {11}" in third and "$championName, $championCkpt, $log" in third
+
+
+def test_third_model_still_refuses_a_candidate_name_with_games_in_the_log():
+    third = _third()
+    code = third                    # raw: the quotes around the name are single-quoted strings
+    m = re.search(r"if \(\$start -le 3\) \{\s*\$leaguePath = Join-Path \$root \$leagueLog\s*"
+                  r"if \(\(Test-Path \$leaguePath\) -and \(Select-String -LiteralPath \$leaguePath "
+                  r"-SimpleMatch -Quiet -Pattern \('\"' \+ \$candidateName \+ '\"'\)\)\) \{\s*"
+                  r"Stop-Run", code)
+    assert m and m.start() < code.index("Invoke-Step '")
+    # The log is JSON without spaces (rs_league_eval append_records), so the quoted name matches
+    # one player exactly: the champion v2_hog_20k's games do not stop the whole-corpus run's v2_hog,
+    # and v2_hog_20k's own name (a -Tag 20k run) is refused.
+    header = json.dumps({"kind": "league_run", "players": {"v2_hog_20k": {"ckpt": "x"},
+                                                           "live_big": {"ckpt": "y"}}},
+                        separators=(",", ":"))
+    game = json.dumps({"kind": "league_game", "teams": ["v2_hog_20k", "live_big"]},
+                      separators=(",", ":"))
+    for line in (header, game):
+        assert '"v2_hog"' not in line and '"v2_hog_20k"' in line
+    source = LEAGUE.read_text(encoding="utf-8")
+    assert 'f.write(json.dumps(rec, separators=(",", ":")) + "\\n")' in source

@@ -45,13 +45,17 @@
     (about 2.5 h).
 
 .PARAMETER Workers
-    Processes for rs_eval (default 8). Use 6 if RAM runs short.
+    Processes for rs_eval (default 4: the PC froze at 8 rs_eval workers on 2026-10-30,
+    docs\SPARRING_RUNBOOK.md "If something breaks", "If the PC freezes"). 6 only after a watched
+    4-worker run left more than about 7 GB of memory available; not 8 until the freeze is
+    explained. tools\rs_eval.py lowers the count further when free memory is short, and its
+    results do not depend on it.
 
 .PARAMETER Steps
     The checks to run, comma-separated (see above), or 'all'. Example: -Steps fullablation
 #>
 param(
-    [ValidateRange(1, 64)][int]$Workers = 8,
+    [ValidateRange(1, 64)][int]$Workers = 4,
     [string]$Steps = 'headroom,waitbias,live,offset,ablation'
 )
 

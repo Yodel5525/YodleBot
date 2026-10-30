@@ -112,13 +112,14 @@ Ingest (N08)
   The store keeps the recording one level down (<sid>/recording), so a recorder pointed at the
   store root by mistake would not see sessions there to prune.
   The deck: 8 cards, each a RoyaleAPI key as in data/ladder/battles_2p6.csv (hog-rider,
-  ronin-hero, cannon-ev1: tools/rs_cards.py's map with its extras) or a catalogue name of
-  classes.json (MinionGiant, which has no key yet), with -ev1 or -hero for the evolution or hero
-  slot. Refused: a card classes.json lacks, a form it lacks, a duplicate, a deck not of 8, and
-  the 22 event-only or internal cards of data/vision/event_cards.json (SuperKnight;
-  MergeMaiden_Normal, where spirit-empress is meant). Warnings, not refusals: the observed slot
-  rules (plan 1.10: at most 2 evolutions, at most 2 heroes and champions together, at most 3 in
-  all) and deck units that have no detector label yet.
+  ronin-hero, cannon-ev1: tools/rs_cards.py's map with its extras, which since 2026-10-30 map
+  minion-giant to MinionGiant, unverified) or a catalogue name of classes.json (MinionGiant),
+  with -ev1 or -hero for the evolution or hero slot. Refused: a card classes.json lacks, a form
+  it lacks, a duplicate, a deck not of 8, and the 22 event-only or internal cards of
+  data/vision/event_cards.json (SuperKnight; MergeMaiden_Normal, where spirit-empress is meant).
+  Warnings, not refusals: the observed slot rules (plan 1.10: at most 2 evolutions, at most 2
+  heroes and champions together, at most 3 in all) and deck units that have no detector label
+  yet.
   Roles (plan 4.4, 4.5, 6): --role auto reads a session id date_DECK_N: friendly 2 of a deck is
   gold (held out, never trained on), deck A's friendly 4 is dev (early stopping only), every
   other friendly trains. --capture natural (Round 0) and field (clanmate friendlies) are gold
