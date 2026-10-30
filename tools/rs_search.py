@@ -1,4 +1,5 @@
-r"""Search on a rebuilt board (docs/LIVE_SEARCH_PLAN.md): BatchedPolicy (S05), the search core (S06).
+r"""Search on a rebuilt board (docs/LIVE_SEARCH_PLAN.md): BatchedPolicy (S05), the search core (S06),
+the simulator seat (S08) and the privileged true-copy trials (S09).
 
     from tools import rs_search as SR             # or `import rs_search` (tools/ on sys.path)
     policy = SR.BatchedPolicy(loaded.model)       # rs_checkpoint.load_policy(...).model, eval mode
@@ -183,20 +184,87 @@ PRESETS (SearchConfig.named / resolve; plan 3.2). A preset name expands to its f
   s_reply  look-ahead + at most 8 trials, H 80, K 4 worlds, opponent "reply": an in-flight play
            and one reply from an opponent model (S07). Until S07 a Searcher refuses it without
            a `worlds` provider (SearchConfigError): it never runs as an idle search in disguise.
-  s_true   as s_idle with the trials on the TRUE delayed battle: the privileged ceiling (M2b).
-           PRIVILEGED, NEVER PROMOTABLE: SearchConfig.privileged; check_promotable and
-           check_live raise PrivilegedSearchError for it (rs_league_eval's gate and the live
-           runner call them); a Searcher refuses it unless built with privileged=True, and its
-           true-copy trials are S09 (not built: SearchConfigError until then).
+  s_true   as s_idle with the trials on the TRUE delayed battle: the privileged ceiling (M2b;
+           THE TRUE COPY below). PRIVILEGED, NEVER PROMOTABLE: SearchConfig.privileged;
+           check_promotable and check_live raise PrivilegedSearchError for it (the live runner
+           calls check_live); tools/rs_league_eval.py gives a candidate whose games say so the
+           gate decision "privileged" (never promoted, never admitted); a Searcher refuses it
+           unless built with privileged=True, and every SearchRecord and summary() of it says
+           privileged.
 "off" / None resolve to no search. level (None: the rebuilder's) picks R1 / R2 per search; R0
 rebuilds from the seat's privileged state and belongs to the regret instrument (S10), so it is
-refused here.
+refused here. resolve() also takes a seat's search (seat_search, below): "name@tokens" text and a
+mapping with "rebuild" give the SearchConfig alone.
+
+THE SEAT (S08; tools/rs_match.py). An rs_match.AgentSpec with `search` is played by SearchSeat:
+
+    RM.AgentSpec("runs/tokens/live_big_hog/best.pt", search="s_root", latency_ticks=2)
+    .venvs\royalegym\Scripts\python.exe tools\rs_match.py --a CKPT --search-a s_root ...
+
+  seat_search(value)  what AgentSpec.search holds (AgentSpec normalises it, so the game keys of
+                      tools/rs_league_eval.py record the content): SearchConfig.to_json() plus
+                      "rebuild", the rs_rebuild.RebuildSettings the seat's rebuilder runs, pinned
+                      when the spec is made (the provenance fields "probes" and "notes" left out,
+                      so the key is the same on every machine). A preset name takes the plan's
+                      defaults (RebuildSettings()); "name@probes" the newest S01 engine report's
+                      probe-driven settings (RebuildSettings.from_report, read once, now);
+                      "name@R2" (or "@probes+R2") the rebuild level; a mapping's "rebuild" is
+                      "defaults", "probes", such tokens or a RebuildSettings dict. A rebuild level
+                      R0 is refused (the regret instrument's).
+  SearchSeat          rs_match.MatchAgent with SearchSeatMixin (rs_search.SearchSeat; the class
+                      is made on first use, so importing this module never imports rs_match).
+                      rs_match.build_seat builds one and calls setup_search(search, team, delay,
+                      opp_delay, seed) with the delays of the spec's engine config (the spec delay
+                      plus each agent's latency_ticks: MatchSpec.engine_config), never the battle's.
+                      act(battle, seen, team, mem, tick, sub, royalesim), each decision:
+                        view   rs_public_view.public_view(seen, team, mem): the opponent's elixir
+                               counted by the seat itself (SeatOppElixir: MatchAgent.opp_elixir,
+                               the plays that ran), our plays sent on our OWN clock (below), the
+                               engine's refusals (unran) left out, then Permanence.apply (a
+                               hidden Tesla kept); public["dropped"] (how many unseen enemies
+                               the cut removed: privileged itself) is taken out
+                        rows   search_row: rs_rows.obs_row(state, team, sub, mem, tick, live,
+                               visibility, **v2_kw), RSAgent.act's row with lead 0
+                        d      Searcher.decide(view, land_ticks = the seat's delay, legality =
+                               rs_decide.BattleLegality(battle), rng = the seat's, seed = the spec
+                               seed); its command is what the seat sends
+                      OUR OWN CLOCK. run_match dates seat.sent on the true clock (true tick +
+                      delay) while the view's tick is the noised one (perception noise's clock),
+                      so the seat keeps its own sends as live dates its taps: (view tick + delay,
+                      card, x, y), paired by order with run_match's seat.sent (one entry per card
+                      play) to leave out the plays the engine refused. The seat never needs the
+                      true clock.
+                      search_info() is what rs_match.seat_info records: the preset, its key, the
+                      rebuild settings' key and level, privileged, the delays, Searcher.summary()
+                      (decisions, searches, overrides by incumbent > choice, vetoes, fallbacks
+                      by reason, triggers, ms per stage) and the spread of ms per decision.
+                      A SearchSeat refuses a lead (the look-ahead is the search's), hold_pending
+                      (it reads the battle's pending commands) and s_reply until S07 gives the
+                      opponent world model (check_seat). The battle it reaches: check_deploy
+                      through d0's legality (d0's and the candidates' tap-time checks); s_true
+                      also save / load / step / state_json (THE TRUE COPY).
+                      tests/pipeline/test_search_no_leak.py holds it to that.
+  merge_search_info   sums search_info() over games (rs_match's command line prints it).
+
+THE TRUE COPY (S09; opponent "true", s_true). The privileged ceiling of M2b: the same root, d0,
+triggers, candidates (legal at tap time and at B on the PUBLIC root), scoring and choice as the
+public search, but each trial runs on the TRUE match battle, as tools/rl/teacher.annotate does
+(teacher.py:509-601): one save(), then per candidate load() and step([its command, sent now
+from its PRESENT slot], D + H) under the battle's own delay, so it lands at B with the
+opponent's real queued commands; the battle is loaded back and its state_json checked equal to
+the one before (TrueCopyError otherwise: a match whose battle the search changed cannot go on,
+so it is never swallowed). A play refused at send (the step's reason) or when it ran
+(step_commands_run) did not run. The swing runs from the true state at t (the teacher's: the
+ticks (t, B] are the same for every candidate, so they cancel in the choice), V reads the true
+after-state's row, the leak the public root's elixir at B. decide() needs true_battle= for it and
+refuses true_battle= for any public preset (PrivilegedSearchError).
 
 Importing this module imports numpy, rs_decide, rs_elixir, rs_public_view and rs_rebuild (all
-torch-free; royalesim only when a Battle is built), never torch, sim.model_tokens or royalesim:
-BatchedPolicy imports torch when it is built, as TokenPolicyAdapter does; tools/rl/teacher and
-ppo (numpy) only when a trial is scored. Nothing here taps, captures or touches the emulator,
-and nothing imports scripts/gamestate (the memory reader).
+torch-free; royalesim only when a Battle is built), never torch, sim.model_tokens, royalesim or
+rs_match: BatchedPolicy imports torch when it is built, as TokenPolicyAdapter does; tools/rl/
+teacher and ppo (numpy) only when a trial is scored; rs_match and rs_rows when SearchSeat is
+first asked for or a seat acts. Nothing here taps, captures or touches the emulator, and nothing
+imports scripts/gamestate (the memory reader).
 """
 from __future__ import annotations
 
@@ -220,6 +288,7 @@ if str(ROOT / "tools") not in sys.path:          # also when imported as tools.r
 
 import rs_decide as RD  # noqa: E402  (row_batch, model_schema_of, TILES; numpy only)
 import rs_elixir  # noqa: E402  (pure Python: the elixir law, for the leak)
+import rs_memory  # noqa: E402  (standard library only: card tokens, for the seat's refusals)
 import rs_public_view as PV  # noqa: E402  (pure Python: is_public, the leak guard)
 import rs_rebuild as RB  # noqa: E402  (pure Python until a Battle is built: with_present, R1/R2)
 
@@ -239,7 +308,10 @@ __all__ = [
     "SearchError",
     "SearchLeakError",
     "SearchRecord",
+    "SearchSeatMixin",
     "Searcher",
+    "TrueCopyError",
+    "TrueRoot",
     "VALUE_CRITIC",
     "VALUE_KINDS",
     "VALUE_SWING",
@@ -249,13 +321,21 @@ __all__ = [
     "as_wait",
     "check_live",
     "check_promotable",
+    "check_seat",
     "choose",
     "cvar",
     "expand",
     "is_privileged",
+    "merge_search_info",
+    "opponent_checkpoint",
+    "rebuild_settings",
     "resolve",
+    "seat_config",
+    "seat_search",
     "tagged",
 ]
+# SearchSeat (rs_match.MatchAgent + SearchSeatMixin) is made on first use by the module
+# __getattr__ at the end, so that importing this module never imports rs_match.
 
 #: values(): V from the value head's column 0 (the predicted tower swing; a legacy model).
 VALUE_SWING = "swing"
@@ -567,6 +647,12 @@ class SearchLeakError(SearchError):
     """The view handed to the search is not public (rs_public_view.is_public says what)."""
 
 
+class TrueCopyError(SearchError):
+    """S09: the true battle is not what it was after the true-copy trials (its save() / load()
+    did not restore it), or its delay is not the seat's: the match cannot go on. Never
+    swallowed as a fallback."""
+
+
 #: The opponent in the trials (plan 3.2): none (no trials), idle, reply (S07), true (S09).
 OPP_NONE, OPP_IDLE, OPP_REPLY, OPP_TRUE = "none", "idle", "reply", "true"
 OPPONENTS = (OPP_NONE, OPP_IDLE, OPP_REPLY, OPP_TRUE)
@@ -583,6 +669,12 @@ ROLE_P, ROLE_W, ROLE_T, ROLE_S = "P", "W", "T", "S"
 SEED_MOD = 2 ** 31 - 1
 #: resolve(): what means no search.
 OFF_NAMES = ("off", "none", "")
+#: seat_search(): the key beside SearchConfig's fields that pins the seat's RebuildSettings, the
+#: tokens of "name@tokens" ("+" between them), and the provenance fields a pinned dict leaves out.
+SEAT_REBUILD = "rebuild"
+REBUILD_DEFAULTS, REBUILD_PROBES = "defaults", "probes"
+REBUILD_TOKENS = (REBUILD_DEFAULTS, REBUILD_PROBES, RB.R1, RB.R2)
+REBUILD_PROVENANCE = ("probes", "notes")
 
 # Outcomes (SearchRecord.outcome): what one call did. Every one but R_SEARCHED plays d0 (R_HELD a
 # held wait).
@@ -777,10 +869,27 @@ PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+def _rebuild_tokens(text: str) -> tuple[str, ...]:
+    """The tokens of a seat's "@probes+R2" tail (module doc, THE SEAT), checked."""
+    tokens = tuple(t.strip() for t in str(text).split("+") if t.strip())
+    bad = [t for t in tokens if t not in REBUILD_TOKENS]
+    if bad or not tokens:
+        raise SearchConfigError(f"search rebuild: tokens of {list(REBUILD_TOKENS)} joined by "
+                                f"'+', got {text!r}")
+    if REBUILD_DEFAULTS in tokens and REBUILD_PROBES in tokens:
+        raise SearchConfigError(f"search rebuild: {REBUILD_DEFAULTS!r} or {REBUILD_PROBES!r}, "
+                                f"not both ({text!r})")
+    if RB.R1 in tokens and RB.R2 in tokens:
+        raise SearchConfigError(f"search rebuild: one level, got {text!r}")
+    return tokens
+
+
 def resolve(value: Any) -> SearchConfig | None:
     """The SearchConfig `value` names: None or "off" / "none" / "": no search (None); a
     SearchConfig; a preset name; a JSON object text or a mapping (its "preset", when a PRESETS
-    name, is the base the other fields override; unknown fields refused)."""
+    name, is the base the other fields override; unknown fields refused). A seat's search
+    (seat_search: "name@tokens", a mapping with "rebuild") gives its SearchConfig; the rebuild
+    part is seat_search's."""
     if value is None or isinstance(value, SearchConfig):
         return value
     if isinstance(value, str):
@@ -795,12 +904,17 @@ def resolve(value: Any) -> SearchConfig | None:
             if not isinstance(data, Mapping):
                 raise SearchConfigError("search config: a JSON object")
             return resolve(data)
+        if "@" in text:
+            text, tail = (s.strip() for s in text.split("@", 1))
+            _rebuild_tokens(tail)
         if text in PRESETS:
             return SearchConfig.named(text)
-        raise SearchConfigError(f"search: a preset ({', '.join(sorted(PRESETS))}), 'off' or a "
+        raise SearchConfigError(f"search: a preset ({', '.join(sorted(PRESETS))}; a seat's may "
+                                f"add @{'/'.join(REBUILD_TOKENS)}, '+' between them), 'off' or a "
                                 f"JSON object, got {value!r}")
     if isinstance(value, Mapping):
         data = dict(value)
+        data.pop(SEAT_REBUILD, None)
         name = data.get("preset")
         base = dict(PRESETS[name]) if isinstance(name, str) and name in PRESETS else {}
         return SearchConfig.from_json({**base, **data})
@@ -880,6 +994,13 @@ class Candidate:
             return None
         return (int(tick), int(team), int(self.card), int(self.x), int(self.y))
 
+    def command(self, team: int) -> tuple[int, int, int, int] | None:
+        """The (team, PRESENT slot, x, y) command of this candidate sent now (None: a wait): what
+        the seat would send, and what a true-copy trial sends (S09)."""
+        if not self.is_play:
+            return None
+        return (int(team), int(self.slot), int(self.x), int(self.y))
+
     @property
     def label(self) -> str:
         return "wait" if not self.is_play else str(int(self.card))
@@ -903,6 +1024,16 @@ class World(NamedTuple):
     plays: tuple = ()
     weight: float = 1.0
     tags: tuple = ()
+
+
+class TrueRoot(NamedTuple):
+    """S09: what a true-copy trial is scored from (module doc, THE TRUE COPY): the TRUE state at t
+    (the swing's before, as tools/rl/teacher.annotate has it), our later plays in flight and the
+    PUBLIC root's state at B (the leak reads its elixir; leak_state)."""
+
+    state: dict
+    later: tuple = ()
+    leak_state: dict | None = None
 
 
 class Choice(NamedTuple):
@@ -1021,6 +1152,7 @@ class SearchRecord:
     delay: int
     preset: str
     config: str = ""
+    privileged: bool = False           # S09: the trials read the TRUE battle (s_true)
     outcome: str = ""
     detail: str = ""
     lookahead: bool = False
@@ -1106,6 +1238,35 @@ def _ran(run: Mapping[str, Any], ref: int) -> bool:
     return any(r[0] == "play" and int(r[1]) == int(ref) for r in run.get("ran") or ())
 
 
+def _step_code(res: Sequence[Any], i: int) -> int:
+    """The reason code of Battle.step's i-th result row ((card, reason, ...) on RoyaleSim,
+    [team, reason] on the test fakes); 0 (accepted) when it says nothing."""
+    try:
+        return int(res[i][1])
+    except (IndexError, TypeError, ValueError):
+        return 0
+
+
+def _refused_when_run(battle: Any, team: int, card: int, due: int) -> bool:
+    """S09: whether the last step's Battle.step_commands_run() rows (tick, team, kind, what,
+    reason) report `team`'s deploy of `card` due on `due` (or later: rs_match._ran_play's rule) as
+    refused or dropped; an engine or a fake without the call: never."""
+    fn = getattr(battle, "step_commands_run", None)
+    if not callable(fn):
+        return False
+    for row in fn() or ():
+        row = tuple(row)
+        if len(row) < 5 or row[2] != "deploy":
+            continue
+        try:
+            tick, who, what, reason = int(row[0]), int(row[1]), int(row[3]), int(row[4])
+        except (TypeError, ValueError):
+            continue
+        if who == int(team) and what == int(card) and tick >= int(due) and reason != 0:
+            return True
+    return False
+
+
 def _rl(name: str) -> Any:
     """tools/rl/<name> (teacher, ppo: numpy only), imported on first use."""
     if str(ROOT) not in sys.path:
@@ -1149,7 +1310,8 @@ class Searcher:
                 must not depend on the machine (the search's time is charged as delay instead).
     clock       time.perf_counter, or a test's
     privileged  True only for the privileged ceiling (s_true); any other caller gets
-                PrivilegedSearchError for it
+                PrivilegedSearchError for it. Its decide() then needs true_battle= (module doc,
+                THE TRUE COPY), which every public preset refuses.
     Every view is asserted public (rs_public_view.is_public; SearchLeakError), always: there is
     no switch to turn that off.
     """
@@ -1167,8 +1329,9 @@ class Searcher:
                 raise PrivilegedSearchError(
                     f"search {cfg.preset!r}: its trials read the TRUE battle; only the privileged "
                     "ceiling (M2b) and the regret instrument build it, with privileged=True")
-            raise SearchConfigError(f"search {cfg.preset!r}: the true-copy trials are S09 "
-                                    "(tools/rs_search.py), not built yet")
+            if worlds is not None:
+                raise SearchConfigError(f"search {cfg.preset!r}: its one world is the true "
+                                        "battle; it takes no worlds provider")
         if cfg.opponent == OPP_REPLY and worlds is None:
             raise SearchConfigError(f"search {cfg.preset!r}: opponent 'reply' needs the opponent "
                                     "world model (S07, tools/opp_model.py): pass worlds=")
@@ -1216,10 +1379,18 @@ class Searcher:
                rng: Any, row_fn: Callable[[Mapping[str, Any], int], Any], tick: int | None = None,
                pending: Iterable[Any] | None = None, dt: int | None = None,
                aim: Callable | None = None, blocked_tiles: Any = None,
-               opp_fill: Iterable[int] = (), seed: int = 0) -> tuple[Any, SearchRecord]:
+               opp_fill: Iterable[int] = (), seed: int = 0,
+               true_battle: Any = None) -> tuple[Any, SearchRecord]:
         """(the Decision to act on, its SearchRecord) for `team` on the public `view` (module
-        doc, THE SEARCH)."""
+        doc, THE SEARCH). true_battle: the TRUE match battle, for the privileged s_true's trials
+        only (module doc, THE TRUE COPY); a public preset refuses it."""
         cfg = self.config
+        if true_battle is not None and not cfg.privileged:
+            raise PrivilegedSearchError(f"search {cfg.preset!r} is public: it never takes the "
+                                        "true battle (only the privileged s_true does)")
+        if cfg.privileged and true_battle is None:
+            raise SearchConfigError(f"search {cfg.preset!r}: its trials run on the TRUE battle; "
+                                    "pass true_battle= (the seat's match battle)")
         t0 = self.clock()
         team = int(team)
         now = int(view["tick"])
@@ -1230,7 +1401,7 @@ class Searcher:
         self._check_view(view, team)
         self._law_now = self._law_for(view)
         rec = SearchRecord(tick=now, land_tick=land, delay=delay, preset=cfg.preset,
-                           config=self.key)
+                           config=self.key, privileged=cfg.privileged)
         self.stats["decisions"] += 1
         opp_count = len((view.get("public") or {}).get("opp_plays") or ())
         built, why, tried = None, "", False
@@ -1283,8 +1454,8 @@ class Searcher:
                 return self._done(rec, d0, why, t0)
         try:
             return self._search(rec, d0, pol, b, built, view, team, land, legality, row_fn, dt,
-                                aim, blocked_tiles, seed, now, t0)
-        except (SearchLeakError, SearchConfigError):
+                                aim, blocked_tiles, seed, now, t0, true_battle)
+        except (SearchLeakError, SearchConfigError, TrueCopyError):
             raise
         except Exception as exc:                # d0; three in a battle turn search off
             self._error(rec, f"{type(exc).__name__}: {exc}")
@@ -1361,7 +1532,7 @@ class Searcher:
     def _search(self, rec: SearchRecord, d0: Any, pol: Any, b: Any, built: Any,
                 view: Mapping[str, Any], team: int, land: int, legality: Any, row_fn: Callable,
                 dt: int | None, aim: Callable | None, blocked: Any, seed: int, now: int,
-                t0: float) -> tuple[Any, SearchRecord]:
+                t0: float, true_battle: Any = None) -> tuple[Any, SearchRecord]:
         cfg = self.config
         t = self.clock()
         cands, why, dropped = self._candidates(d0, pol, b, view, team, legality, built, dt, aim,
@@ -1372,10 +1543,15 @@ class Searcher:
             return self._done(rec, d0, why, t0)
         if len(cands) < cfg.min_candidates:
             return self._done(rec, d0, R_FEW_CANDS, t0)
-        worlds = self._worlds(built, view, team, land, seed, now)
-        rec.worlds = len(worlds)
-        t = self.clock()
-        timed_out = self._trials(cands, worlds, land, team, t0)
+        if cfg.opponent == OPP_TRUE:            # S09: the privileged ceiling
+            rec.worlds = 1
+            t = self.clock()
+            timed_out = self._true_trials(cands, built, true_battle, land, team, now)
+        else:
+            worlds = self._worlds(built, view, team, land, seed, now)
+            rec.worlds = len(worlds)
+            t = self.clock()
+            timed_out = self._trials(cands, worlds, land, team, t0)
         rec.ms["trials"] = self._ms(t)
         rec.trials = sum(1 for c in cands if c.ran)
         if not cands[0].ran:
@@ -1546,6 +1722,51 @@ class Searcher:
                 c.ran, c.afters = True, afters
         return False
 
+    def _true_trials(self, cands: Sequence[Candidate], built: Any, battle: Any, land: int,
+                     team: int, now: int) -> bool:
+        """S09 (module doc, THE TRUE COPY): from one save() of the TRUE battle, each candidate's
+        command sent now (from its present slot) and stepped D + H ticks, then the battle loaded
+        back and checked (TrueCopyError). False: no deadline (the ceiling is never live)."""
+        cfg = self.config
+        delay = int(land) - int(now)
+        reported = _rl("teacher").battle_delay(battle, team)
+        if reported is not None and int(reported) != delay:
+            raise TrueCopyError(f"the true battle's command delay of team {team} is {reported}, "
+                                f"the seat's {delay}: its trials would not land at B")
+        steps = delay + int(cfg.horizon)
+        before_json = battle.state_json()
+        before = json.loads(before_json)
+        due = int(before.get("tick", now)) + delay
+        world = World(0, TrueRoot(state=before, later=tuple(built.later), leak_state=built.state),
+                      tags=("true",))
+        saved = battle.save()
+        failure: Exception | None = None
+        try:
+            for c in cands:
+                battle.load(saved)
+                cmd = c.command(team)
+                res = list(battle.step([] if cmd is None else [cmd], steps) or ())
+                if cmd is not None and (_step_code(res, 0) != 0
+                                        or _refused_when_run(battle, team, c.card, due)):
+                    continue                    # refused at send or when it ran: did not run
+                c.ran, c.afters = True, [(world, json.loads(battle.state_json()))]
+        except Exception as exc:                # raised below, once the battle is checked
+            failure = exc
+        try:
+            battle.load(saved)
+            restored = battle.state_json() == before_json
+        except Exception as exc:
+            raise TrueCopyError(f"the true battle could not be loaded back after the true-copy "
+                                f"trials ({type(exc).__name__}: {exc})") from exc
+        if not restored:
+            raise TrueCopyError("the true battle is not what it was before the true-copy trials: "
+                                "its save() / load() did not restore it (probe P9); the match "
+                                "cannot go on")
+        if failure is not None:
+            raise failure
+        self.stats["true_trials"] += sum(1 for c in cands if c.ran)
+        return False
+
     def _score(self, cands: Sequence[Candidate], land: int, team: int, row_fn: Callable) -> None:
         """Per candidate and world: swing, V (one batched pass), leak (module doc, step 8)."""
         cfg = self.config
@@ -1615,7 +1836,8 @@ class Searcher:
         that land in the window."""
         law = self._law_now if self._law_now is not None else rs_elixir.default_law()
         end = land + self.config.horizon
-        have = int(root.state["players"][team].get("elixir_milli") or 0)
+        state = getattr(root, "leak_state", None) or root.state     # S09: the public root's
+        have = int(state["players"][team].get("elixir_milli") or 0)
         later = sum(self._card_cost(r[1]) for r in (getattr(root, "later", ()) or ())
                     if int(r[0]) < end)
         regen = law.to_milli(law.regen(land, end))
@@ -1662,6 +1884,7 @@ class Searcher:
 
         rb_summary = getattr(self.rebuilder, "summary", None)
         return {"preset": self.config.preset, "config": self.key,
+                "privileged": bool(self.config.privileged),
                 "decisions": int(s["decisions"]), "lookahead": int(s["lookahead"]),
                 "searches": int(s["searches"]), "overrides": int(s["overrides"]),
                 "vetoes": int(s["vetoes"]), "errors": int(s["errors"]),
@@ -1669,3 +1892,416 @@ class Searcher:
                 "triggers": prefixed("trigger:"), "override_by": prefixed("override:"),
                 "ms": {k: round(float(v), 3) for k, v in sorted(self.ms.items())},
                 "rebuild": rb_summary() if callable(rb_summary) else {}}
+
+
+# ===========================================================================
+# S08: the simulator seat (module doc, THE SEAT)
+# ===========================================================================
+
+def _pinned(settings: Any) -> dict[str, Any]:
+    """A RebuildSettings as a seat's search pins it: to_json() less the provenance fields."""
+    return {k: v for k, v in settings.to_json().items() if k not in REBUILD_PROVENANCE}
+
+
+def rebuild_settings(value: Any = None) -> Any:
+    """The rs_rebuild.RebuildSettings a seat pins (module doc, THE SEAT): None / "defaults":
+    RebuildSettings(), the plan's; "probes": RebuildSettings.from_report(), the newest S01 engine
+    report with probes, read now (the defaults when there is none); "R1" / "R2" (joined by "+")
+    the level; a mapping: RebuildSettings.from_json; a RebuildSettings as it is. Level R0 is
+    refused (SearchConfigError): it rebuilds from the seat's privileged state."""
+    if isinstance(value, RB.RebuildSettings):
+        settings = value
+    elif isinstance(value, Mapping):
+        try:
+            settings = RB.RebuildSettings.from_json(dict(value))
+        except (TypeError, ValueError) as exc:
+            raise SearchConfigError(f"search rebuild settings: {exc}") from None
+    elif value is None or isinstance(value, str):
+        text = "" if value is None else value.strip()
+        tokens = _rebuild_tokens(text) if text else (REBUILD_DEFAULTS,)
+        settings = (RB.RebuildSettings.from_report() if REBUILD_PROBES in tokens
+                    else RB.RebuildSettings())
+        for level in (RB.R1, RB.R2):
+            if level in tokens:
+                settings = settings.replace(level=level)
+    else:
+        raise SearchConfigError(f"search rebuild: 'defaults', 'probes', a level or a "
+                                f"RebuildSettings dict, got {type(value).__name__}")
+    if settings.level not in (RB.R1, RB.R2):
+        raise SearchConfigError(f"search rebuild level {settings.level!r}: a seat rebuilds at "
+                                f"{RB.R1} or {RB.R2} ({RB.R0} reads the seat's privileged "
+                                "state: the regret instrument's)")
+    return settings
+
+
+def seat_search(value: Any, *, verify: bool | None = None) -> dict[str, Any] | None:
+    """What rs_match.AgentSpec.search holds for `value` (module doc, THE SEAT): None for no
+    search; else SearchConfig.to_json() and "rebuild", the pinned RebuildSettings (rebuild_settings
+    of "name@tokens"' tokens, or of a mapping's "rebuild"; to_json() less the provenance).
+    Idempotent: seat_search(seat_search(x)) == seat_search(x). verify, when not None, sets
+    SearchConfig.verify (rs_match --search-verify)."""
+    rebuild: Any = None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{"):
+            try:
+                value = json.loads(text)
+            except ValueError as exc:
+                raise SearchConfigError(f"search config: not a JSON object ({exc})") from None
+            if not isinstance(value, Mapping):
+                raise SearchConfigError("search config: a JSON object")
+        elif "@" in text:
+            rebuild = text.split("@", 1)[1].strip()
+    if isinstance(value, Mapping):
+        rebuild = value.get(SEAT_REBUILD)
+    cfg = resolve(value)
+    if cfg is None:
+        if rebuild is not None:
+            raise SearchConfigError("search 'off' takes no rebuild settings")
+        return None
+    if verify is not None:
+        cfg = cfg.replace(verify=bool(verify))
+    return {**cfg.to_json(), SEAT_REBUILD: _pinned(rebuild_settings(rebuild))}
+
+
+def seat_config(value: Any) -> SearchConfig | None:
+    """The SearchConfig of a seat's search (seat_search's dict, or anything resolve takes)."""
+    return resolve(value)
+
+
+def check_seat(value: Any) -> SearchConfig | None:
+    """resolve(value), or SearchConfigError for a search a simulator seat cannot run yet: the
+    opponent "reply" (s_reply) needs S07's opponent world model (tools/opp_model.py). rs_match's
+    and rs_league_eval's command lines call it before any game is played."""
+    cfg = resolve(value)
+    if cfg is not None and cfg.opponent == OPP_REPLY:
+        raise SearchConfigError(f"search {cfg.preset!r}: opponent 'reply' needs the opponent "
+                                "world model (S07, tools/opp_model.py), not built yet: use s_root "
+                                "or s_idle")
+    return cfg
+
+
+def opponent_checkpoint(value: Any) -> str | None:
+    """The checkpoint of the opponent model a search's worlds sample from (plan 5, the reply arm;
+    S07 adds it as SearchConfig.opp_ckpt), or None: an idle or true opponent, and every search
+    before S07. tools/rs_league_eval.py warns when it is a gate seat's checkpoint."""
+    cfg = resolve(value)
+    ckpt = getattr(cfg, "opp_ckpt", None) if cfg is not None else None
+    return str(ckpt) if ckpt else None
+
+
+def _quantile(values: Sequence[float], q: float) -> float | None:
+    """The nearest-rank q-quantile of `values` (None for none)."""
+    if not values:
+        return None
+    v = sorted(float(x) for x in values)
+    return v[min(len(v) - 1, max(0, math.ceil(float(q) * len(v)) - 1))]
+
+
+#: search_info() counts merge_search_info adds over games.
+_INFO_COUNTS = ("decisions", "lookahead", "searches", "overrides", "vetoes", "errors", "disabled",
+                "fidelity_skips")
+
+
+def merge_search_info(infos: Iterable[Mapping[str, Any] | None]) -> dict[str, Any] | None:
+    """search_info() of several games together (None when there is none): the counts added;
+    outcomes, triggers and override_by merged; ms per stage summed; decision_ms with n and sum
+    added, mean, the largest p95 (an upper bound of the pooled p95, not it) and the largest
+    max."""
+    infos = [i for i in infos if isinstance(i, Mapping) and i]
+    if not infos:
+        return None
+    out: dict[str, Any] = {
+        "games": len(infos), "presets": sorted({str(i.get("preset")) for i in infos}),
+        "privileged": any(bool(i.get("privileged")) for i in infos)}
+    for k in _INFO_COUNTS:
+        out[k] = sum(int(i.get(k) or 0) for i in infos)
+    for k in ("outcomes", "triggers", "override_by"):
+        total: Counter = Counter()
+        for i in infos:
+            total.update({str(name): int(n) for name, n in (i.get(k) or {}).items()})
+        out[k] = dict(sorted(total.items()))
+    ms: Counter = Counter()
+    for i in infos:
+        ms.update({str(name): float(v or 0.0) for name, v in (i.get("ms") or {}).items()})
+    out["ms"] = {k: round(v, 3) for k, v in sorted(ms.items())}
+    dm = [i.get("decision_ms") or {} for i in infos]
+    n = sum(int(d.get("n") or 0) for d in dm)
+    total_ms = sum(float(d.get("sum") or 0.0) for d in dm)
+    p95 = [float(d["p95"]) for d in dm if d.get("p95") is not None]
+    top = [float(d["max"]) for d in dm if d.get("max") is not None]
+    out["decision_ms"] = {"n": n, "mean": _num(total_ms / n) if n else None,
+                          "p95_max": _num(max(p95)) if p95 else None,
+                          "max": _num(max(top)) if top else None}
+    return out
+
+
+#: The E06 spawn table of each engine config (its key) this process has read.
+_SPAWN_TABLES: dict[str, dict] = {}
+
+
+def _spawn_table(engine: Any, royalesim: Any) -> dict:
+    """rs_spawn_table.ensure(DEFAULT_PATH, engine, royalesim), read once per process and engine
+    (ensure builds a Battle to fingerprint the engine on every call)."""
+    key = engine.key()
+    if key not in _SPAWN_TABLES:
+        import rs_spawn_table
+        _SPAWN_TABLES[key] = rs_spawn_table.ensure(rs_spawn_table.DEFAULT_PATH, engine, royalesim)
+    return _SPAWN_TABLES[key]
+
+
+def _rows_module() -> Any:
+    """tools/rs_rows (numpy): the seat's rows, entity fields and elixir law; imported when a seat
+    first acts (rs_match has imported it by then)."""
+    import rs_rows
+    return rs_rows
+
+
+class SearchSeatMixin:
+    """The search half of a simulator seat (module doc, THE SEAT). rs_search.SearchSeat is
+    rs_match.MatchAgent with this mixed in first; the tests mix it into a stub with MatchAgent's
+    attributes and override the hooks search_policy, search_rebuilder and search_row.
+
+    It reads of the seat: rng, meta, policy (search_policy), decide_config(), opp_elixir(team,
+    mem, tick) (SeatOppElixir), v2_kw, live and visibility (search_row), spell_aim and
+    _spell_aim, engine, _catalogue(), and run_match's sent and unran; it refuses lead,
+    hold_pending and noise. Of the match battle it reads check_deploy, through d0's legality, and
+    only the privileged s_true more (module doc, THE TRUE COPY)."""
+
+    search_spec: dict | None = None
+    search_config: SearchConfig | None = None
+    rebuild_settings: Any = None
+    search_team: int | None = None
+    search_delay: int = 0
+    search_opp_delay: int = 0
+    search_seed: int = 0
+    searcher: Searcher | None = None
+    #: Keep every SearchRecord.to_json() in `records` (profiling, S01's search bench). Off by
+    #: default: a match makes about 600 of them.
+    keep_records: bool = False
+    records: list | None = None
+    last_search: SearchRecord | None = None
+
+    # ------------------------------------------------------------ set up
+    def setup_search(self, search: Any, *, team: int, delay: int, opp_delay: int = 0,
+                     seed: int = 0) -> "SearchSeatMixin":
+        """Arm the seat (rs_match.build_seat): its search (seat_search's dict, or anything it
+        takes), its team, its own command delay D (the spec delay plus its latency_ticks, from the
+        spec's engine config), the opponent's, and the spec seed (the search's own generator
+        and the rebuild's seed come from (seed, tick))."""
+        spec = seat_search(search)
+        if spec is None:
+            raise SearchConfigError("setup_search: a search (a preset, a JSON object); 'off' is a "
+                                    "plain MatchAgent")
+        cfg = check_seat(spec)
+        lead = int(getattr(self, "lead", 0) or 0)
+        if lead:
+            raise SearchConfigError(f"a search seat decides on its own look-ahead: lead {lead} "
+                                    "would look ahead twice (give it lead 0)")
+        if getattr(self, "hold_pending", False):
+            raise SearchConfigError("hold_pending reads the match battle's pending commands: a "
+                                    "search seat refuses it")
+        team = int(team)
+        if team not in (0, 1):
+            raise SearchConfigError(f"setup_search: team 0 or 1, got {team}")
+        self.search_spec = spec
+        self.search_config = cfg
+        self.rebuild_settings = RB.RebuildSettings.from_json(spec[SEAT_REBUILD])
+        self.search_team = team
+        self.search_delay = max(0, int(delay))
+        self.search_opp_delay = max(0, int(opp_delay))
+        self.search_seed = int(seed)
+        self.searcher = None
+        self.search_stats: Counter = Counter()
+        self._search_sent: list[tuple[int, int, int, int]] = []
+        self._search_ms: list[float] = []
+        self._search_keep: Any = None
+        self._search_F: dict | None = None
+        self._search_SF: dict | None = None
+        self._search_mirror: tuple = ()
+        self.records = [] if self.keep_records else None
+        return self
+
+    # ------------------------------------------------------------ hooks (tests override)
+    def search_policy(self) -> Any:
+        """The search's policy: a BatchedPolicy of the seat's TokenPolicyAdapter (as_batched)."""
+        return as_batched(self.policy)
+
+    def search_rebuilder(self, royalesim: Any, sub: int, fields: Mapping[str, int]) -> Any:
+        """The seat's rs_rebuild.Rebuilder: one Battle for the match, under the seat's own engine
+        config (undelayed), the E06 spawn table as rs_eval's rebuild reads it
+        (rs_spawn_table.ensure, once per process and engine: _spawn_table) and the pinned
+        settings."""
+        import rs_engine
+        engine = rs_engine.resolve(getattr(self, "engine", None)).undelayed()
+        return RB.Rebuilder(engine, royalesim, _spawn_table(engine, royalesim),
+                            settings=self.rebuild_settings, fields=fields, sub=sub)
+
+    def search_row(self, state: Mapping[str, Any], team: int, mem: Mapping[str, Any], sub: int,
+                   royalesim: Any, tick: int) -> Any:
+        """The policy's row of `state` dated `tick`: RSAgent.act's, lead 0 (rs_rows.obs_row with
+        the seat's live, visibility and v2 keywords)."""
+        RR = _rows_module()
+        tick = int(tick)
+        return RR.obs_row(state, team, sub, mem, tick, live=self.live, visibility=self.visibility,
+                          **self.v2_kw(state, team, mem, tick, royalesim))
+
+    def search_law(self) -> Any:
+        """The elixir law the leak is counted under: the seat's engine's (rs_rows.elixir_law)."""
+        return _rows_module().elixir_law(getattr(self, "engine", None))
+
+    # ------------------------------------------------------------ one decision
+    def _ensure_search(self, team: int, sub: int, royalesim: Any) -> Searcher:
+        if self.searcher is not None:
+            return self.searcher
+        RR = _rows_module()
+        if RR.F:
+            F = dict(RR.F)
+        else:
+            import rs_engine
+            F = rs_engine.field_index(royalesim)
+        cat = self._catalogue()
+        names = [str(row[0]) for row in cat]
+        self._search_F = F
+        self._search_SF = RR.spell_index(royalesim)
+        self._search_mirror = tuple(PV.mirror_ids(cat))
+        self._search_keep = PV.Permanence(fields=F, team=team,
+                                          hiders=PV.card_ids(PV.HIDER_NAMES, names),
+                                          spell_cards=PV.spell_ids(cat), sub=sub)
+        rb = self.search_rebuilder(royalesim, sub, F)
+        self.searcher = Searcher(self.search_policy(), rb, self.search_config,
+                                 dcfg=self.decide_config(),
+                                 landing=RD.obs_delay_ticks(getattr(self, "meta", None)) == 0,
+                                 sub=sub, law=self.search_law(),
+                                 privileged=self.search_config.privileged)
+        return self.searcher
+
+    def _own_rows(self, own_unran: Mapping[tuple, int]) -> list[tuple[int, int, int, int]]:
+        """Our sends on our own clock (module doc, THE SEAT), less the plays the engine refused:
+        our k-th send is run_match's k-th seat.sent row (true clock), whose (card, exec tick)
+        the seat's own `unran` entries name."""
+        mine = list(self._search_sent)
+        true = [tuple(int(v) for v in s[:4]) for s in (getattr(self, "sent", None) or ())]
+        if len(true) != len(mine):
+            self.search_stats["sent_unpaired"] += 1
+        drop = Counter({(int(c) - rs_memory.TOKEN_OFFSET, int(t)): int(n)
+                        for (_who, c, t), n in own_unran.items() if int(n) > 0})
+        out = []
+        for i, row in enumerate(mine):
+            if i < len(true):
+                if true[i][1] != row[1]:
+                    self.search_stats["sent_mismatch"] += 1
+                key = (true[i][1], true[i][0])
+                if drop[key] > 0:
+                    drop[key] -= 1
+                    continue
+            out.append(row)
+        return out
+
+    def search_view(self, state: Mapping[str, Any], team: int,
+                    mem: Mapping[str, Any] | None) -> dict:
+        """The seat's public view of `state` (the observed state run_match hands it) at its tick
+        (module doc, THE SEAT): public_view with the seat's own count of the opponent's elixir,
+        our sends on our own clock, the refusals left out, then Permanence."""
+        team = int(team)
+        reading = PV.SeatOppElixir(self).view(team, mem, int(state["tick"]))
+        unran = dict(getattr(self, "unran", None) or {})
+        own = Counter({k: int(n) for k, n in unran.items() if int(k[0]) == team})
+        opp = Counter({k: int(n) for k, n in unran.items() if int(k[0]) != team})
+        # Our cycle as public_view derives it with every refusal of ours left out (our sends,
+        # on our own clock, are cut here: public_view gets only the opponent's refusals).
+        me = state["players"][team]
+        cycle = PV.CardCycle.from_plays([c for c, _ in PV.plays_of(mem, team, own)],
+                                        hand=me.get("hand"), next_card=me.get("next_card"),
+                                        deck=me.get("deck") or (), mirror=self._search_mirror)
+        view = PV.public_view(state, team, mem, fields=self._search_F,
+                              spell_fields=self._search_SF, opp_elixir=reading,
+                              sent=self._own_rows(own), unran=opp, mirror=self._search_mirror,
+                              own_cycle=cycle)
+        # What the cut removed, counted (unseen enemies, projectiles), is itself privileged: an
+        # invisible unit's existence. Nothing downstream reads it; the search never gets it.
+        view["public"].pop("dropped", None)
+        return self._search_keep.apply(view)
+
+    def act(self, battle: Any, state: Mapping[str, Any], team: int, mem: Mapping[str, Any],
+            tick: int, sub: int, royalesim: Any) -> tuple[int, int, int, int] | None:
+        """One decision (module doc, THE SEAT): the search on the seat's public view; the command
+        to send now (None: wait). run_match's seat interface (RSAgent.act's)."""
+        cfg = self.search_config
+        if cfg is None:
+            raise SearchError("a SearchSeat acts only after setup_search (rs_match.build_seat "
+                              "calls it)")
+        team = int(team)
+        if team != self.search_team:
+            raise SearchError(f"this search seat was set up for team {self.search_team}, not "
+                              f"{team}: its delays are that team's")
+        if getattr(self, "noise", None) is not None:
+            raise SearchError("a SearchSeat decides on run_match's observed state; it applies no "
+                              "perception noise of its own (rs_eval.play's seat.noise)")
+        self._team = team
+        searcher = self._ensure_search(team, sub, royalesim)
+        view = self.search_view(state, team, mem)
+        now = int(view["tick"])
+        shift = int(tick) - now                 # 0 under run_match: its tick is the view's
+
+        def row_fn(s: Mapping[str, Any], t: int) -> Any:
+            return self.search_row(s, team, mem, sub, royalesim, int(t) + shift)
+
+        aim = self._spell_aim(view, team, sub) if getattr(self, "spell_aim", False) else None
+        d, rec = searcher.decide(view, team=team, land_ticks=self.search_delay,
+                                 legality=RD.BattleLegality(battle), rng=self.rng, row_fn=row_fn,
+                                 tick=int(tick), aim=aim, seed=self.search_seed,
+                                 true_battle=battle if cfg.privileged else None)
+        self.last_decision, self.last_search = d, rec
+        self._search_ms.append(float(rec.ms.get("total") or 0.0))
+        if self.records is not None:
+            self.records.append(rec.to_json())
+        cmd = d.command
+        if cmd is not None and d.is_play:
+            self._search_sent.append((now + self.search_delay, int(d.card), int(cmd[2]),
+                                      int(cmd[3])))
+        return cmd
+
+    # ------------------------------------------------------------ the record
+    def search_info(self) -> dict[str, Any]:
+        """What rs_match.seat_info records of the search (module doc, THE SEAT); JSON-ready."""
+        cfg = self.search_config
+        if cfg is None:
+            return {}
+        s = self.searcher.summary() if self.searcher is not None else {}
+        ms = list(self._search_ms)
+        out: dict[str, Any] = {
+            "preset": cfg.preset, "config": cfg.key, "privileged": bool(cfg.privileged),
+            "rebuild_key": self.rebuild_settings.key, "rebuild_level": self.rebuild_settings.level,
+            "delay": int(self.search_delay), "opp_delay": int(self.search_opp_delay)}
+        out.update({k: v for k, v in s.items() if k not in out})
+        out["fidelity_skips"] = int((s.get("outcomes") or {}).get(R_FIDELITY, 0))
+        out["decision_ms"] = {"n": len(ms), "sum": round(sum(ms), 3),
+                              "p50": _num(_quantile(ms, 0.5)), "p95": _num(_quantile(ms, 0.95)),
+                              "max": _num(max(ms)) if ms else None}
+        out["seat"] = {k: int(v) for k, v in sorted(self.search_stats.items())}
+        return out
+
+
+_SEAT_CLASS: Any = None
+
+
+def _search_seat_class() -> type:
+    """SearchSeat: rs_match.MatchAgent with SearchSeatMixin first, made once (rs_match is
+    imported here, not when this module is)."""
+    global _SEAT_CLASS
+    if _SEAT_CLASS is None:
+        import rs_match
+        _SEAT_CLASS = type("SearchSeat", (SearchSeatMixin, rs_match.MatchAgent), {
+            "__module__": __name__, "__qualname__": "SearchSeat",
+            "__doc__": ("rs_match.MatchAgent whose decisions are the search's (module doc, THE "
+                        "SEAT): rs_match.build_seat builds it for an AgentSpec with `search` and "
+                        "calls setup_search.")})
+    return _SEAT_CLASS
+
+
+def __getattr__(name: str) -> Any:
+    """rs_search.SearchSeat, made on first use (_search_seat_class)."""
+    if name == "SearchSeat":
+        return _search_seat_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

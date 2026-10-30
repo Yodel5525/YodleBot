@@ -15,7 +15,12 @@ keeps P below tau; only P and W finished -> those two are scored, P missing -> d
 reason; pending plays land during the advance; slots are remapped by card; a chosen Decision has
 the fields vision_play._decide reads; the search never draws from the seat's random generator.
 Then the presets, the privileged s_true guard, the public-view guard, choose / cvar on hand-made
-matrices, the leak, the hold and the triggers.
+matrices, the leak, the hold and the triggers. S09 (the end of the file): s_true's trials run on
+the TRUE battle (TrueBattle: conftest's FakeBattle that queues each play under the delay, lands
+it on its tick and keeps it all in save() / load()), from one save, each candidate sent now from
+its present slot and stepped D + H; the battle is restored and checked after (the plan's S09
+test), a play refused at send or when it ran did not run, a broken restore or a delay that is
+not the seat's raises TrueCopyError (never a fallback), and every record says privileged.
 """
 from __future__ import annotations
 
@@ -30,8 +35,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.pipeline.conftest import (DEFAULT_CATALOGUE, FIELD, PRINCESS_HP, FakeBattle, entity_row,
-                                     player_dict, state_dict)
+from tests.pipeline.conftest import (DEFAULT_CATALOGUE, FIELD, KING_HP, PRINCESS_HP, Call,
+                                     FakeBattle, entity_row, player_dict, state_dict)
 
 np = pytest.importorskip("numpy")
 
@@ -325,12 +330,19 @@ def test_s_true_is_privileged_and_never_promoted_or_played_live():
         SR.check_live(SR.expand("s_true"))
     assert SR.check_promotable("s_idle") == SR.SearchConfig.named("s_idle")
     assert SR.check_live("off") is None
-    # a Searcher refuses it unless told privileged=True; then its true-copy trials are S09's
+    # a Searcher refuses it unless told privileged=True (S09 builds it then); its decide needs
+    # the true battle, and no public preset takes one
     with pytest.raises(SR.PrivilegedSearchError):
         searcher("s_true")
-    with pytest.raises(SR.SearchConfigError, match="S09") as err:
-        searcher("s_true", privileged=True)
+    s = searcher("s_true", privileged=True)
+    assert s.config.privileged and s.summary()["privileged"]
+    with pytest.raises(SR.SearchConfigError, match="TRUE battle") as err:
+        run(s)
     assert not isinstance(err.value, SR.PrivilegedSearchError)
+    with pytest.raises(SR.PrivilegedSearchError, match="is public"):
+        run(searcher(), true_battle=FakeBattle())
+    with pytest.raises(SR.SearchConfigError, match="no worlds"):
+        searcher("s_true", privileged=True, worlds=lambda *a: [])
 
 
 def test_a_searcher_refuses_what_it_cannot_run():
@@ -833,3 +845,132 @@ def test_pending_plays_land_during_the_advance(RBT):
     assert d.kind == RD.WAIT and d.reason == SR.REASON_WAIT
     # the true battle: d0's and the candidates' legality only
     assert battle.calls == [] and battle.state_reads == 0 and battle.deploy_checks
+
+
+# ---------------------------------------------------------------------------
+# S09: the true-copy trials (s_true, privileged)
+# ---------------------------------------------------------------------------
+
+#: Team 0's hand in the true battle (conftest player_dict): the view's (make_view).
+TRUE_HAND = (CANNON, FIREBALL, HOG, ICEGOLEM)
+
+
+class TrueBattle(FakeBattle):
+    """The TRUE match battle at T0: a play sent on T from team 0's slot runs on T + delay (in the
+    step that reaches that tick) and takes damage[card] off red's left princess tower; a card in
+    `refuse` is refused at send, one in `refuse_run` when it runs (step_commands_run reports it).
+    save() / load() keep the tick, the queue and the tower; restore=False: load() leaves the tower
+    as it is (an engine whose restore is not exact)."""
+
+    def __init__(self, *, delay=D, damage=None, refuse=(), refuse_run=(), restore=True):
+        super().__init__()
+        self.delay = (int(delay), int(delay))
+        self.damage, self.refuse, self.refuse_run = dict(damage or {}), set(refuse), set(refuse_run)
+        self.restore = restore
+        self.tick, self.queued, self.red_left, self.last_ran = T0, [], PRINCESS_HP, []
+
+    def command_delay_ticks(self):
+        return self.delay
+
+    def step(self, cmds=(), n=1):
+        cmds = [tuple(c) for c in cmds]
+        self.calls.append(Call("step", (cmds, n), {}))
+        res = []
+        for team, slot, x, y in cmds:
+            card = TRUE_HAND[slot]
+            code = NOT_ENOUGH if card in self.refuse else 0
+            if code == 0:
+                self.queued.append((self.tick + self.delay[team], team, card))
+            res.append([team, code])
+        end = self.tick + int(n)
+        self.last_ran = []
+        for when, team, card in sorted(q for q in self.queued if q[0] <= end):
+            code = NOT_ENOUGH if card in self.refuse_run else 0
+            self.last_ran.append((when, team, "deploy", card, code))
+            if code == 0 and team == 0:
+                self.red_left = max(0, self.red_left - self.damage.get(card, 0))
+        self.queued = [q for q in self.queued if q[0] > end]
+        self.tick, self.steps = end, self.steps + 1
+        return res
+
+    def step_commands_run(self):
+        return list(self.last_ran)
+
+    def state(self):
+        red = player_dict(1, tower_hp=(KING_HP, self.red_left, PRINCESS_HP))
+        return state_dict(self.tick, players=[player_dict(0), red])
+
+    def save(self):
+        self.calls.append(Call("save", (), {}))
+        return {"tick": self.tick, "steps": self.steps, "queued": list(self.queued),
+                "red": self.red_left}
+
+    def load(self, snap):
+        self.calls.append(Call("load", (), {}))
+        self.tick, self.steps, self.queued = snap["tick"], snap["steps"], list(snap["queued"])
+        if self.restore:
+            self.red_left = snap["red"]
+
+
+def true_searcher(**kw):
+    return searcher("s_true", privileged=True, **kw)
+
+
+def test_s_true_tries_each_candidate_on_the_true_battle_and_restores_it():
+    battle = TrueBattle(damage={CANNON: PRINCESS_HP // 2})
+    rb = FakeRebuilder()
+    before = battle.state_json()
+    s = true_searcher(rb=rb)
+    d, rec = run(s, battle=battle, true_battle=battle)
+    # the same candidates as the public search (the public root at B decides their legality)
+    assert roles(rec) == [("P", 2, HOG, 309), ("W", -1, -1, -1), ("T", 2, HOG, 345),
+                          ("T", 2, HOG, 311), ("S", 0, CANNON, 404), ("S", 0, CANNON, 405),
+                          ("S", 1, FIREBALL, 111), ("S", 1, FIREBALL, 122)]
+    # one save, then per candidate load + step([its command sent now], D + H), then load back
+    assert battle.names() == ["save"] + ["load", "step"] * 8 + ["load"]
+    sent = [c.args for c in battle.calls_named("step")]
+    assert sent == [([c.command(0)] if c.is_play else [], D + H) for c in rec.candidates]
+    assert sent[0] == ([(0, 2, *tap(309))], D + H)               # P from its PRESENT slot
+    assert rb.trials == []                                       # no public trial at all
+    # restored: the battle is what it was, at T0
+    assert battle.state_json() == before and battle.tick == T0 and battle.queued == []
+    # scored as the public search: the swing from the true state at t (half a princess tower)
+    by = {(c.role, c.card, c.tile): c for c in rec.candidates}
+    cannon, p = by[("S", CANNON, 404)], by[("P", HOG, 309)]
+    assert cannon.parts[0]["swing"] == pytest.approx(0.5) and p.parts[0]["swing"] == 0.0
+    assert rec.outcome == SR.R_SEARCHED and rec.override and rec.worlds == 1
+    assert rec.candidates[rec.chosen] is cannon
+    assert d.command == (0, 0, *tap(404)) and d.mode == "legacy+search"
+    # marked in every record and in the summary
+    assert rec.privileged and rec.to_json()["privileged"] is True
+    assert s.summary()["privileged"] and s.stats["true_trials"] == 8
+    json.dumps(rec.to_json())
+    # a public search's record says it is not privileged
+    _, pub = run(searcher())
+    assert pub.privileged is False and pub.to_json()["privileged"] is False
+
+
+def test_s_true_plays_refused_at_send_or_when_run_did_not_run():
+    battle = TrueBattle(refuse={HOG})                            # P and the T tiles
+    before = battle.state_json()
+    d, rec = run(true_searcher(), battle=battle, true_battle=battle)
+    assert rec.outcome == SR.R_INCUMBENT and not rec.candidates[0].ran
+    assert d.command == (0, 2, *tap(309)) and d.mode == "legacy"   # d0 itself
+    assert battle.state_json() == before
+    battle = TrueBattle(refuse_run={FIREBALL}, damage={CANNON: 100})
+    _, rec = run(true_searcher(), battle=battle, true_battle=battle)
+    ran = {(c.role, c.card): c.ran for c in rec.candidates}
+    assert ran[("S", FIREBALL)] is False and ran[("S", CANNON)] and ran[("P", HOG)]
+    assert rec.outcome == SR.R_SEARCHED and battle.red_left == PRINCESS_HP
+
+
+def test_s_true_a_broken_restore_or_another_delay_is_never_a_fallback():
+    battle = TrueBattle(restore=False, damage={CANNON: 100})
+    s = true_searcher()
+    with pytest.raises(SR.TrueCopyError, match="restore"):
+        run(s, battle=battle, true_battle=battle)
+    assert s.summary()["errors"] == 0                             # raised, not swallowed
+    battle = TrueBattle(delay=10)                                 # the seat says D = 24
+    with pytest.raises(SR.TrueCopyError, match="delay"):
+        run(true_searcher(), battle=battle, true_battle=battle)
+    assert battle.names() == []                                   # nothing stepped

@@ -41,7 +41,9 @@ perception-noise profile (tools/perception_noise.py: a NoiseProfile, its JSON di
 "default"; None or "none" is a perfect observer). decide: rs_decide's preset, "live" (the live
 runner's rule, the default here), "legacy" (rs_eval's) or "sample" (RL's sampled slot and tile).
 visibility: rs_rows --visibility (None: the checkpoint's own). presses: whether the seat may
-press its ability buttons (V2 SEATS; default False, every seat as before).
+press its ability buttons (V2 SEATS; default False, every seat as before). search and
+latency_ticks: the seat's search and the delay it is charged (SEARCH SEATS; default none and 0,
+every seat as before).
 
 V2 SEATS (E14 / E15; tools/rs_schema.py). A checkpoint whose meta "schema" is rs_rows/v2 gets
 rs_eval.RSAgent's v2 rows (RSAgent.v2_kw) with what the live runner gives its rows:
@@ -76,6 +78,24 @@ rs_eval.RSAgent's v2 rows (RSAgent.v2_kw) with what the live runner gives its ro
               presses out while it is False, so the specs, game keys and player identities of
               earlier runs (tools/rs_league_eval.py) do not change.
 A legacy checkpoint's seat (and any seat whose `v2` is not true) is played exactly as before.
+
+SEARCH SEATS (docs/LIVE_SEARCH_PLAN.md S08; tools/rs_search.py, THE SEAT). AgentSpec.search (None:
+a plain seat, as before) names the seat's search: a preset ("s_root", "s_idle"; "s_true" the
+privileged ceiling whose trials read the true battle), "name@probes" / "name@R2" for its rebuild
+settings, a JSON object or a mapping; __post_init__ stores rs_search.seat_search's full dict
+(imported only then), so a spec and a game key record what the search does, rebuild settings
+included. AgentSpec.latency_ticks (default 0) is the search's compute time charged as command
+delay: MatchSpec.engine_config adds each agent's latency_ticks to its own team's delay, so it
+follows the agent through swapped() and run_match dates that seat's commands tick + delay +
+latency. build_seat builds an rs_search.SearchSeat for an agent with a search and arms it with
+its own and the opponent's delay from the spec's engine config, never from the battle. The seat
+decides on its public view only (rs_search THE SEAT; tests/pipeline/test_search_no_leak.py).
+seat_info adds "search" (the seat's search_info: searches, overrides, vetoes, fallbacks by
+reason, fidelity skips, ms per stage) and "latency_ticks" only for such agents, and
+AgentSpec.to_dict leaves both fields out at their defaults: every spec, game key and record
+without them is what it was. A search refuses an idle seat, a lead and hold_pending. The command
+line: --search-a / --search-b, --latency-a / --latency-b and --search-verify (every restore of
+the rebuilt root checked).
 
 THE LOOP (run_match), rs_eval.play's loop with two policy seats and no ghost: make_battle under
 the spec's engine config with its delay, reset with the spec's decks, forms, levels and 6 elixir
@@ -240,6 +260,8 @@ class AgentSpec:
     seed_offset: int = 0
     allow_drift: bool | None = None
     presses: bool = False
+    search: Mapping | None = None
+    latency_ticks: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ckpt", "" if self.ckpt is None else str(self.ckpt))
@@ -258,6 +280,21 @@ class AgentSpec:
         object.__setattr__(self, "presses", bool(self.presses))
         if _is_noise_profile(self.noise) and not _is_noise_model(self.noise):
             object.__setattr__(self, "noise", self.noise.to_dict())     # plain data: picklable
+        # SEARCH SEATS: the search's full content (rs_search.seat_search; only then is
+        # rs_search imported), and the latency the search's compute time is charged as.
+        object.__setattr__(self, "latency_ticks", _int(self.latency_ticks, "latency_ticks", 0))
+        if self.search is not None:
+            import rs_search
+            object.__setattr__(self, "search", rs_search.seat_search(self.search))
+        if self.search is not None:
+            if self.idle:
+                raise ValueError("search: an idle seat never decides, so it cannot search")
+            if self.lead:
+                raise ValueError(f"search: the search looks ahead itself; lead {self.lead} would "
+                                 "look ahead twice (lead 0 with a search)")
+            if self.hold_pending:
+                raise ValueError("search: hold_pending reads the battle's pending commands; a "
+                                 "search seat reads only its public view")
 
     @property
     def idle(self) -> bool:
@@ -272,14 +309,27 @@ class AgentSpec:
             return IDLE
         return Path(self.ckpt).parent.name or self.ckpt
 
+    @property
+    def privileged(self) -> bool:
+        """Whether this agent's search reads the TRUE battle (s_true; rs_search THE TRUE COPY):
+        a ceiling, never promoted (tools/rs_league_eval.py)."""
+        return bool(self.search is not None and self.search.get("opponent") == "true")
+
     def to_dict(self) -> dict:
-        """The fields as a dict; `presses` only when True (V2 SEATS: the dict, and so the game
-        keys and identities built from it, is what it was before the switch while it is off)."""
+        """The fields as a dict; `presses` only when True (V2 SEATS), `search` only when set and
+        `latency_ticks` only when not 0 (SEARCH SEATS): while they are off the dict, and so the
+        game keys and identities built from it, is what it was before them."""
         out = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
         if _is_noise_model(self.noise):
             out["noise"] = self.noise.profile.to_dict()
         if not self.presses:
             del out["presses"]
+        if self.search is None:
+            del out["search"]
+        else:
+            out["search"] = json.loads(json.dumps(self.search))         # a copy, plain data
+        if not self.latency_ticks:
+            del out["latency_ticks"]
         return out
 
     @classmethod
@@ -394,10 +444,26 @@ class MatchSpec:
         """The engine config without this spec's delay: `engine`, else rs_engine.active()."""
         return rs_engine.resolve(None if self.engine is None else json.loads(self.engine))
 
+    def latency(self) -> tuple[int, int]:
+        """Each team's agent's latency_ticks (SEARCH SEATS): the delay charged on top of the
+        spec's for that team. It follows the agent through swapped()."""
+        return tuple(int(a.latency_ticks) for a in self.agents)
+
     def engine_config(self) -> rs_engine.EngineConfig:
         """The match battle's config: base_engine() with the spec's delay (an int as
-        rs_eval.play sets it, EngineConfig.delayed; a pair as (blue, red))."""
+        rs_eval.play sets it, EngineConfig.delayed; a pair as (blue, red)), plus each agent's
+        latency_ticks on its own team's delay (SEARCH SEATS). Without latency it is exactly the
+        config it always was."""
         cfg = self.base_engine()
+        lat = self.latency()
+        if any(lat):
+            if self.delay is None:
+                base = tuple(int(d) for d in (cfg.delay or (0, 0)))
+            elif isinstance(self.delay, int):
+                base = (self.delay, self.delay)
+            else:
+                base = tuple(int(d) for d in self.delay)
+            return cfg.replace(delay=(base[0] + lat[0], base[1] + lat[1]))
         if self.delay is None:
             return cfg
         if isinstance(self.delay, int):
@@ -573,32 +639,57 @@ def configure(seat: Any, agent: AgentSpec, cfg: Any) -> Any:
     return seat
 
 
+def seat_delays(cfg: Any) -> tuple[int, int]:
+    """(blue, red) command delay of a match battle's config (spec.engine_config(): the spec's
+    delay plus each agent's latency_ticks); (0, 0) when it sets none."""
+    return tuple(int(d) for d in (cfg.delay or (0, 0)))
+
+
 def build_seat(agent: AgentSpec, team: int, spec: MatchSpec, cfg: Any) -> Any:
     """The default seat factory: None for an idle agent, else a configured MatchAgent of the
-    checkpoint, seeded with spec.seed + agent.seed_offset (loads torch)."""
+    checkpoint, seeded with spec.seed + agent.seed_offset (loads torch). An agent with a search
+    gets an rs_search.SearchSeat (imported only then; SEARCH SEATS), armed with its own and the
+    opponent's delay from `cfg`, the spec's engine config, never from the battle."""
     if agent.idle:
         return None
     kwargs: dict[str, Any] = {"engine": cfg.undelayed(), "allow_drift": agent.allow_drift}
     if agent.wait_keep is not None:
         kwargs["wait_keep"] = float(agent.wait_keep)
-    seat = MatchAgent(agent.ckpt, seed=spec.seed + agent.seed_offset, **kwargs)
+    if agent.search is None:
+        seat = MatchAgent(agent.ckpt, seed=spec.seed + agent.seed_offset, **kwargs)
+        seat.cadence = spec.cadence
+        return configure(seat, agent, cfg.undelayed())
+    import rs_search
+    seat = rs_search.SearchSeat(agent.ckpt, seed=spec.seed + agent.seed_offset, **kwargs)
     seat.cadence = spec.cadence
-    return configure(seat, agent, cfg.undelayed())
+    configure(seat, agent, cfg.undelayed())
+    delays = seat_delays(cfg)
+    seat.setup_search(agent.search, team=team, delay=delays[team], opp_delay=delays[1 - team],
+                      seed=spec.seed)
+    return seat
 
 
 def seat_info(seat: Any, agent: AgentSpec) -> dict:
-    """What the result records about a seat (JSON-ready)."""
+    """What the result records about a seat (JSON-ready). "search" (the seat's search_info:
+    SEARCH SEATS) only for an agent with a search, "latency_ticks" only when it is not 0, so the
+    records of every other seat are what they were."""
     meta = getattr(seat, "meta", None)
     meta = meta if isinstance(meta, Mapping) else {}
     vis = getattr(seat, "visibility", None) if seat is not None else None
     on = getattr(seat, "presses_on", None)
     buttons = getattr(seat, "buttons", None)
-    return {"name": agent.label, "ckpt": agent.ckpt, "lead": agent.lead, "decide": agent.decide,
-            "visibility": vis if isinstance(vis, str) else agent.visibility,
-            "schema": seat_schema(seat), "obs_delay": meta.get("obs_delay"),
-            "live_compat": meta.get("live_compat"),
-            "presses": bool(on()) if callable(on) else False,
-            "buttons": None if buttons is None else [int(c) for c in buttons]}
+    out = {"name": agent.label, "ckpt": agent.ckpt, "lead": agent.lead, "decide": agent.decide,
+           "visibility": vis if isinstance(vis, str) else agent.visibility,
+           "schema": seat_schema(seat), "obs_delay": meta.get("obs_delay"),
+           "live_compat": meta.get("live_compat"),
+           "presses": bool(on()) if callable(on) else False,
+           "buttons": None if buttons is None else [int(c) for c in buttons]}
+    if agent.search is not None:
+        info = getattr(seat, "search_info", None)
+        out["search"] = info() if callable(info) else None
+    if agent.latency_ticks:
+        out["latency_ticks"] = int(agent.latency_ticks)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1479,7 +1570,7 @@ def _delay_arg(text: str | None) -> Any:
     return d[0] if d[0] == d[1] else d
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Play two checkpoints on IL_Replay deck pairings in "
                                              "RoyaleSim, both seats (L02).")
     ap.add_argument("--a", required=True, metavar="CKPT", help="agent A (the candidate); 'idle' "
@@ -1522,13 +1613,77 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--allow-vocab-drift", action="store_true")
     ap.add_argument("--out", type=Path, default=ROOT / "reports" / "rs_match.jsonl")
+    g = ap.add_argument_group("search seats (SEARCH SEATS; docs/LIVE_SEARCH_PLAN.md S08)")
+    for side in ("a", "b"):
+        g.add_argument(f"--search-{side}", default=None, metavar="SEARCH",
+                       help=f"{side.upper()}'s search: a preset (s_root, s_idle; s_true is the "
+                            "privileged ceiling), NAME@probes / NAME@R2 for the rebuild settings, "
+                            "or a JSON object; default none (a plain seat)")
+        g.add_argument(f"--latency-{side}", type=int, default=0, metavar="TICKS",
+                       help=f"ticks added to {side.upper()}'s command delay: the search's compute "
+                            "time (S01 bench: ceil(p95 ms / 50)); default 0")
+    g.add_argument("--search-verify", action="store_true",
+                   help="the searches check every restore of their rebuilt root (state_json)")
     rs_engine.add_engine_args(ap)
+    return ap
+
+
+def agents_from_args(args: argparse.Namespace) -> tuple[AgentSpec, AgentSpec]:
+    """The two AgentSpecs of the command line (ValueError for a bad one; a search a seat cannot
+    run yet, rs_search.check_seat, too)."""
+    out = []
+    for side in ("a", "b"):
+        search = getattr(args, f"search_{side}", None)
+        if search is not None:
+            import rs_search
+            rs_search.check_seat(search)
+            search = rs_search.seat_search(search,
+                                           verify=True if getattr(args, "search_verify", False)
+                                           else None)
+        out.append(AgentSpec(getattr(args, side), name=getattr(args, f"name_{side}"),
+                             lead=getattr(args, f"lead_{side}"),
+                             noise=getattr(args, f"noise_{side}"), noise_seed=args.noise_seed,
+                             decide=args.decide, visibility=args.visibility,
+                             presses=side in args.presses, search=search,
+                             latency_ticks=getattr(args, f"latency_{side}", 0)))
+    return out[0], out[1]
+
+
+def search_summary(results: Sequence[MatchResult], name: str) -> dict | None:
+    """Agent `name`'s search over `results` (rs_search.merge_search_info of its seats'
+    search_info), None when it searched in none of them."""
+    import rs_search
+    infos = []
+    for r in results:
+        team = r.team_of(name)
+        info = r.info[team] if r.info and len(r.info) > team else None
+        if isinstance(info, Mapping):
+            infos.append(info.get("search"))
+    return rs_search.merge_search_info(infos)
+
+
+def _search_line(name: str, s: Mapping[str, Any]) -> str:
+    fallbacks = {k: v for k, v in (s.get("outcomes") or {}).items() if k not in ("searched", "root")}
+    dm = s.get("decision_ms") or {}
+    mean, p95 = dm.get("mean"), dm.get("p95_max")
+    return (f"{name} search ({'/'.join(s.get('presets') or ())}"
+            f"{', PRIVILEGED: reads the true battle' if s.get('privileged') else ''}): "
+            f"{s.get('decisions', 0)} decisions, {s.get('lookahead', 0)} on the root at B, "
+            f"{s.get('searches', 0)} searched, {s.get('overrides', 0)} overrides, "
+            f"{s.get('vetoes', 0)} vetoes, {s.get('errors', 0)} errors, fallbacks {fallbacks}, ms "
+            f"per decision mean {mean if mean is not None else '-'} p95 <= "
+            f"{p95 if p95 is not None else '-'}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
     args = ap.parse_args(argv)
     try:
         cfg = rs_engine.config_from_args(args)
         delay = _delay_arg(args.delay)
         require = _require(args.require)
         split = corpus_split(args.split, allow_final=args.final)
+        agents = agents_from_args(args)
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
@@ -1563,12 +1718,12 @@ def main(argv: list[str] | None = None) -> int:
             pairs.save(args.pairs_file)
     print(f"engine: {cfg.describe()}\npairs: {len(pairs)} of the {split} split "
           f"[{pairs.digest()}], {args.seats} seat(s) each", flush=True)
-    agents = (AgentSpec(args.a, name=args.name_a, lead=args.lead_a, noise=args.noise_a,
-                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility,
-                        presses="a" in args.presses),
-              AgentSpec(args.b, name=args.name_b, lead=args.lead_b, noise=args.noise_b,
-                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility,
-                        presses="b" in args.presses))
+    for a in agents:
+        if a.search is not None:
+            print(f"{a.label}: search {a.search['preset']} (rebuild {a.search['rebuild']['level']}"
+                  f"), latency {a.latency_ticks} tick(s)"
+                  + (": PRIVILEGED, its trials read the true battle (a ceiling, never promoted)"
+                     if a.privileged else ""), flush=True)
     base = ("a" in args.base_forms, "b" in args.base_forms)
     specs = pairing_specs(pairs.pairs, agents, seed=args.seed, seats=args.seats, base_forms=base,
                           delay=delay, engine=cfg.to_json(), mem_lag=args.mem_lag,
@@ -1582,12 +1737,17 @@ def main(argv: list[str] | None = None) -> int:
                      f"{s['n']} ({s['wins']} W {s['draws']} D {s['losses']} L), crown diff "
                      f"{s['crown_diff']:+.2f}, plays {s['plays']:.1f}, leak {s['leak']:.2f} "
                      f"elixir, full {s['full_s']:.1f} s")
+    searches = {a.label: search_summary(results, a.label) for a in agents
+                if a.search is not None}
+    lines += [_search_line(n, sm) for n, sm in searches.items() if sm]
     print("\n".join(lines) + f"\n({time.time() - t0:.0f}s)")
     record = {"kind": "rs_match", "agents": [a.to_dict() for a in agents], "split": split,
               "pairs_digest": pairs.digest(), "seats": args.seats, "seed": args.seed,
               "engine": cfg.to_json(), "delay": delay, "mem_lag": args.mem_lag,
               "summary": {n: summarize(results, n) for n in (args.name_a, args.name_b)},
               "results": [r.to_dict(log=False) for r in results]}
+    if searches:
+        record["search"] = searches
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")

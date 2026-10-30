@@ -94,9 +94,23 @@ the champion the paired bootstrap CI of candidate - champion and an exact McNema
 gate decision of every candidate and the best one that passed. The final split is refused unless
 final=True (--final): it is held out for the one reported final evaluation.
 
+SEARCH PLAYERS (docs/LIVE_SEARCH_PLAN.md S08, S09; tools/rs_match.py SEARCH SEATS). A player
+may search: the keys search (a preset name, "name@probes" / "name@R2"; JSON players take any
+search JSON) and latency_ticks (the delay its compute time is charged, on its own team only), e.g.
+"srch=runs/tokens/live_big_hog/best.pt,search=s_idle,latency_ticks=2". Both are part of the
+player's identity and game keys only when set, so every log without them resumes as before. A
+search a seat cannot run yet (s_reply before S07) is refused before any game. A player whose
+search reads the TRUE battle (s_true, the privileged ceiling) is labelled in the run header
+("privileged") and every game record carries it (rs_match seat_info "search": "privileged"):
+gate() gives such a candidate the decision "privileged" (never promoted, never admitted), from
+the names given and from the games themselves (Game.privileged), so no report can promote it.
+A run warns when a search's opponent model (S07) is a gate seat's checkpoint (search_warnings).
+
 WORKERS. Each worker process holds torch, royalesim and two policies (about WORKER_MB = 1.2 GB);
 worker_cap() keeps RESERVE_MB (3 GB) for the parent and the system, at most MAX_WORKERS (6) and
-one CPU free: on the owner's 16 GB PC with MuMu and the browser closed that is 4-6 workers.
+one CPU free: on the owner's 16 GB PC with MuMu and the browser closed that is 4-6 workers. A
+search player's worker holds a rebuild Battle and its trials too: --worker-mb (about 1800 with a
+search) sets the memory per worker the cap counts.
 
 Never imports scripts/gamestate; nothing here touches the emulator.
 """
@@ -146,7 +160,9 @@ MEM_LEGACY = "legacy"            # rs_rows.MEM_LEGACY
 H2H_BOTH, H2H_A = "both", "a"
 
 PASS, CYCLE, FAIL, INCOMPLETE = "pass", "cycle", "fail", "incomplete"
-DECISIONS = (PASS, CYCLE, FAIL, INCOMPLETE)
+#: SEARCH PLAYERS: a candidate whose search reads the true battle (s_true): never promoted.
+PRIVILEGED = "privileged"
+DECISIONS = (PASS, CYCLE, FAIL, INCOMPLETE, PRIVILEGED)
 COND_CHAMPION, COND_POOL, ANCHOR_PREFIX = "beats_champion", "pool_collapse", "anchor:"
 SKIP_SETTLED = "not counted: an earlier condition already settled the decision"
 SKIP_NO_POOL = "not played: no pool members besides the candidate, the champion and the anchors"
@@ -366,10 +382,10 @@ def pairings_for(config: GateConfig, protocol: Protocol, *, pool: bool = False) 
 # players
 # ---------------------------------------------------------------------------
 
-_INT_OPTS = frozenset({"lead", "noise_seed", "seed_offset"})
+_INT_OPTS = frozenset({"lead", "noise_seed", "seed_offset", "latency_ticks"})
 _FLOAT_OPTS = frozenset({"wait_keep"})
 _BOOL_OPTS = frozenset({"spell_aim", "hold_pending", "allow_drift", "presses"})
-_STR_OPTS = frozenset({"decide", "visibility", "schema", "noise"})
+_STR_OPTS = frozenset({"decide", "visibility", "schema", "noise", "search"})
 _TRUE, _FALSE = frozenset({"1", "true", "yes", "on"}), frozenset({"0", "false", "no", "off"})
 
 
@@ -398,8 +414,9 @@ def _option(key: str, text: str) -> Any:
 def parse_player(value: Any, **defaults: Any) -> Any:
     """An rs_match.AgentSpec from an AgentSpec, its dict, a JSON object, or the command-line
     form [NAME=]CKPT[,KEY=VALUE...] (keys: lead, decide, noise, noise_seed, visibility, schema,
-    wait_keep, spell_aim, hold_pending, seed_offset, allow_drift, presses). CKPT "idle" (or
-    empty) never plays. `defaults` fill keys the value leaves out (None: not filled)."""
+    wait_keep, spell_aim, hold_pending, seed_offset, allow_drift, presses, search, latency_ticks:
+    module doc, SEARCH PLAYERS). CKPT "idle" (or empty) never plays. `defaults` fill keys the
+    value leaves out (None: not filled)."""
     RM = _rm()
     if isinstance(value, RM.AgentSpec):
         return value
@@ -525,6 +542,56 @@ def identity_digest(ident: Mapping[str, Any]) -> str:
     return hashlib.sha1(_canon(ident).encode("utf-8")).hexdigest()[:16]
 
 
+def _search_of(player: Any) -> Any:
+    """A player's search: an AgentSpec's, or an identity / spec dict's "search" (None: none)."""
+    if isinstance(player, Mapping):
+        return player.get("search")
+    return getattr(player, "search", None)
+
+
+def privileged_players(players: Mapping[str, Any]) -> list[str]:
+    """The names whose search reads the TRUE battle (rs_search.is_privileged: s_true), sorted;
+    players are AgentSpecs or identity dicts (a run header's) by name (module doc, SEARCH
+    PLAYERS). rs_search is imported only when some player searches."""
+    searching = {n: _search_of(p) for n, p in players.items() if _search_of(p) is not None}
+    if not searching:
+        return []
+    import rs_search
+    return sorted(n for n, s in searching.items() if rs_search.is_privileged(s))
+
+
+def check_search_players(players: Mapping[str, Any]) -> None:
+    """SearchConfigError (a ValueError) for a player whose search a seat cannot run yet
+    (rs_search.check_seat: s_reply before S07), before any game is planned."""
+    searching = [_search_of(p) for p in players.values() if _search_of(p) is not None]
+    if searching:
+        import rs_search
+        for s in searching:
+            rs_search.check_seat(s)
+
+
+def search_warnings(players: Mapping[str, Any], digests: Mapping[str, str | None]) -> list[str]:
+    """One line per player whose search's opponent model (rs_search.opponent_checkpoint; S07)
+    has the checkpoint digest of a player of this run: the search may know that seat too well
+    (docs/LIVE_SEARCH_PLAN.md section 5). [] for every search before S07."""
+    out: list[str] = []
+    searching = {n: _search_of(p) for n, p in players.items() if _search_of(p) is not None}
+    if not searching:
+        return out
+    import rs_search
+    for name, search in sorted(searching.items()):
+        opp = rs_search.opponent_checkpoint(search)
+        digest = ckpt_digest(opp) if opp else None
+        if digest is None:
+            continue
+        for other, d in sorted(digests.items()):
+            if d == digest:
+                out.append(f"warning: {name}'s search models its opponent with {opp}, the "
+                           f"checkpoint of player {other} (digest {digest}): the search may know "
+                           "that seat too well; prefer an opponent model that is no gate seat")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # games: planning
 # ---------------------------------------------------------------------------
@@ -597,6 +664,7 @@ class Game:
     protocol: str = ""
     split: str = ""
     ids: tuple = ()
+    privileged: tuple = ()
 
     def __post_init__(self) -> None:
         teams = tuple(str(t) for t in self.teams)
@@ -609,6 +677,7 @@ class Game:
         object.__setattr__(self, "winner", winner)
         object.__setattr__(self, "seat", int(self.seat))
         object.__setattr__(self, "ids", tuple(None if i is None else str(i) for i in self.ids))
+        object.__setattr__(self, "privileged", tuple(bool(p) for p in self.privileged))
 
     def has(self, name: str) -> bool:
         return name in self.teams
@@ -637,12 +706,30 @@ class Game:
         the same opponent on the same position are the same game but for the player."""
         return (self.pairing, self.team_of(name), self.holder == name)
 
+    def privileged_names(self) -> set[str]:
+        """The teams' players whose search read the TRUE battle in this game (SEARCH PLAYERS)."""
+        return {self.teams[t] for t, p in enumerate(self.privileged) if p and t < 2}
+
     @classmethod
     def from_record(cls, rec: Mapping[str, Any]) -> "Game":
         return cls(key=str(rec["key"]), teams=tuple(rec["teams"]), winner=rec["winner"],
                    pairing=str(rec.get("pairing") or ""), seat=int(rec.get("seat") or 0),
                    holder=str(rec.get("holder") or ""), protocol=str(rec.get("protocol") or ""),
-                   split=str(rec.get("split") or ""), ids=tuple(rec.get("ids") or ()))
+                   split=str(rec.get("split") or ""), ids=tuple(rec.get("ids") or ()),
+                   privileged=_record_privileged(rec))
+
+
+def _record_privileged(rec: Mapping[str, Any]) -> tuple:
+    """Per team, whether a game record's seat searched with the true battle (rs_match seat_info
+    "search": "privileged"); () when neither did (so a record of a plain game gives the Game it
+    always gave)."""
+    result = rec.get("result")
+    info = result.get("info") if isinstance(result, Mapping) else None
+    flags = []
+    for i in list(info or ())[:2]:
+        search = i.get("search") if isinstance(i, Mapping) else None
+        flags.append(bool(isinstance(search, Mapping) and search.get("privileged")))
+    return tuple(flags) if any(flags) else ()
 
 
 @dataclasses.dataclass
@@ -970,7 +1057,10 @@ class GateDecision:
         return self.decision == CYCLE
 
     def turned_on(self) -> str:
-        """The condition the decision turned on ("none" for a pass)."""
+        """The condition the decision turned on ("none" for a pass; "privileged" for a
+        candidate whose search reads the true battle)."""
+        if self.decision == PRIVILEGED:
+            return PRIVILEGED
         for name, c in self.conditions.items():
             if c.skipped:
                 continue
@@ -984,10 +1074,13 @@ class GateDecision:
         return {n: c.missing for n, c in self.conditions.items() if c.incomplete}
 
     def to_dict(self) -> dict:
-        return {"candidate": self.candidate, "champion": self.champion,
-                "decision": self.decision, "admit": self.admit, "promote": self.promote,
-                "cycle": self.cycle, "turned_on": self.turned_on(), "missing": self.missing(),
-                "conditions": {n: c.to_dict() for n, c in self.conditions.items()}}
+        out = {"candidate": self.candidate, "champion": self.champion,
+               "decision": self.decision, "admit": self.admit, "promote": self.promote,
+               "cycle": self.cycle, "turned_on": self.turned_on(), "missing": self.missing(),
+               "conditions": {n: c.to_dict() for n, c in self.conditions.items()}}
+        if self.decision == PRIVILEGED:
+            out["privileged"] = True
+        return out
 
 
 def _matched(games: Iterable[Game], x: str, y: str, opponent: str
@@ -1091,16 +1184,19 @@ def ratings(games: Iterable[Game], anchor: str, **kwargs: Any) -> Any:
 
 
 def gate(games: Iterable[Game], candidate: str, champion: str, *, anchors: Iterable[str] = (),
-         pool: Iterable[str] = (), config: GateConfig | None = None, table: Any = None
-         ) -> GateDecision:
+         pool: Iterable[str] = (), config: GateConfig | None = None, table: Any = None,
+         privileged: bool = False) -> GateDecision:
     """The promotion gate on one protocol's games (module doc, THE GATE). anchors equal to the
     candidate or the champion are left out, so are pool members that are anchors. `table`
     (a RatingTable or anything with predict(a, b)) is the pool's reference; default: ratings()
-    over the games, anchored at the champion."""
+    over the games, anchored at the champion. A candidate whose search reads the true battle
+    (`privileged`, or any of its games says so: Game.privileged) gets the decision PRIVILEGED
+    whatever its conditions say: never promoted, never admitted (module doc, SEARCH PLAYERS)."""
     config = config or GateConfig()
     if candidate == champion:
         raise ValueError(f"the candidate is the champion ({candidate!r})")
     games = list(games)
+    privileged = bool(privileged) or any(candidate in g.privileged_names() for g in games)
     anchors = [a for a in dict.fromkeys(anchors) if a not in (candidate, champion)]
     pool = [m for m in dict.fromkeys(pool) if m not in (candidate, champion) and m not in anchors]
     if pool and table is None:
@@ -1127,6 +1223,8 @@ def gate(games: Iterable[Game], candidate: str, champion: str, *, anchors: Itera
         decision = INCOMPLETE
     else:
         decision = PASS if last.passed else CYCLE
+    if privileged:
+        decision, settled_after = PRIVILEGED, None
     if settled_after is not None:
         later = [ANCHOR_PREFIX + a for a in anchors] if settled_after == 0 else []
         later.append(COND_POOL)
@@ -1244,9 +1342,11 @@ def rating_rows(table: Any) -> dict:
 
 def report(games: Iterable[Game], *, candidates: Sequence[str], champion: str,
            anchors: Sequence[str] = (), pool: Sequence[str] = (), config: GateConfig | None = None,
-           rating_anchor: str | None = None, final: bool = False) -> dict:
+           rating_anchor: str | None = None, final: bool = False,
+           privileged: Iterable[str] = ()) -> dict:
     """The report of one protocol's games (module doc, THE REPORT). FinalSplitError for games
-    of the final split unless final=True; ValueError for games of several splits."""
+    of the final split unless final=True; ValueError for games of several splits. privileged:
+    names whose search reads the true battle (with those the games name: SEARCH PLAYERS)."""
     config = config or GateConfig()
     games = list(games)
     splits = sorted({g.split for g in games if g.split})
@@ -1272,12 +1372,17 @@ def report(games: Iterable[Game], *, candidates: Sequence[str], champion: str,
         "paired": paired_table(games, candidates, champion, order, config),
         "ratings": rating_rows(table), "gate_config": config.to_dict(), "gates": {},
         "best": None}
+    marked = set(privileged)
+    for g in games:
+        marked |= g.privileged_names()
+    if marked:
+        out["privileged"] = sorted(marked)
     best, best_lb = None, -1.0
     for c in candidates:
         if c == champion:
             continue
         decision = gate(games, c, champion, anchors=anchors, pool=pool, config=config,
-                        table=table)
+                        table=table, privileged=c in marked)
         out["gates"][c] = decision.to_dict()
         lb = decision.conditions[COND_CHAMPION].bound
         if decision.promote and lb > best_lb:
@@ -1335,6 +1440,9 @@ def format_report(rep: Mapping[str, Any]) -> str:
     lines.append("gate:")
     for name, g in rep["gates"].items():
         lines.append(f"  {name}: {g['decision'].upper()} (vs champion {g['champion']})")
+        if g.get("privileged"):
+            lines.append("    its search reads the TRUE battle (s_true): a ceiling, never "
+                         "promoted or admitted")
         for cname, c in g["conditions"].items():
             lines.append("    " + _condition_line(cname, c))
     lines.append(f"best: {rep['best'] or 'none passed'}")
@@ -1367,7 +1475,7 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
              play: Callable[[Any], Any] | None = None, stop_early: bool = True,
              rating_anchor: str | None = None, final: bool = False, decide: str | None = None,
              echo: Callable[[str], Any] | None = None, max_errors: int = MAX_ERRORS,
-             presses: bool | None = None) -> dict:
+             presses: bool | None = None, worker_mb: int = WORKER_MB) -> dict:
     """Play what the gate needs and report (module doc). pairs: an rs_match.PairSet (or a list
     of DeckPairs) of the protocol's split; players: AgentSpecs, dicts or [NAME=]CKPT[,K=V] text
     (`decide` / `presses`: the defaults of the players that set none; V2 PLAYERS).
@@ -1375,7 +1483,8 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     against every anchor; the champion and the surviving candidates against the selected pool
     members (pool_selection; the champion's games give pool_collapse its reference on the same
     positions). stop_early=False plays every phase for every candidate. play(spec) ->
-    MatchResult replaces the engine (tests); workers > 1 runs worker processes (worker_cap)."""
+    MatchResult replaces the engine (tests); workers > 1 runs worker processes (worker_cap, at
+    worker_mb each). Search players: module doc, SEARCH PLAYERS."""
     config = config or GateConfig()
     protocol = (protocol or Protocol()).resolved()
     if protocol.split == FINAL_SPLIT and not final:
@@ -1398,21 +1507,33 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     roles = prepare_players(candidates, champion, anchors, pool, protocol, decide=decide,
                             presses=presses)
     players = roles.players
+    check_search_players(players)
     digests = {n: ckpt_digest(a.ckpt) for n, a in players.items()}
     idents = {n: identity(a, digests[n]) for n, a in players.items()}
     ids = {n: identity_digest(i) for n, i in idents.items()}
+    privileged = privileged_players(players)
+    warnings = search_warnings(players, digests)
+    for line in warnings + [f"note: {n}'s search reads the TRUE battle (s_true): a privileged "
+                            "ceiling, never promoted" for n in privileged]:
+        if echo is not None:
+            echo(line)
     log_path = Path(log_path)
     log = read_log(log_path)
     check_identities(log, pd, ids)
-    append_records(log_path, [{
+    header = {
         "kind": KIND_RUN, "schema": SCHEMA, "tool": TOOL, "protocol": pd,
         "protocol_spec": protocol.to_dict(), "split": protocol.split, "pairs_digest": digest,
         "players": {n: {**i, "id": ids[n]} for n, i in idents.items()},
         "roles": roles.to_dict(), "gate": config.to_dict(), "stop_early": bool(stop_early),
-        "time": time.time()}])
+        "time": time.time()}
+    if privileged:
+        header["privileged"] = privileged
+    if warnings:
+        header["warnings"] = warnings
+    append_records(log_path, [header])
     done = log.done(pd)
     if play is None and workers > 1:
-        workers = worker_cap(workers)[0]
+        workers = worker_cap(workers, per_worker_mb=worker_mb)[0]
     plist = _pair_list(pairs)
     champ = roles.champion
     anchor_names = list(roles.anchors)
@@ -1462,7 +1583,7 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     final_log = read_log(log_path)
     rep = report(final_log.of(pd), candidates=roles.candidates, champion=champ,
                  anchors=anchor_names, pool=members, config=config, rating_anchor=rating_anchor,
-                 final=final)
+                 final=final, privileged=privileged)
     rep.update(protocol=protocol.to_dict(), protocol_digest=pd, pairs_digest=digest,
                log=str(log_path), phases=phases, pool_offered=list(roles.pool),
                errors=sum(1 for e in final_log.errors if e.get("protocol") == pd))
@@ -1509,7 +1630,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--candidate", action="append", required=True, metavar=player,
                      help="a candidate (repeatable); CKPT 'idle' never plays; keys: lead, "
                           "decide, noise, noise_seed, visibility, schema, wait_keep, spell_aim, "
-                          "hold_pending, seed_offset, allow_drift, presses")
+                          "hold_pending, seed_offset, allow_drift, presses, search (a preset: "
+                          "s_root, s_idle; s_true is privileged, never promoted), latency_ticks")
     run.add_argument("--champion", required=True, metavar=player)
     run.add_argument("--anchor", action="append", default=[], metavar=player)
     run.add_argument("--pool", action="append", default=[], metavar=player,
@@ -1547,6 +1669,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="play every phase for every candidate (no early stop)")
     run.add_argument("--workers", type=int, default=4,
                      help=f"worker processes, capped for memory (about {WORKER_MB} MB each)")
+    run.add_argument("--worker-mb", type=int, default=WORKER_MB, metavar="MB",
+                     help=f"memory per worker the cap counts (default {WORKER_MB}; about 1800 "
+                          "with a search player)")
     run.add_argument("--max-errors", type=int, default=MAX_ERRORS)
     run.add_argument("--allow-vocab-drift", action="store_true")
     run.add_argument("--log", type=Path, default=None,
@@ -1606,7 +1731,8 @@ def _cmd_report(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     members = pool_selection(games, offered, candidates, champion, config, rating_anchor)
     try:
         rep = report(games, candidates=candidates, champion=champion, anchors=anchors,
-                     pool=members, config=config, rating_anchor=rating_anchor, final=args.final)
+                     pool=members, config=config, rating_anchor=rating_anchor, final=args.final,
+                     privileged=privileged_players(header.get("players") or {}))
     except FinalSplitError as exc:
         ap.error(str(exc))
     rep.update(protocol=header.get("protocol_spec"), protocol_digest=pd, log=str(args.log),
@@ -1633,6 +1759,9 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         config = _gate_config(args)
         roles = prepare_players(args.candidate, args.champion, args.anchor, args.pool, protocol,
                                 decide=args.decide, presses=True if args.presses else None)
+        check_search_players(roles.players)
+        if args.worker_mb < 1:
+            raise ValueError(f"--worker-mb {args.worker_mb}: at least 1 MB")
     except (ValueError, TypeError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
@@ -1685,7 +1814,7 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         print(f"error: the gate needs {need} pairings; the {split} split gives {len(pairs)}"
               f"{' in ' + str(pairs_path) if pairs_path.exists() else ''}", file=sys.stderr)
         return 1
-    workers, why = worker_cap(args.workers)
+    workers, why = worker_cap(args.workers, per_worker_mb=args.worker_mb)
     print(f"engine: {cfg.describe()}\nprotocol: {protocol.describe()}\npairs: {len(pairs)} of "
           f"the {split} split [{pairs.digest()}] in {pairs_path}\nlog: {log_path}\nworkers: {why}",
           flush=True)
@@ -1696,7 +1825,8 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                        pool=[roles.players[m] for m in roles.pool], config=config,
                        log_path=log_path, workers=workers, stop_early=not args.full,
                        rating_anchor=args.rating_anchor, final=args.final,
-                       echo=lambda s: print(s, flush=True), max_errors=args.max_errors)
+                       echo=lambda s: print(s, flush=True), max_errors=args.max_errors,
+                       worker_mb=args.worker_mb)
     except FinalSplitError as exc:
         ap.error(str(exc))
     except (ValueError, RuntimeError) as exc:
