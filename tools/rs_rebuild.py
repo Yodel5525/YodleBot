@@ -30,12 +30,14 @@ LEVELS (plan 4.8; RebuildSettings.level, or spec(level=)):
 
 THE SPEC (RootSpec, build_spec / Rebuilder.spec). Everything a reset needs, decided before any
 engine call but two pure queries (building_placement for the snap; formation_preview for a card's
-members, deploy time and tap point): seed, both decks in deal order (shuffle 0: hand =
-deck[0:4], queue = deck[4:8]), elixir, tower hp, the spawns (team, card, x, y, hp) with each one's
-view uid and creating card, the recasts, our plays in flight (replays: exec tick < B; later: exec
-tick >= B, for the trials), and the bookkeeping fidelity reads. A frozen dataclass of tuples, so it
-pickles (the procs backend, plan 6.3) and spec.key is the sha1 of its canonical JSON: two views that
-differ only in what no screen shows give one key (the S08 leak test).
+members, deploy time and tap point; both asked on a blank board, never on whatever root the
+battle holds, and cached, so a view rebuilt twice gives one spec): seed, both decks in deal order
+(shuffle 0: hand = deck[0:4], queue = deck[4:8]), elixir, tower hp, the spawns (team, card, x, y,
+hp) with each one's view uid and creating card, the recasts, our plays in flight (replays: exec
+tick < B; later: exec tick >= B, for the trials), and the bookkeeping fidelity reads. A frozen
+dataclass of tuples, so it pickles (the procs backend, plan 6.3) and spec.key is the sha1 of its
+canonical JSON: two views that differ only in what no screen shows give one key (the S08 leak
+test).
 
 THE DEAL (deal()). Each side's target is its hand H and queue Q at t (CardCycle, S02; the
 opponent's open slots filled from `opp_fill`, a deck prior's draw, then its seen deck padded with
@@ -1599,6 +1601,7 @@ class Rebuilder:
         self._battle: Any = None
         self._tables: Tables | None = None
         self._snaps: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
+        self._taps: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
         self._previews: dict[int, tuple | None] = {}
         self._blank = False
         self._current: Built | None = None
@@ -1676,6 +1679,30 @@ class Rebuilder:
         return self._tables
 
     # ------------------------------------------------------------ cached pure queries
+    def _on_blank(self, accessor: str, unavailable: str) -> Callable[..., Any] | None:
+        """The battle's `accessor` (building_placement, formation_preview) with the battle on the
+        blank board: reset to it first unless it is there already. Every query a spec makes is
+        asked there, never on the board the battle happens to hold (a fresh battle, or the last
+        root with its units, towers and tick), so a spec, and its key, is a function of the view
+        and the settings alone, whichever root was built before it. None without the accessor,
+        or when the engine cannot reset to a blank board (stats[unavailable] counts that)."""
+        b = self.battle
+        fn = getattr(b, accessor, None)
+        if not callable(fn):
+            return None
+        if not self._blank:
+            deck = list(dict.fromkeys(self.tables.filler + self.tables.spawnable))[:DECK_SIZE]
+            self._current, self._dirty = None, True
+            try:
+                b.reset(seed=0, decks=[list(deck), list(deck)], shuffle=0, start_tick=BLANK_TICK,
+                        elixir_milli=[ELIXIR_MAX_MILLI, ELIXIR_MAX_MILLI], tower_hp=None,
+                        spawns=[])
+            except Exception:                   # no blank board: no such query on this engine
+                self.stats[unavailable] += 1
+                return None
+            self._blank = True
+        return fn
+
     def snap(self, team: int, card: int, x: int, y: int) -> tuple[int, int] | None:
         """Where Battle.building_placement lands a tap of `card` by `team` at (x, y) subtiles, asked
         on a blank board (other buildings never move it), cached; None without the accessor or
@@ -1683,21 +1710,9 @@ class Rebuilder:
         key = (int(team), int(card), int(x), int(y))
         if key in self._snaps:
             return self._snaps[key]
-        b = self.battle
-        fn = getattr(b, "building_placement", None)
+        fn = self._on_blank("building_placement", "snap_unavailable")
         got = None
-        if callable(fn) and not self._blank:
-            deck = list(dict.fromkeys(self.tables.filler + self.tables.spawnable))[:DECK_SIZE]
-            self._current, self._dirty = None, True
-            try:
-                b.reset(seed=0, decks=[list(deck), list(deck)], shuffle=0, start_tick=BLANK_TICK,
-                        elixir_milli=[ELIXIR_MAX_MILLI, ELIXIR_MAX_MILLI], tower_hp=None,
-                        spawns=[])
-                self._blank = True
-            except Exception:                   # no blank board: no snapping on this engine
-                fn = None
-                self.stats["snap_unavailable"] += 1
-        if callable(fn):
+        if fn is not None:
             try:
                 res = fn(int(team), self.tables.names[int(card)], int(x), int(y))
             except Exception:                   # an odd card: keep the perceived point
@@ -1710,14 +1725,15 @@ class Rebuilder:
         return got
 
     def _preview(self, card: int) -> tuple | None:
-        """formation_preview's members of a blue play of `card` at the spawn point (cached), or
-        None without the accessor or for a card it refuses."""
+        """formation_preview's members of a blue play of `card` at the spawn point, asked on the
+        blank board (cached), or None without the accessor or for a card it refuses."""
         card = int(card)
         if card in self._previews:
             return self._previews[card]
         rows = None
-        fn = getattr(self.battle, "formation_preview", None)
-        if callable(fn) and 0 <= card < len(self.tables.names):
+        fn = (self._on_blank("formation_preview", "preview_unavailable")
+              if 0 <= card < len(self.tables.names) else None)
+        if fn is not None:
             sx, sy = rs_spawn_table.spawn_point(self.sub)
             try:
                 rows = tuple(tuple(r) for r in (fn(0, self.tables.names[card], sx, sy) or ())
@@ -1744,20 +1760,28 @@ class Rebuilder:
     def tap_point(self, team: int, card: int, x: int, y: int) -> tuple[int, int] | None:
         """The tap whose formation_preview members are centred on (x, y) subtiles: (x, y) less
         the offset of the members' centroid from a tap there (one fixed-point step; a building's
-        or a single unit's is (x, y)); None without the accessor or when it refuses."""
-        fn = getattr(self.battle, "formation_preview", None)
-        if not callable(fn) or not 0 <= int(card) < len(self.tables.names):
-            return None
-        try:
-            rows = [r for r in (fn(int(team), self.tables.names[int(card)], int(x), int(y)) or ())
-                    if len(r) >= 3]
-        except Exception:                       # an odd card: keep the centroid
-            return None
-        if not rows:
-            return None
-        ox = sum(float(r[1]) for r in rows) / len(rows) - int(x)
-        oy = sum(float(r[2]) for r in rows) / len(rows) - int(y)
-        return int(round(int(x) - ox)), int(round(int(y) - oy))
+        or a single unit's is (x, y)), asked on the blank board, cached; None without the
+        accessor or when it refuses."""
+        key = (int(team), int(card), int(x), int(y))
+        if key in self._taps:
+            return self._taps[key]
+        got = None
+        fn = (self._on_blank("formation_preview", "preview_unavailable")
+              if 0 <= int(card) < len(self.tables.names) else None)
+        if fn is not None:
+            try:
+                rows = [r for r in (fn(int(team), self.tables.names[int(card)], int(x), int(y))
+                                    or ()) if len(r) >= 3]
+            except Exception:                   # an odd card: keep the centroid
+                rows = []
+            if rows:
+                ox = sum(float(r[1]) for r in rows) / len(rows) - int(x)
+                oy = sum(float(r[2]) for r in rows) / len(rows) - int(y)
+                got = (int(round(int(x) - ox)), int(round(int(y) - oy)))
+        if len(self._taps) >= SNAP_CACHE:
+            self._taps.clear()
+        self._taps[key] = got
+        return got
 
     # ------------------------------------------------------------ specs
     def spec(self, view: Mapping[str, Any], *, land_tick: int | None = None, seed: int = 0,
