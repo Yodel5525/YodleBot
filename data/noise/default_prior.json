@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "name": "default_prior",
+  "description": "Reasoned prior for the first live setup (KataCR-trained detector, V03 tracker, V07 HUD readers on the owner's 747x1328 PrintWindow frames). Nothing here is measured yet: tools/fit_noise_profile.py (V11) replaces each group with rates fitted from vision_replay --labels and the bot's own taps.",
+  "_sources": [
+    "owner's first recorded friendly, 2026-10-29: 22,067 frames in 400 s (57 fps, median interval 17.4 ms), stale at read median 11.5 ms / max 29 ms; frames 747x1328 (9:16); units carry a level badge and an HP bar in team colour (blue ours, red theirs); deploying units show a stopwatch; HUD: 'Time left m:ss' clock, integer elixir in a drop icon over the bar, tower HP digits (L11 princess 3052, king 4824 shown only once damaged); the bot account plays base cards only, opponents may field evolutions and heroes",
+    "scripts/vision/tracker.py TrackerConfig: min_hits 2, coast_ticks 6, max_age_ticks 20, team vote from bar colour (2.5 per frame), side classifier, birth half and own taps (6.0)",
+    "scripts/vision/hpbars.py: a unit without a bar is full (the game draws the bar once damaged); FULL_SNAP 0.95; a bar flashing white when hit reads as no bar for that frame",
+    "scripts/vision/hud.py ElixirFilter / ClockFilter and the V07 HUD review: the elixir bar's end hides under the count below about 0.6 of an elixir, so the fraction then comes from regeneration or is lost (digit*1000); clock_offset_ticks (tick 0 vs the timer leaving 3:00) is unmeasured; tower digits read exactly once templates exist, the bar fallback reads 2-3 points low",
+    "scripts/vision/geometry.py: the pixel map is the author's linear fit from another device until the calibration friendly refits it; the flyer offset DEFAULT_FLYING (+600 mt) is an unmeasured prior",
+    "data/vision/classes.json 'katacr' and docs/SPARRING_PLAN.md risks: the public KataCR dataset (2024) labels 15 unit evolutions, no hero and none of the newer cards",
+    "scripts/vision/events.py TIMING: an opponent play is dated at its first sighting and reported once the tracker decides its team (team_wait_ticks 10 at most)"
+  ],
+  "board": {
+    "lag_ticks": 0,
+    "jitter_ticks": 0,
+    "max_hold_ticks": 2,
+    "_why": "Zero on purpose. Capture to decision is about 1 tick (stale median 11.5 ms, max 29 ms, plus inference), and it is already inside D: E11 decision-time rows observe D = 24 +- 3 ticks before the play runs, and tools/latency_probe.py measures D from the decision frame's own tick. Set lag_ticks 1 only for an evaluation whose --delay leaves capture out (21 alone), with a state pushed every tick."
+  },
+  "new_units": {
+    "delay_ticks": 2,
+    "jitter_ticks": 1,
+    "_why": "The tracker reports a track after min_hits = 2 sightings; perception runs at roughly 1-1.5 frames per tick, and the first detection of a unit dropping in may take a frame more."
+  },
+  "drop": {
+    "small": 0.12,
+    "medium": 0.05,
+    "large": 0.03,
+    "building": 0.02,
+    "by_class": {},
+    "_why": "Track-level misses after coasting (coast_ticks 6 bridges short gaps). Phase 5's gate is precision and recall >= 0.90 on our deck and common cards; swarm units (Skeleton 81 hp, Bat, Spirits, Goblins at level 11) are small, overlap in clutter and are missed most; Giants and buildings are large and static."
+  },
+  "size": {
+    "small_max_hp": 400,
+    "large_min_hp": 2500,
+    "_why": "Level-11 hit points (classes.json level-1 x 2.56): Skeleton 81, Bat 81, Goblin 202, Ice Spirit 215, Minion 230, Archer 304 are small; Musketeer 721, Ice Golem 1228, Hog Rider 1697, Knight 1766 medium; Giant 3968, Golem 5120 large."
+  },
+  "forms": {
+    "evo_to_base_p": 0.3,
+    "hero_to_base_p": 1.0,
+    "unlabelled_to_base": true,
+    "_why": "KataCR (2024) labels only 15 unit evolutions (Archer, Barbarian, Bat, Battle Ram, Bomber, Firecracker, Ice Spirit, Knight, Mortar, Royal Recruit, Royal Giant, Skeleton, Tesla, Valkyrie, Wall Breaker) and no hero, so a form without a detector class (classes.json 'katacr') always reads as its base; the labelled evolutions have few training boxes, so about a third still read as base. The bot's own cards are all base forms (owner), so this only touches the opponent's units."
+  },
+  "confusion": {
+    "unknown_p": 0.01,
+    "pairs": {
+      "IceSpirits": {"FireSpirits": 0.02, "ElectroSpirit": 0.02, "HealSpirit": 0.01},
+      "FireSpirits": {"IceSpirits": 0.02, "ElectroSpirit": 0.01},
+      "ElectroSpirit": {"IceSpirits": 0.02},
+      "Goblin": {"SpearGoblin": 0.03},
+      "SpearGoblin": {"Goblin": 0.03},
+      "Minion": {"MegaMinion": 0.02},
+      "MegaMinion": {"Minion": 0.02},
+      "Wizard": {"IceWizard": 0.02, "ElectroWizard": 0.02},
+      "IceGolemite": {"Golemite": 0.03},
+      "Golemite": {"IceGolemite": 0.03},
+      "Giant": {"RoyalGiant": 0.01},
+      "RoyalGiant": {"Giant": 0.01},
+      "HogRider": {"RoyalHog": 0.01}
+    },
+    "_why": "UNMEASURED placeholders for KataCR look-alike families (spirits, goblins, minions, wizards, golemites, giants, hogs). The tracker votes a track's label over its life (label_switch_frames 3), so a confusion is held per track (sticky per uid). Replace with the confusion matrix of vision_replay --labels (V11)."
+  },
+  "side_flip": {
+    "p": 0.01,
+    "_why": "Each unit's level badge and HP bar are in team colour (owner frames), worth 2.5 nats per frame in the tracker's team vote, and our own taps claim our units outright; a flip needs an undecided track born near the river, or the author's 201-class weights whose side classifier is uninformative (side_prob 0.5)."
+  },
+  "position": {
+    "sigma_x_mt": 250,
+    "sigma_y_mt": 400,
+    "flyer_dx_mt": 0,
+    "flyer_dy_mt": 0,
+    "flyer_sigma_mt": 400,
+    "_why": "At 747x1328 a pixel is about 28 mt across and 35 mt down the arena; box jitter of 5-10 px plus the box-bottom foot point, perspective and an uncalibrated linear map (vision-14: tenths of a tile to a tile near the bridges) give a few hundred millitiles, more in y. The flyer correction (+600 mt) is itself unmeasured, so flyers get 400 mt more spread and no bias until the calibration friendly measures one."
+  },
+  "hp": {
+    "no_bar_p": 0.15,
+    "sigma": 0.03,
+    "quant": 0.025,
+    "full_snap": 0.95,
+    "_why": "A unit bar is about one tile, ~40 px at 747 wide: steps of 0.025. Bars that flash white when hit, or that cannot be attached in clutter, read as full; reads of 0.95 and up snap to full (hpbars.FULL_SNAP). Undamaged units have no bar and are exact."
+  },
+  "deploy": {
+    "age_offset_ticks": 1,
+    "_why": "public_state computes deploy_ticks as the deploy time minus the track's age, and the age counts from the first detection, about a tick after the unit appears; the on-screen stopwatch is not read yet."
+  },
+  "false_positives": {
+    "rate": 0.05,
+    "classes": {},
+    "near_sigma_mt": 700,
+    "_why": "min_hits = 2 filters single-frame ghosts, so what is left is mostly a double box on a real unit (a second track next to it): one phantom in about twenty observations, within a tile of the unit it copies."
+  },
+  "towers": {
+    "sigma_frac": 0.003,
+    "bias_frac": 0.0,
+    "quant_hp": 0,
+    "_why": "Tower HP is read from the digits (3052 at level 11) once the calibration friendly captured the templates: near exact, rare misreads. Without templates the bar fallback reads 2-3 points low: use bias_frac -0.025 and quant_hp 30 for that setup."
+  },
+  "elixir": {
+    "fraction_sigma_milli": 120,
+    "fraction_lost_p": 0.05,
+    "fraction_fill_milli": 0,
+    "digit_error_p": 0.005,
+    "_why": "The digit in the drop icon is read reliably (hand and HUD gate >= 99%); the fraction comes from the bar (tolerance 150 milli) or, below about 0.6 when the bar's end hides under the count, from regeneration anchored on digit changes. After a re-sync the filter knows the digit alone (digit*1000: fill 0)."
+  },
+  "clock": {
+    "bias_ticks": 0,
+    "sigma_ticks": 2,
+    "quant_ticks": 0,
+    "_why": "ClockFilter dates each change of the m:ss display at the midpoint of two frames 17 ms apart, so it resolves a tick; the remaining error is the unmeasured offset between tick 0 and the timer leaving 3:00 and how the display rounds, put here as a 2-tick spread with no bias."
+  },
+  "opponent_plays": {
+    "miss_p": 0.03,
+    "spell_miss_p": 0.15,
+    "late_ticks": 3,
+    "late_jitter_ticks": 2,
+    "unknown_p": 0.02,
+    "_why": "A play is recorded when its first unit is confirmed and its team decided (new_units delay plus a frame or two of team vote). Troop plays are seldom missed; spells show for a fraction of a second (The Log, Zap) and are missed far more often. An unnamed card is recorded as token 1."
+  }
+}
