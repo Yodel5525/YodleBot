@@ -331,14 +331,14 @@ LINE_ROW = 15                           # the elixir bar's 1 px white top line i
 
 
 def elixir_box(text: str, *, line_px: int = 1, touch: bool = False, speck: bool = True,
-               thick: bool = False) -> tuple[np.ndarray, np.ndarray, list]:
+               thick: bool = False, line_row: int = LINE_ROW) -> tuple[np.ndarray, np.ndarray, list]:
     """A synthetic elixir_digit box shaped like the owner's frame 00000665 (elixir 9):
     `text` in bold digits from ELX_AT, 3 px apart, and the bar's white top line,
-    `line_px` tall from LINE_ROW, from box edge to box edge on both sides of the
+    `line_px` tall from `line_row`, from box edge to box edge on both sides of the
     digits and between them, stopping 2 px short of each glyph (its dark
     outline) or, with touch, at it. speck: a 1 px speck in the line's columns,
     8 px right of the last digit, on the digits' top row. thick: the line 3 px
-    tall (rows 14-16) in the 3 columns right of the last digit, touching it.
+    tall (around line_row) in the 3 columns right of the last digit, touching it.
     Returns the image, the digits alone (the clean image) and their boxes."""
     w, h = ELX
     digits = np.zeros((h, w), dtype=bool)
@@ -355,10 +355,10 @@ def elixir_box(text: str, *, line_px: int = 1, touch: bool = False, speck: bool 
     for x0, _, x1, _ in boxes:
         line[max(0, x0 - clear):x1 + clear] = False
     extra = np.zeros((h, w), dtype=bool)
-    extra[LINE_ROW:LINE_ROW + line_px, line] = True
+    extra[line_row:line_row + line_px, line] = True
     end = boxes[-1][2]
     if thick:
-        extra[LINE_ROW - 1:LINE_ROW + 2, end:end + 3] = True
+        extra[line_row - 1:line_row + 2, end:end + 3] = True
     if speck:
         extra[ELX_AT[1], end + 8] = True
     clean = np.empty((h, w, 3), dtype=np.uint8)
@@ -432,6 +432,37 @@ def test_elixir_bar_line_never_joins_or_widens_a_glyph(text, kw):
     assert r.text == text and r.conf == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("line_row, line_px, touch", [
+    (6, 1, False), (6, 1, True), (7, 1, True), (5, 2, True), (6, 2, False)])
+def test_elixir_bar_line_on_a_digits_end_stroke_keeps_the_stroke(line_row, line_px, touch):
+    # the line on the rows of the '7''s 3 px top bar: the bar's 12 columns left of
+    # its stem lie on the line's band, but they are more than a piece of the line
+    # touching the glyph (at most min_stroke columns), and 2 px clear of the
+    # line they do not touch it at all; trimming them read the '7' as a '1'
+    img, clean, boxes = elixir_box("7", line_row=line_row, line_px=line_px, touch=touch)
+    assert boxes == [(16, 6, 31, 33)]
+    mask = TP.ELIXIR_GLYPH_STYLE.mask(img)
+    assert np.array_equal(mask, TP.DEFAULT_GLYPH_STYLE.mask(clean))
+    assert TP.drop_specks(TP.segment_glyphs(mask)) == boxes
+    r = TP.DigitOCR(digit_store(("elixir",)), "elixir").read(img)
+    assert r.text == "7" and r.conf == pytest.approx(1.0)
+
+
+def test_clean_glyph_mask_keeps_a_glyph_end_the_line_does_not_touch():
+    # a stroke with a 3x3 flag on its left, on the line's rows; the line stops 2 px
+    # short of the glyph on both sides (its outline, as on the owner's frames)
+    glyph = np.zeros((27, 30), dtype=bool)
+    glyph[:, 10:13] = True
+    glyph[8:11, 7:10] = True
+    m = glyph.copy()
+    m[9, 0:5] = m[9, 15:30] = True
+    m[0, 20] = True                             # a speck
+    assert np.array_equal(TP.clean_glyph_mask(m, 3), glyph)
+    # a piece of the line 3 px tall on its own is dropped, wherever it is
+    m[8:11, 22:27] = True
+    assert np.array_equal(TP.clean_glyph_mask(m, 3), glyph)
+
+
 def test_elixir_templates_stored_before_the_fix_still_match():
     # with the line touching the '9', the old splitter stored the whole box width as
     # the '9'; loading cleans the line out of it, so it matches like a clean '9'
@@ -453,6 +484,8 @@ def test_glyph_style_dicts_and_which_fonts_clean():
     assert TP.GlyphStyle.from_dict(before) == TP.DEFAULT_GLYPH_STYLE
     with pytest.raises(ValueError):
         TP.GlyphStyle.from_dict({"min_stroke": -1})
+    with pytest.raises(ValueError):
+        TP.GlyphStyle(min_stroke=-1)
     # the clock and tower styles do not clean: their masks, so their readings, are as before
     assert TP.font_style("clock") is TP.DEFAULT_GLYPH_STYLE and TP.font_style("tower") is TP.TOWER_GLYPH_STYLE
     img, _, _ = elixir_box("9")
@@ -949,6 +982,25 @@ def test_hud_reader_end_to_end():
     assert (hud.clock_tick, hud.elixir_milli) == (35, 6400)
     assert reader.report.summary()["clock"]["text"] == "2:59"
     VT.Hud.from_dict(json.loads(json.dumps(hud.to_dict())))      # the contract still round-trips
+
+
+def test_hud_reader_reads_the_elixir_count_through_the_bar_line():
+    # the elixir bar's 1 px top line across the elixir_digit box (x 70-100), 2 px
+    # clear of the '6' (x 73-87), and a speck above it in its columns, as on the
+    # owner's frame 00000665; the elixir font's style cleans both away, the
+    # clock's style, passed for the elixir font, reads them as a second glyph
+    f = hud_frame()
+    f[612, 70] = WHITE
+    f[612, 90:100] = WHITE
+    f[602, 95] = WHITE
+    reader = H.HudReader(full_store(), CARD_IDS, regions=regions())
+    hud = reader.read(f, 0.0)
+    assert (reader.report.elixir_read.digit, reader.report.elixir_read.text) == (6, "6")
+    assert hud.elixir_milli == 6400 and reader.report.errors == []
+    plain = H.HudReader(full_store(), CARD_IDS, regions=regions(),
+                        glyph_styles={"elixir": TP.DEFAULT_GLYPH_STYLE})
+    plain.read(f, 0.0)
+    assert (plain.report.elixir_read.digit, plain.report.elixir_read.text) == (None, "6:")
 
 
 def test_hud_reader_without_templates_reads_unknowns_without_raising():

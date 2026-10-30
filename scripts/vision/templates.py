@@ -470,14 +470,20 @@ def clean_glyph_mask(mask: np.ndarray, min_stroke: int) -> np.ndarray:
     1. fill in vertical runs shorter than `min_stroke` px is dropped
        (thin_fill): a line up to min_stroke - 1 px tall, specks, and the 1-2 px
        tips of a glyph's anti-aliased edges;
-    2. a row where step 1 dropped at least 2 x min_stroke px holds a line. At
-       each end of a column run (a glyph, as segment_glyphs cuts them), the
-       columns whose fill lies within min_stroke - 1 rows of such a row are
-       dropped as well, so a thicker piece of the line touching a glyph neither
-       widens its box nor stays a glyph of its own.
-    Both steps work within columns or at the ends of whole column runs, so a
-    glyph's crop cleans to that glyph's part of the cleaned region: templates
-    (cleaned when loaded) and live crops agree.
+    2. a row where step 1 dropped at least 2 x min_stroke px holds a line; its
+       band is the rows within min_stroke - 1 of it. A column run (a glyph, as
+       segment_glyphs cuts them) whose fill lies wholly in the band is a
+       thicker piece of the line and is dropped. At an end of any other run,
+       up to min_stroke columns whose fill lies in the band are dropped when
+       the line goes on (thin fill in the band) in the column just outside the
+       run: a thicker piece of the line touching a glyph. More such columns
+       are the glyph's own end stroke (a '7''s top bar on the line) and stay,
+       and so do band columns the line does not touch (a glyph's end 2 px
+       clear of the line, its dark outline, as on the owner's frames).
+    Step 1 works within columns and step 2 trims only run ends that have a
+    column outside them, so a glyph's crop (its box, no column outside) cleans
+    to that glyph's part of the cleaned region: templates (cleaned when
+    loaded) and live crops agree.
     """
     m = np.asarray(mask, dtype=bool)
     if m.ndim != 2:
@@ -495,15 +501,23 @@ def clean_glyph_mask(mask: np.ndarray, min_stroke: int) -> np.ndarray:
         band[max(0, r - k + 1):r + k] = True
     filled = out.any(axis=0)
     on_line = filled & ~(out & ~band[:, None]).any(axis=0)      # all of the column's fill is on the line
+    line_goes_on = (thin & band[:, None]).any(axis=0)           # the thin line runs through the column
+    w = m.shape[1]
     edges = np.diff(np.concatenate([[0], filled.astype(np.int8), [0]]))
     for x0, x1 in zip(np.nonzero(edges == 1)[0].tolist(), np.nonzero(edges == -1)[0].tolist()):
-        a, b = x0, x1
-        while a < b and on_line[a]:
+        a = x0
+        while a < x1 and on_line[a]:
             a += 1
-        while b > a and on_line[b - 1]:
+        if a == x1:                                             # a piece of the line, not a glyph
+            out[:, x0:x1] = False
+            continue
+        b = x1
+        while on_line[b - 1]:                                   # stops at column a, which is not on the line
             b -= 1
-        out[:, x0:a] = False
-        out[:, b:x1] = False
+        if a - x0 <= k and x0 > 0 and line_goes_on[x0 - 1]:
+            out[:, x0:a] = False
+        if x1 - b <= k and x1 < w and line_goes_on[x1]:
+            out[:, b:x1] = False
     return out
 
 
@@ -518,13 +532,18 @@ class GlyphStyle:
     with a dark outline; the tower digits are tinted (TOWER_GLYPH_STYLE).
     min_stroke > 1 then cleans the mask (clean_glyph_mask): fill thinner than
     min_stroke px in its column (a thin horizontal line, a speck) is not fill,
-    nor are the columns at a glyph's ends that lie on such a line
-    (ELIXIR_GLYPH_STYLE). 0, the default, keeps the colour tests' mask as is.
+    nor is a thicker piece of such a line, alone or touching a glyph's end
+    (ELIXIR_GLYPH_STYLE). 0 (the default) or 1 keeps the colour tests' mask as
+    is; a negative min_stroke raises ValueError.
     """
     min_value: int = 190
     max_chroma: int = 45
     tints: tuple[tuple[Rule, ...], ...] = ()
     min_stroke: int = 0
+
+    def __post_init__(self) -> None:
+        if self.min_stroke < 0:
+            raise ValueError(f"min_stroke must be >= 0, not {self.min_stroke}")
 
     def mask(self, rgb: np.ndarray) -> np.ndarray:
         a = np.asarray(rgb)
@@ -557,10 +576,8 @@ class GlyphStyle:
         for rules in tints:
             if any(len(r) != 4 for r in rules):
                 raise ValueError("a tint rule is (cr, cg, cb, threshold)")
-        min_stroke = int(d.get("min_stroke", 0) or 0)
-        if min_stroke < 0:
-            raise ValueError(f"min_stroke must be >= 0, not {min_stroke}")
-        return cls(int(d.get("min_value", 190)), int(d.get("max_chroma", 45)), tints, min_stroke)
+        return cls(int(d.get("min_value", 190)), int(d.get("max_chroma", 45)), tints,
+                   int(d.get("min_stroke", 0) or 0))
 
 
 DEFAULT_GLYPH_STYLE = GlyphStyle()
