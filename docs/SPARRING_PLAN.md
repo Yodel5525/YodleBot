@@ -167,11 +167,20 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - `rs_selfplay`: engine settings carried to workers, visibility from the checkpoint.
 - Next on the PC: `scripts/third_model.ps1` (runbook section 20), about 7-12 h.
 
-**Batch 6: RL**
-- R01: vectorised rollouts.
-- R02: PPO.
-- R04: RL driver.
-- R05: optional search teacher.
+**Batch 6: RL** (code done 2026-10-30, not yet run on the PC; PC steps in `docs/SPARRING_RUNBOOK.md` section 21)
+- `rs_match` and `rs_league_eval` play v2 checkpoints. This covers ability buttons, own pending plays, and the opponent elixir count without refused plays. `--presses` is a switch.
+- R01: vectorised rollout workers (`tools/rl/rollout.py`).
+- R02: PPO (`tools/rl/ppo.py`). It has GAE (γ 0.997, λ 0.95), potential shaping, and an adaptive KL pull toward the imitation model.
+- R04: the RL driver (`tools/rl/train_loop.py`, `scripts/rl_train.ps1`). It covers collection, PPO, league updates, the promotion gate, resume, and a bench to run first.
+- R05: an optional search teacher for distillation (`tools/rl/teacher.py`, `ppo --teacher-coef`). It is off by default and not yet wired into the rollout workers, so `--teacher-coef` above 0 stops with exit code 2.
+- Open from the reviews:
+  - Mirror battles record both seats, so about two thirds of the PPO rows come from decks the bot never plays live. Decide whether to record only the Hog 2.6 seat or keep the mirror share small.
+  - The tolerances in the PPO and teacher tests have only been checked by hand. `tests/pipeline/test_train_loop.py` runs first on the PC.
+
+**Designs in progress (2026-10-30)**
+- `docs/LIVE_SEARCH_PLAN.md`: search during live play. The bot rebuilds the board in RoyaleSim from what the screen shows (`Battle.reset` takes the clock, elixir, tower HP and spawned units with HP), tries the best candidate plays, and plays the winner. It is measured in the simulator first.
+- `docs/NEW_CARDS_PLAN.md`: detector coverage for cards, evolutions and heroes newer than the KataCR dataset. The owner records friendlies in which their main account plays them against Yodle2.
+- `docs/SEASON_UPDATES.md`: one routine after each game update, covering the simulator pin, the regenerated data, model retraining and the opponent deck pool.
 
 ## First-match milestone (bot plays a friendly against you)
 
