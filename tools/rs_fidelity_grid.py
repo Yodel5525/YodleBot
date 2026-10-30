@@ -5,6 +5,10 @@ and how often each ending agrees with the recording.
     .venvs\royalegym\Scripts\python.exe tools\rs_fidelity_grid.py --sample 2000 --split val ^
         --seed 0 --tables 16.402.22,15.535 --ticks exec,tap --presses off,on
     .venvs\royalegym\Scripts\python.exe tools\rs_fidelity_grid.py --dry-run      the commands only
+    .venvs\royalegym\Scripts\python.exe tools\rs_fidelity_grid.py --shared-payloads ^
+        --tables 16.402.22 --ticks exec --presses off --rs022 off ^
+        --candidate .venvs\rs_next\Scripts\python.exe --candidate-tables 16.402.22,<new arm>
+                                          the quick grid of an update (docs/SEASON_UPDATES.md)
 
 Why (rsim-01, rsim-03, tokens-01): every fidelity number so far (winner agreement 62.6%, exact
 crowns 49.0% on the author's b2000 matches) was measured on royalesim 0.1.22, and about 120
@@ -45,7 +49,36 @@ What it does:
    each cell's engine fingerprint. The best cell by winner agreement is named against the
    62.6% target.
 
-Exit codes: 0 every cell ran; 1 a cell failed; 2 a bad argument, or no match to re-drive.
+Updates (U10 of docs/SEASON_UPDATES.md; without these flags the grid is as before):
+
+4. Candidate cells. --candidate PY adds, after the main cells and before the 0.1.22 ones, every
+   --candidate-tables x --ticks x --presses cell on that interpreter (the side venv of a new
+   royalesim, .venvs\rs_next), labelled --candidate-label (default "candidate"):
+   candidate-16.402.22-exec-presses-off. --candidate-tables defaults to --tables and may name
+   an arm this checkout does not know yet (rs_engine.table_name passes it through; the
+   candidate's engine refuses a name it lacks). The first cell stays the base, so "vs base" is
+   each candidate cell against the old engine. Each candidate cell also gets the regression
+   guard of docs/SEASON_UPDATES.md section 9 (regression), against its reference: the first
+   main cell with its tick semantics and presses (the base when the grid has one of each). It
+   is BLOCKED when its winner agreement drops by GUARD_WINNER_DROP (2 points) or more with an
+   exact McNemar p below GUARD_P (0.05) on the matches both ran, when its refusals rise by more
+   than GUARD_REFUSALS (1.0) per 100 plays, when more of its matches fail than the reference's
+   plus GUARD_FAILED (1%) of the sample, or when it or its reference did not run. The report's
+   "candidate" entry says whether any candidate cell is BLOCKED. This guards against
+   regressions only: IL_Replay was played under older balance, so it cannot show that a new
+   table matches today's game. --reuse compares no interpreter (as before): give each
+   candidate engine its own --work.
+5. Shared payloads. --shared-payloads keeps the sample in <shared root>/<sample name>/
+   (payloads.jsonl and sample.json; --shared-root, default
+   <runs root>/fidelity_grid/shared_samples), picked once and never rewritten, whatever --work
+   and --reuse are, so every update is scored on the same matches. A later run refuses a
+   shared sample picked with other settings, or whose payload file changed since (delete the
+   folder to pick it again). Every run on it appends its cells' numbers (engine version, card
+   table and FNV, winner and crowns agreement, refusals, guard) as one line to series.jsonl
+   there: the time series.
+
+Exit codes: 0 every cell ran; 1 a cell failed; 2 a bad argument, no match to re-drive, or a
+shared sample that does not fit.
 """
 from __future__ import annotations
 
@@ -54,6 +87,7 @@ import dataclasses
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -86,6 +120,21 @@ DEFAULT_TABLE = "default"
 DEFAULT_TABLES = (rs_engine.TARGET_TABLE, "client15535")
 MAIN, RS022 = "main", "rs022"
 RS022_VENV = Path(".venvs") / "rs022"
+#: --candidate-label default: the cells of a candidate engine (U10).
+CANDIDATE = "candidate"
+CANDIDATE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.]*")
+#: --shared-payloads: <shared root>/<sample name>/ holds these (U10).
+SHARED_ROOT = "shared_samples"
+SHARED_PAYLOADS, SHARED_SPEC, SHARED_SERIES = "payloads.jsonl", "sample.json", "series.jsonl"
+#: The keys of a sample's description a shared sample must match.
+SHARED_KEYS = ("kind", "n", "split", "seed", "modes", "rule")
+#: The regression guard of docs/SEASON_UPDATES.md section 9 (module doc, step 4): a winner
+#: agreement drop of 2 points with McNemar p < 0.05, refusals up by more than 1.0 per 100
+#: plays, failed matches above the reference's plus 1% of the sample.
+GUARD_WINNER_DROP = 0.02
+GUARD_P = 0.05
+GUARD_REFUSALS = 1.0
+GUARD_FAILED = 0.01
 #: The tower troop of both seats in the owner's friendlies (pc_observations, 2026-10-29).
 FRIENDLY_TOWER = "tower-princess"
 UNKNOWN = "unknown"
@@ -161,11 +210,18 @@ class Cell:
 
 
 def grid_cells(tables: Sequence[str], ticks: Sequence[str], presses: Sequence[str],
-               python, rs022=None) -> list[Cell]:
-    """Every table x ticks x presses cell on `python` (the first is the base), then every
-    ticks x presses cell on `rs022` (when given) with the engine's own table."""
+               python, rs022=None, candidate=None, candidate_tables: Sequence[str] | None = None,
+               candidate_label: str = CANDIDATE) -> list[Cell]:
+    """Every table x ticks x presses cell on `python` (the first is the base); then, when
+    `candidate` (an interpreter) is given, every candidate_tables (default `tables`) x ticks x
+    presses cell on it, labelled candidate_label; then every ticks x presses cell on `rs022`
+    (when given) with the engine's own table."""
     cells = [Cell(MAIN, str(python), table, tick, press)
              for table in tables for tick in ticks for press in presses]
+    if candidate:
+        cells += [Cell(candidate_label, str(candidate), table, tick, press)
+                  for table in (candidate_tables or tables) for tick in ticks
+                  for press in presses]
     if rs022:
         cells += [Cell(RS022, str(rs022), DEFAULT_TABLE, tick, press)
                   for tick in ticks for press in presses]
@@ -217,6 +273,25 @@ def rs022_python(choice: str | None = "auto", *, root: Path = ROOT) -> Path | No
     return path
 
 
+def candidate_python(choice: str | None) -> Path | None:
+    """--candidate: None -> None; anything else is an interpreter path, which must exist."""
+    if choice is None or not str(choice).strip():
+        return None
+    path = Path(str(choice).strip())
+    if not path.is_file():
+        raise FileNotFoundError(f"--candidate {choice}: no such interpreter")
+    return path
+
+
+def candidate_label(text) -> str:
+    """--candidate-label: letters, digits, "_" and "." (a file-name part), not main or rs022."""
+    label = str(text or "").strip()
+    if not CANDIDATE_LABEL.fullmatch(label) or label in (MAIN, RS022):
+        raise ValueError(f"--candidate-label: {text!r} is not a label (letters, digits, _ and "
+                         f"., not {MAIN} or {RS022})")
+    return label
+
+
 def default_work(name: str) -> Path:
     """<runs root>/fidelity_grid/<name> (runs root: src/hastycr/machine.py, else runs/)."""
     try:
@@ -224,6 +299,11 @@ def default_work(name: str) -> Path:
     except Exception:
         runs = ROOT / "runs"
     return runs / "fidelity_grid" / name
+
+
+def default_shared_root() -> Path:
+    """--shared-root default: <runs root>/fidelity_grid/shared_samples."""
+    return default_work(SHARED_ROOT)
 
 
 def default_corpus() -> Path:
@@ -346,6 +426,52 @@ def best_cell(cells: Sequence[Mapping[str, Any]], target: float = TARGET_WINNER
             "meets_target": w["rate"] >= target, "ci_above_target": w["lo"] >= target}
 
 
+def is_candidate(cell: Mapping[str, Any]) -> bool:
+    """A report cell of a candidate engine (neither main nor rs022)."""
+    return cell["settings"]["interp"] not in (MAIN, RS022)
+
+
+def reference_index(cells: Sequence[Mapping[str, Any]], cell: Mapping[str, Any]) -> int | None:
+    """The index of the first main cell with `cell`'s tick semantics and presses (the base in a
+    grid of one of each); None when there is none."""
+    want = (cell["settings"]["ticks"], cell["settings"]["presses"])
+    for k, c in enumerate(cells):
+        st = c["settings"]
+        if st["interp"] == MAIN and (st["ticks"], st["presses"]) == want:
+            return k
+    return None
+
+
+def regression(ref: Mapping[str, Any], ref_rows: Sequence[Mapping[str, Any]],
+               cell: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+               matches: int | None = None) -> dict[str, Any]:
+    """The section 9 guard of a candidate cell against its reference (module doc, step 4):
+    reference, winner (paired winner agreement, or None), refusals_rise (per 100 plays),
+    failed / failed_reference (matches of the sample that did not run; `matches` is the
+    sample's size, default the larger cell), failed_limit, blocked and reasons."""
+    n = int(matches) if matches else max(cell["summary"]["matches"], ref["summary"]["matches"])
+    reasons = []
+    if cell.get("status") == "failed":
+        reasons.append("the cell did not run")
+    if ref.get("status") == "failed":
+        reasons.append(f"its reference {ref['name']} did not run")
+    w = paired(ref_rows, rows, "winner_agree")
+    if w is not None and -w["diff"] >= GUARD_WINNER_DROP and w["p_value"] < GUARD_P:
+        reasons.append(f"winner agreement {100 * w['diff']:+.1f} pp (p {w['p_value']:.3g}, "
+                       f"n {w['n']})")
+    rise = cell["summary"]["refusals_per_100"] - ref["summary"]["refusals_per_100"]
+    if rise > GUARD_REFUSALS:
+        reasons.append(f"refusals {rise:+.2f} per 100 plays")
+    failed = max(0, n - cell["summary"]["ran"])
+    failed_ref = max(0, n - ref["summary"]["ran"])
+    limit = failed_ref + GUARD_FAILED * n
+    if failed > limit:
+        reasons.append(f"{failed} matches did not run (limit {limit:g})")
+    return {"reference": ref["name"], "winner": w, "refusals_rise": rise, "failed": failed,
+            "failed_reference": failed_ref, "failed_limit": limit, "blocked": bool(reasons),
+            "reasons": reasons}
+
+
 def fresh(meta: Any, cell: Cell, sha256: str, tap_delay: int = RD.TAP_DELAY) -> bool:
     """--reuse: True when a cell's meta (royalesim_redrive's <out>.meta.json) is for this
     payload file and this cell's card table, tick semantics, tap delay and presses."""
@@ -365,10 +491,14 @@ def fresh(meta: Any, cell: Cell, sha256: str, tap_delay: int = RD.TAP_DELAY) -> 
 
 
 def build_report(sample: Mapping[str, Any], entries: Sequence[Mapping[str, Any]], *,
-                 generated: str | None = None, target: float = TARGET_WINNER) -> dict[str, Any]:
+                 generated: str | None = None, target: float = TARGET_WINNER,
+                 matches: int | None = None) -> dict[str, Any]:
     """The grid's numbers. entries: one per cell, in grid order, with "cell" (Cell), "status"
     ("ran" / "reused" / "failed"), "returncode", "seconds", "rows" (the cell's output rows),
-    "meta" (its meta.json, or {}), and optionally "out", "log", "log_tail"."""
+    "meta" (its meta.json, or {}), and optionally "out", "log", "log_tail". With candidate
+    cells, each gets "guard" (regression; `matches` is the sample's size) and the report
+    "candidate" ({"cells", "blocked", "blocked_cells"}); without them the report is as
+    before."""
     entries = list(entries)
     base_rows = entries[0].get("rows") or [] if entries else []
     cells = []
@@ -390,12 +520,24 @@ def build_report(sample: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]
             "strata": {key: stratify(rows, fn) for key, _, fn in STRATA},
         })
     levels = level_histogram(next((e.get("rows") for e in entries if e.get("rows")), []))
-    return {"schema": SCHEMA, "tool": TOOL,
-            "generated": generated or datetime.datetime.now(datetime.timezone.utc)
-            .strftime("%Y-%m-%d %H:%M UTC"),
-            "sample": dict(sample), "target": {"winner": target, "crowns": TARGET_CROWNS},
-            "base": cells[0]["name"] if cells else None, "cells": cells,
-            "best": best_cell(cells, target), "levels": levels}
+    report = {"schema": SCHEMA, "tool": TOOL,
+              "generated": generated or datetime.datetime.now(datetime.timezone.utc)
+              .strftime("%Y-%m-%d %H:%M UTC"),
+              "sample": dict(sample), "target": {"winner": target, "crowns": TARGET_CROWNS},
+              "base": cells[0]["name"] if cells else None, "cells": cells,
+              "best": best_cell(cells, target), "levels": levels}
+    candidates = [k for k, c in enumerate(cells) if is_candidate(c)]
+    if candidates:
+        for k in candidates:
+            ref = reference_index(cells, cells[k])
+            cells[k]["guard"] = None if ref is None else regression(
+                cells[ref], entries[ref].get("rows") or [], cells[k],
+                entries[k].get("rows") or [], matches)
+        blocked = [cells[k]["name"] for k in candidates
+                   if cells[k]["guard"] is None or cells[k]["guard"]["blocked"]]
+        report["candidate"] = {"cells": [cells[k]["name"] for k in candidates],
+                               "blocked": bool(blocked), "blocked_cells": blocked}
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +587,10 @@ def render(report: Mapping[str, Any]) -> str:
       "plays (a refused play is dropped, never forced). \"vs base\" compares a cell with the "
       "first cell on the matches both ran (exact McNemar p).\n")
     w(_sample_line(report["sample"]))
+    if report["sample"].get("shared"):
+        w(f"- Shared sample `{report['sample']['shared']}`, picked "
+          f"{report['sample'].get('created') or '?'}: every run on it appends its numbers to "
+          f"`{SHARED_SERIES}` there.")
     w(f"- Target (docs/SPARRING_PLAN.md, phase 2): winner agreement >= "
       f"{100 * target['winner']:.1f}%, RoyaleSim 0.1.22 on the author's b2000 matches (exact "
       f"crowns {100 * target['crowns']:.1f}% there).")
@@ -482,6 +628,34 @@ def render(report: Mapping[str, Any]) -> str:
           f"{fmt_rate(best['crowns'])}); it {verdict} the {100 * target['winner']:.1f}% "
           f"target{bound}.** The card table and settings go into data/engine.json only by the "
           "owner's decision.\n")
+
+    if report.get("candidate"):
+        w("## Candidate engine against the base\n")
+        w("The regression guard of docs/SEASON_UPDATES.md section 9, each candidate cell against "
+          "its reference (the first main cell with its tick semantics and presses): BLOCKED "
+          f"when winner agreement drops by {100 * GUARD_WINNER_DROP:.0f} points or more with "
+          f"McNemar p < {GUARD_P:g}, when refusals rise by more than {GUARD_REFUSALS:.1f} per "
+          "100 plays, or when more matches fail than the reference's plus "
+          f"{100 * GUARD_FAILED:.0f}% of the sample. It guards against regressions only: "
+          "IL_Replay was played under older balance.\n")
+        w("| cell | reference | winner vs reference | refusals / 100 plays (change) | "
+          "matches that did not run (limit) | guard |")
+        w("|---|---|---|---|---|---|")
+        for c in cells:
+            if not is_candidate(c):
+                continue
+            g = c.get("guard")
+            if g is None:
+                w(f"| {c['name']} | none | n/a | n/a | n/a | BLOCKED: no reference cell |")
+                continue
+            verdict = "BLOCKED: " + "; ".join(g["reasons"]) if g["blocked"] else "pass"
+            w(f"| {c['name']} | {g['reference']} | {fmt_diff(g['winner'])} | "
+              f"{c['summary']['refusals_per_100']:.2f} ({g['refusals_rise']:+.2f}) | "
+              f"{g['failed']} ({g['failed_limit']:g}) | {_cellsafe(verdict)} |")
+        cand = report["candidate"]
+        verdict = (f"BLOCKED ({', '.join(cand['blocked_cells'])})" if cand["blocked"]
+                   else "pass")
+        w(f"\n**Regression guard: {verdict}.**\n")
 
     reasons: Counter = Counter()
     for c in cells:
@@ -657,6 +831,80 @@ def ensure_sample(work: Path, payloads: Path, *, n: int, split: str, seed: int, 
     return spec
 
 
+def shared_sample(root: Path, *, n: int, split: str, seed: int, modes, corpus: Path,
+                  pick: Callable[..., tuple[list, list]] | None = None
+                  ) -> tuple[Path, dict[str, Any]]:
+    """--shared-payloads: (the payload file, the sample's description with "shared": its
+    folder) of <root>/<sample name>/. Picked once (royalesim_redrive.sample_payloads, or
+    `pick`) when the folder holds neither file, and never rewritten; ValueError when one of the
+    two files is missing, when sample.json describes another sample (SHARED_KEYS; the corpus
+    path is not compared), when the payload file changed since it was picked, or when no
+    match was found to pick."""
+    folder = Path(root) / RD.sample_name(n, split, seed)
+    payloads, spec_path = folder / SHARED_PAYLOADS, folder / SHARED_SPEC
+    spec = {"kind": "sample", "n": int(n), "split": split, "seed": int(seed),
+            "modes": "all" if modes is None else sorted(modes), "rule": RD.SAMPLE_RULE}
+    again = f"delete {folder} to pick the shared sample again"
+    if payloads.is_file() or spec_path.exists():
+        old = read_json(spec_path)
+        if not payloads.is_file() or not isinstance(old, dict):
+            missing = SHARED_SPEC if payloads.is_file() else SHARED_PAYLOADS
+            raise ValueError(f"shared sample {folder}: {missing} is missing or unreadable; "
+                             f"{again}")
+        differs = [k for k in SHARED_KEYS if old.get(k) != spec[k]]
+        if differs:
+            raise ValueError(f"shared sample {folder} was picked with other settings "
+                             f"({', '.join(differs)}); pass the same --sample, --split, --seed "
+                             f"and --modes, another --shared-root, or {again}")
+        sha = rs_cards.file_sha256(payloads)
+        if old.get("sha256") != sha:
+            raise ValueError(f"shared sample {payloads} changed since it was picked (sha256 "
+                             f"{sha[:12]}, recorded {str(old.get('sha256'))[:12]}); {again}")
+        return payloads, {**old, "shared": str(folder)}
+    tags, texts = (pick or RD.sample_payloads)(corpus, n, split, seed, modes)
+    if not texts:
+        raise ValueError(f"no match of split {split} found in {corpus} for the shared sample "
+                         "(check --corpus, --split and --modes)")
+    RD.write_payload_file(payloads, texts)
+    spec.update(corpus=str(corpus), picked=len(tags), found=len(texts),
+                created=datetime.datetime.now(datetime.timezone.utc)
+                .strftime("%Y-%m-%d %H:%M UTC"),
+                sha256=rs_cards.file_sha256(payloads))
+    spec_path.write_text(json.dumps(spec, indent=1), encoding="utf-8")
+    return payloads, {**spec, "shared": str(folder)}
+
+
+def series_line(report: Mapping[str, Any], *, out: Path | str, work: Path | str
+                ) -> dict[str, Any]:
+    """One line of a shared sample's series.jsonl: when, where the report is, and each cell's
+    engine and numbers."""
+    cells = []
+    for c in report["cells"]:
+        s, eng, st = c["summary"], c["engine"], c["settings"]
+        guard = c.get("guard")
+        cells.append({"name": c["name"], "status": c["status"],
+                      **{k: st[k] for k in ("interp", "table", "ticks", "presses")},
+                      "version": eng.get("version"), "card_table": eng.get("card_table"),
+                      "card_table_fnv1a64": eng.get("card_table_fnv1a64"),
+                      "fingerprint": eng.get("id"), "matches": s["matches"], "ran": s["ran"],
+                      "winner": s["winner"]["rate"], "crowns": s["crowns"]["rate"],
+                      "refusals_per_100": s["refusals_per_100"],
+                      "blocked": None if not is_candidate(c) else
+                      (guard is None or bool(guard["blocked"]))})
+    return {"generated": report["generated"], "report": str(out), "work": str(work),
+            "payloads_sha256": report["sample"].get("sha256"), "base": report["base"],
+            "cells": cells}
+
+
+def append_series(path: Path, line: Mapping[str, Any]) -> Path:
+    """Append one JSON line to a series.jsonl."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Re-drive the same IL_Replay matches under each engine setting and write "
@@ -687,6 +935,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--rs022", default="auto",
                     help="royalesim 0.1.22 interpreter: 'auto' (default: .venvs/rs022 when it "
                          "exists), 'off', or a path")
+    ap.add_argument("--candidate", default=None, metavar="PY",
+                    help="interpreter of a candidate engine (e.g. .venvs/rs_next's): adds its "
+                         "cells after the main ones, each with the section 9 regression guard "
+                         "(default none)")
+    ap.add_argument("--candidate-tables", default=None,
+                    help="card tables of the candidate cells, comma-separated (default "
+                         "--tables); an arm this checkout does not know is passed as it is")
+    ap.add_argument("--candidate-label", default=CANDIDATE, metavar="NAME",
+                    help=f"the candidate cells' name prefix (default {CANDIDATE})")
+    ap.add_argument("--shared-payloads", action="store_true",
+                    help="re-drive the shared sample of --sample/--split/--seed (picked once "
+                         "into --shared-root, never rewritten) and append the numbers to its "
+                         "series.jsonl")
+    ap.add_argument("--shared-root", type=Path, default=None, metavar="DIR",
+                    help="folder of the shared samples (default "
+                         "<runs root>/fidelity_grid/shared_samples)")
     ap.add_argument("--workers", type=int, default=6, help="worker processes per cell")
     ap.add_argument("--timeout", type=float, default=0, metavar="S",
                     help="seconds a cell may run (default 0: no limit)")
@@ -712,19 +976,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FileNotFoundError(f"--payloads {args.payloads} does not exist")
         if args.workers < 1:
             raise ValueError(f"--workers: at least 1, got {args.workers}")
+        if args.payloads and args.shared_payloads:
+            raise ValueError("--payloads and --shared-payloads both give the matches: pass one")
+        if args.shared_root is not None and not args.shared_payloads:
+            raise ValueError("--shared-root: only with --shared-payloads")
         python = args.python or default_python()
         rs022 = rs022_python(args.rs022)
+        candidate = candidate_python(args.candidate)
+        label = candidate_label(args.candidate_label)
+        if candidate is None and (args.candidate_tables is not None
+                                  or args.candidate_label != CANDIDATE):
+            raise ValueError("--candidate-tables and --candidate-label: only with --candidate")
+        candidate_tables = (parse_tables(args.candidate_tables)
+                            if args.candidate_tables is not None else None)
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     name = (Path(args.payloads).stem if args.payloads
             else RD.sample_name(args.sample, args.split, args.seed))
     work = Path(args.work or default_work(name)).resolve()
-    payloads = Path(args.payloads or work / "payloads.jsonl").resolve()
-    cells = grid_cells(tables, ticks, presses, python, rs022)
+    shared_root = Path(args.shared_root or default_shared_root()).resolve() \
+        if args.shared_payloads else None
+    if shared_root is not None:
+        payloads = shared_root / name / SHARED_PAYLOADS
+    else:
+        payloads = Path(args.payloads or work / "payloads.jsonl").resolve()
+    cells = grid_cells(tables, ticks, presses, python, rs022, candidate, candidate_tables,
+                       label)
     print(f"grid: {len(cells)} cells, work {work}", flush=True)
     if rs022 is None:
         print(f"      no royalesim 0.1.22 cells ({RS022_VENV} not found or --rs022 off)",
               flush=True)
+    if candidate is not None:
+        print(f"      candidate cells ({label}): {candidate}", flush=True)
     if args.dry_run:
         for cell in cells:
             out = work / f"{cell.name}.jsonl"
@@ -734,6 +1017,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     work.mkdir(parents=True, exist_ok=True)
     if args.payloads:
         sample: dict[str, Any] = {"kind": "payloads", "path": str(payloads)}
+    elif shared_root is not None:
+        corpus = Path(args.corpus or default_corpus())
+        try:
+            payloads, sample = shared_sample(shared_root, n=args.sample, split=args.split,
+                                             seed=args.seed, modes=modes, corpus=corpus)
+        except ValueError as exc:
+            print(f"{TOOL}: {exc}", file=sys.stderr)
+            return 2
+        print(f"sample: the shared sample {sample['shared']} (picked "
+              f"{sample.get('created') or '?'})", flush=True)
     else:
         corpus = Path(args.corpus or default_corpus())
         print(f"sample: {args.sample} matches of {args.split}, seed {args.seed}, from {corpus}",
@@ -771,7 +1064,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  {cell.name}: {status}, ran {s['ran']}/{s['matches']}, winner "
               f"{fmt_rate(s['winner'])}, crowns {fmt_rate(s['crowns'])}, refusals "
               f"{s['refusals_per_100']:.2f} per 100 plays ({seconds:.0f}s)", flush=True)
-    report = build_report(sample, entries)
+    report = build_report(sample, entries, matches=matches)
     out_md = Path(args.out)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(render(report), encoding="utf-8")
@@ -781,6 +1074,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"best: {best['name']}, winner {fmt_rate(best['winner'])} "
               f"({'reaches' if best['meets_target'] else 'below'} the "
               f"{100 * TARGET_WINNER:.1f}% target)", flush=True)
+    cand = report.get("candidate")
+    if cand:
+        print("regression guard: " + (f"BLOCKED ({', '.join(cand['blocked_cells'])})"
+                                      if cand["blocked"] else "pass"), flush=True)
+    if shared_root is not None:
+        series = append_series(Path(sample["shared"]) / SHARED_SERIES,
+                               series_line(report, out=out_md, work=work))
+        print(f"series -> {series}", flush=True)
     print(f"report -> {out_md}", flush=True)
     return 0 if all(e["status"] != "failed" for e in entries) else 1
 

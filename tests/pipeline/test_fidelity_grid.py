@@ -31,6 +31,25 @@ plays, strata, the paired McNemar (1 vs 1 discordant: p = min(1, 2 * 3 / 4) = 1;
 2 / 64 = 0.03125), the report text, and main with a fake cell runner (a failed cell, then
 --reuse). The `engine`-marked tests run the fixture through the real royalesim under both tick
 semantics, and the whole grid on two fixture matches in subprocesses.
+
+U10 (candidate cells, shared payloads), worked by hand:
+* Candidate cells come after the main cells and before the 0.1.22 ones, named
+  <label>-<table>-<ticks>-presses-<presses>; a table the checkout does not know keeps its arm
+  name. The first cell stays the base, so a candidate cell's "vs base" is its McNemar against
+  the old engine.
+* The guard (docs/SEASON_UPDATES.md section 9) against a reference of 100 matches that all
+  agree, 10 plays each: 1 match lost is -1 pp, p = min(1, 2 * 1/2) = 1, pass; 2 lost is -2 pp
+  but p = 2 * 1/4 = 0.5, pass; 10 lost is -10 pp, p = 2 / 2**10 = 0.00195, BLOCKED. Of 1000
+  matches, 15 lost is p = 2 / 2**15 but only -1.5 pp, pass; 20 lost is -2 pp with
+  p = 2 / 2**20, BLOCKED. Refusals: 2 per match is 200 / 1000 plays = +20.00 per 100,
+  BLOCKED; 1 in 10 matches is +1.00, not more than 1.0, pass. Failed matches: the limit is
+  0 + 1% of 100 = 1, so 2 failed is BLOCKED and 1 is not. A cell that did not run, or whose
+  reference did not run, is BLOCKED.
+* The base and tap cells above as base and candidate (exec, presses off), 7 matches: vs the
+  reference m1 1 -> 0, m3 0 -> 1, so +0.0 pp (p 1, n 3); refusals 1.25 - 4.00 = -2.75; failed
+  7 - 5 = 2 against 7 - 4 = 3 plus 0.07, limit 3.07: pass.
+* A shared sample is picked once and never rewritten; a later run with other modes, or after
+  its payload file changed, is refused.
 """
 from __future__ import annotations
 
@@ -905,6 +924,340 @@ def test_main_runs_each_cell_and_writes_the_report(grid, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# U10: candidate cells and shared payloads
+# ---------------------------------------------------------------------------
+
+NEW_ARM = "client160635001_20261102"
+
+
+def test_candidate_cells_names_and_commands(grid, tmp_path):
+    cells = grid.grid_cells([TARGET], ["exec"], ["off"], "py", rs022="py22", candidate="pyc",
+                            candidate_tables=[TARGET, NEW_ARM])
+    assert [c.name for c in cells] == [
+        "main-16.402.22-exec-presses-off", "candidate-16.402.22-exec-presses-off",
+        f"candidate-{NEW_ARM}-exec-presses-off", "rs022-default-exec-presses-off"]
+    assert cells[1] == grid.Cell("candidate", "pyc", TARGET, "exec", "off")
+    cmd = grid.cell_command(cells[2], Path("p.jsonl"), Path("o.jsonl"), workers=2)
+    assert cmd[0] == "pyc" and cmd[cmd.index("--card-table") + 1] == NEW_ARM
+    assert cmd[cmd.index("--pair") + 1] == f"candidate-{NEW_ARM}-exec-presses-off"
+    # default: the main tables; another label; no candidate: the grid as before
+    assert [c.name for c in grid.grid_cells([TARGET, "client15535"], ["exec"], ["off"], "py",
+                                            candidate="pyc", candidate_label="rs0.1.43")] == [
+        "main-16.402.22-exec-presses-off", "main-15.535.29-exec-presses-off",
+        "rs0.1.43-16.402.22-exec-presses-off", "rs0.1.43-15.535.29-exec-presses-off"]
+    assert grid.grid_cells([TARGET], ["exec"], ["off"], "py", rs022="py22") == \
+        grid.grid_cells([TARGET], ["exec"], ["off"], "py", "py22", None, [NEW_ARM])
+    assert grid.parse_tables(f"16.402.22,{NEW_ARM}") == [TARGET, NEW_ARM]
+    assert grid.table_label(NEW_ARM) == NEW_ARM
+    for good in ("candidate", "rs0.1.43", "next_2"):
+        assert grid.candidate_label(good) == good
+    for bad in ("main", "rs022", "a/b", "", "-x", "a-b", None):
+        with pytest.raises(ValueError, match="--candidate-label"):
+            grid.candidate_label(bad)
+    assert grid.candidate_python(None) is None and grid.candidate_python(" ") is None
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    assert grid.candidate_python(str(python)) == python
+    with pytest.raises(FileNotFoundError, match="--candidate"):
+        grid.candidate_python(str(tmp_path / "nope.exe"))
+
+
+def guard_cell(grid, name, rows, status="ran", interp="candidate", ticks="exec",
+               presses="off"):
+    return {"name": name, "status": status, "summary": grid.summarize(rows),
+            "settings": {"interp": interp, "python": "py", "table": TARGET, "ticks": ticks,
+                         "presses": presses}}
+
+
+def test_regression_guard(grid):
+    ref_rows = [row(f"g{k}") for k in range(100)]
+    ref = guard_cell(grid, "base", ref_rows, interp="main")
+
+    def check(rows, status="ran", matches=None, reference=ref, reference_rows=ref_rows):
+        return grid.regression(reference, reference_rows, guard_cell(grid, "c", rows, status),
+                               rows, matches)
+
+    def lost(n, total=100):
+        return [row(f"g{k}", w=k >= n) for k in range(total)]
+
+    g = check(lost(1))
+    assert g == {"reference": "base", "winner": {
+        "n": 100, "rate": pytest.approx(0.99), "base_rate": 1.0, "diff": pytest.approx(-0.01),
+        "better": 0, "worse": 1, "p_value": 1.0}, "refusals_rise": 0.0, "failed": 0,
+        "failed_reference": 0, "failed_limit": pytest.approx(1.0), "blocked": False,
+        "reasons": []}
+    g = check(lost(2))                                   # 2 points, p 0.5
+    assert g["winner"]["p_value"] == 0.5 and not g["blocked"]
+    g = check(lost(10))
+    assert g["blocked"] and g["reasons"] == ["winner agreement -10.0 pp (p 0.00195, n 100)"]
+    big = [row(f"g{k}") for k in range(1000)]
+    g = grid.regression(guard_cell(grid, "base", big, interp="main"), big,
+                        guard_cell(grid, "c", lost(15, 1000)), lost(15, 1000))
+    assert g["winner"]["p_value"] < 1e-4 and not g["blocked"]          # only 1.5 points
+    g = grid.regression(guard_cell(grid, "base", big, interp="main"), big,
+                        guard_cell(grid, "c", lost(20, 1000)), lost(20, 1000))
+    assert g["blocked"] and g["reasons"][0].startswith("winner agreement -2.0 pp")
+    g = check([row(f"g{k}", forced={"hand": 2}) for k in range(100)])
+    assert g["refusals_rise"] == pytest.approx(20.0)
+    assert g["reasons"] == ["refusals +20.00 per 100 plays"]
+    g = check([row(f"g{k}", forced={"hand": 1} if k < 10 else None) for k in range(100)])
+    assert g["refusals_rise"] == pytest.approx(1.0) and not g["blocked"]
+    bad = [row(f"g{k}", ok=False, error="exception RuntimeError: x") for k in (98, 99)]
+    g = check(ref_rows[:98] + bad)
+    assert (g["failed"], g["blocked"]) == (2, True)
+    assert g["reasons"] == ["2 matches did not run (limit 1)"]
+    assert not check(ref_rows[:99] + bad[1:])["blocked"]                 # 1 is the limit
+    g = check([], status="failed")
+    assert g["winner"] is None
+    assert g["reasons"] == ["the cell did not run", "100 matches did not run (limit 1)"]
+    gone = guard_cell(grid, "base", [], status="failed", interp="main")
+    g = check(ref_rows, reference=gone, reference_rows=[])
+    assert g["reasons"] == ["its reference base did not run"] and g["failed_reference"] == 100
+    # the sample's size, when given, counts matches missing from a cell's output
+    g = check(ref_rows[:50], matches=100)
+    assert (g["failed"], g["blocked"]) == (50, True)
+    cells = [guard_cell(grid, n, [], interp=i, ticks=t)
+             for n, i, t in (("a", "main", "exec"), ("b", "main", "tap"),
+                             ("c", "candidate", "tap"), ("d", "rs022", "exec"))]
+    assert grid.reference_index(cells, cells[2]) == 1
+    assert grid.reference_index(cells, guard_cell(grid, "e", [], presses="on")) is None
+    assert [grid.is_candidate(c) for c in cells] == [False, False, True, False]
+
+
+FP_NEXT = {"version": "0.1.43", "card_table": "cards-160402017-20261019.1",
+           "command_delay_ticks": [0, 0]}
+
+
+def candidate_entries(grid, status="ran"):
+    return [
+        {"cell": grid.Cell("main", "py", TARGET, "exec", "off"), "status": "ran",
+         "returncode": 0, "seconds": 2.0, "rows": BASE, "meta": {"fingerprint": FP_EXEC}},
+        {"cell": grid.Cell("candidate", "pyc", TARGET, "exec", "off"), "status": status,
+         "returncode": 0 if status == "ran" else 1, "seconds": 2.0,
+         "rows": TAP if status == "ran" else [], "meta": {"fingerprint": FP_NEXT},
+         "log": "work/candidate.log", "log_tail": []},
+    ]
+
+
+def test_report_with_a_candidate(grid):
+    plain = grid.build_report(SAMPLE, entries(grid), generated="2026-10-30 12:00 UTC")
+    assert "candidate" not in plain and all("guard" not in c for c in plain["cells"])
+    assert "## Candidate engine" not in grid.render(plain)
+    rep = grid.build_report(SAMPLE, candidate_entries(grid), generated="2026-10-30 12:00 UTC",
+                            matches=7)
+    base, cand = rep["cells"]
+    name = "candidate-16.402.22-exec-presses-off"
+    assert rep["base"] == base["name"] == "main-16.402.22-exec-presses-off"
+    assert cand["name"] == name and "guard" not in base
+    vs = cand["vs_base"]["winner"]                       # McNemar against the base
+    assert (vs["n"], vs["better"], vs["worse"], vs["diff"], vs["p_value"]) == (3, 1, 1, 0.0, 1.0)
+    assert cand["guard"] == {"reference": base["name"], "winner": vs,
+                             "refusals_rise": pytest.approx(-2.75), "failed": 2,
+                             "failed_reference": 3, "failed_limit": pytest.approx(3.07),
+                             "blocked": False, "reasons": []}
+    assert rep["candidate"] == {"cells": [name], "blocked": False, "blocked_cells": []}
+    json.dumps(rep)
+    lines = grid.render(rep).splitlines()
+    for line in (
+        "## Candidate engine against the base",
+        f"| {name} | 0.1.43 | cards-160402017-20261019.1 | exec | off | 5 / 6 "
+        "| 80.0% [37.6, 96.4] | 40.0% [11.8, 76.9] | 1.25 | 0 / 0 "
+        "| +0.0 pp (p 1, n 3) | +0.0 pp (p 1, n 3) |",
+        f"| {name} | main-16.402.22-exec-presses-off | +0.0 pp (p 1, n 3) | 1.25 (-2.75) "
+        "| 2 (3.07) | pass |",
+        "**Regression guard: pass.**",
+    ):
+        assert line in lines, line
+    failed = grid.build_report(SAMPLE, candidate_entries(grid, "failed"), matches=7)
+    assert failed["candidate"] == {"cells": [name], "blocked": True, "blocked_cells": [name]}
+    assert failed["cells"][1]["guard"]["reasons"] == ["the cell did not run",
+                                                      "7 matches did not run (limit 3.07)"]
+    md = grid.render(failed)
+    assert f"**Regression guard: BLOCKED ({name}).**" in md
+    assert "| BLOCKED: the cell did not run; 7 matches did not run (limit 3.07) |" in md
+
+
+def two_payloads():
+    return [json.dumps(il_payload(tag=f"m{k}")) for k in (1, 2)]
+
+
+def test_shared_sample(grid, tmp_path):
+    rd = grid.RD
+    root, corpus = tmp_path / "shared", tmp_path / "corpus"
+    picks = []
+
+    def pick(corpus_, n, split, seed, modes):
+        picks.append((str(corpus_), n, split, seed, modes))
+        return ["m1", "m2"], two_payloads()
+
+    path, sample = grid.shared_sample(root, n=2, split="val", seed=0, modes=rd.MODES,
+                                      corpus=corpus, pick=pick)
+    folder = root / "sample2_val_seed0"
+    assert path == folder / "payloads.jsonl"
+    assert picks == [(str(corpus), 2, "val", 0, rd.MODES)]
+    assert rd.read_payload_file(path) == [json.dumps(json.loads(t)) for t in two_payloads()]
+    spec = json.loads((folder / "sample.json").read_text(encoding="utf-8"))
+    assert sample == {**spec, "shared": str(folder)}
+    assert {k: spec[k] for k in ("kind", "n", "split", "seed", "modes", "rule", "corpus",
+                                 "picked", "found")} == {
+        "kind": "sample", "n": 2, "split": "val", "seed": 0, "modes": sorted(rd.MODES),
+        "rule": rd.SAMPLE_RULE, "corpus": str(corpus), "picked": 2, "found": 2}
+    assert spec["sha256"] == grid.rs_cards.file_sha256(path) and spec["created"].endswith("UTC")
+
+    def never(*args):
+        pytest.fail("a shared sample is never picked again")
+
+    # again, from another corpus folder: the same file, untouched
+    again = grid.shared_sample(root, n=2, split="val", seed=0, modes=rd.MODES,
+                               corpus=tmp_path / "elsewhere", pick=never)
+    assert again == (path, sample)
+    with pytest.raises(ValueError, match=r"other settings \(modes\)"):
+        grid.shared_sample(root, n=2, split="val", seed=0, modes=None, corpus=corpus,
+                           pick=never)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text + text.splitlines()[0] + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed since it was picked"):
+        grid.shared_sample(root, n=2, split="val", seed=0, modes=rd.MODES, corpus=corpus,
+                           pick=never)
+    (folder / "sample.json").unlink()
+    with pytest.raises(ValueError, match="sample.json is missing"):
+        grid.shared_sample(root, n=2, split="val", seed=0, modes=rd.MODES, corpus=corpus,
+                           pick=never)
+    path.unlink()                                       # neither file: picked afresh
+    assert grid.shared_sample(root, n=2, split="val", seed=0, modes=rd.MODES, corpus=corpus,
+                              pick=pick)[0] == path
+    assert len(picks) == 2
+    with pytest.raises(ValueError, match="no match"):
+        grid.shared_sample(tmp_path / "empty", n=2, split="val", seed=0, modes=rd.MODES,
+                           corpus=corpus, pick=lambda *a: ([], []))
+    assert not (tmp_path / "empty").exists()
+
+
+def test_main_candidate_flags_and_dry_run(grid, tmp_path, capsys):
+    payloads = tmp_path / "p.jsonl"
+    payloads.write_text(json.dumps(il_payload()) + "\n", encoding="utf-8")
+    cand = tmp_path / "rs_next_python"
+    cand.write_text("", encoding="utf-8")
+    base = ["--dry-run", "--python", "py", "--rs022", "off", "--tables", "16.402.22",
+            "--ticks", "exec", "--presses", "off", "--work", str(tmp_path / "work")]
+    for extra in (["--payloads", str(payloads), "--shared-payloads"],
+                  ["--payloads", str(payloads), "--shared-root", str(tmp_path)],
+                  ["--payloads", str(payloads), "--candidate-tables", "16.402.22"],
+                  ["--payloads", str(payloads), "--candidate-label", "next"],
+                  ["--payloads", str(payloads), "--candidate", str(tmp_path / "nope")],
+                  ["--payloads", str(payloads), "--candidate", str(cand),
+                   "--candidate-label", "main"]):
+        with pytest.raises(SystemExit):
+            grid.main(base + extra)
+    capsys.readouterr()
+    shared = tmp_path / "shared"
+    assert grid.main(base + ["--shared-payloads", "--shared-root", str(shared), "--sample",
+                             "5", "--candidate", str(cand), "--candidate-tables",
+                             f"16.402.22,{NEW_ARM}"]) == 0
+    out = capsys.readouterr().out
+    assert "grid: 3 cells" in out and f"candidate cells (candidate): {cand}" in out
+    want = shared.resolve() / "sample5_val_seed0" / "payloads.jsonl"
+    assert f"--payloads {want}" in out
+    assert f"{cand} {grid.REDRIVE} " in out and f"--card-table {NEW_ARM}" in out
+    assert f"candidate-{NEW_ARM}-exec-presses-off" in out
+    assert not shared.exists() and not (tmp_path / "work").exists()
+    assert grid.main(base + ["--payloads", str(payloads), "--candidate", str(cand),
+                             "--candidate-label", "rs0.1.43"]) == 0
+    assert "rs0.1.43-16.402.22-exec-presses-off" in capsys.readouterr().out
+
+
+#: Rows the fake runner writes per cell of the update grid below.
+UPDATE_ROWS = {
+    "main-16.402.22-exec-presses-off": [row("m1"), row("m2")],
+    "candidate-16.402.22-exec-presses-off": [row("m1"), row("m2", w=False, c=False)],
+    f"candidate-{NEW_ARM}-exec-presses-off": [
+        row("m1", ok=False, error="exception RuntimeError: no such arm"),
+        row("m2", ok=False, error="exception RuntimeError: no such arm")],
+}
+
+
+def test_main_update_grid_on_a_shared_sample(grid, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "shared"
+    path, sample = grid.shared_sample(root, n=2, split="val", seed=0, modes=grid.RD.MODES,
+                                      corpus=tmp_path, pick=lambda *a: (["m1", "m2"],
+                                                                        two_payloads()))
+    cand = tmp_path / "rs_next_python"
+    cand.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_run(cmd, log, timeout=None):
+        args = dict(zip(cmd[2::2], cmd[3::2]))
+        calls.append((args["--pair"], cmd[0], args["--card-table"]))
+        assert args["--payloads"] == str(path.resolve())
+        out = Path(args["--out"])
+        out.write_text("".join(json.dumps(r) + "\n" for r in UPDATE_ROWS[args["--pair"]]),
+                       encoding="utf-8")
+        meta = {"source": {"kind": "payloads",
+                           "sha256": grid.rs_cards.file_sha256(args["--payloads"])},
+                "engine": {"card_table": grid.rs_engine.table_name(args["--card-table"])},
+                "presses": args["--presses"], "tick_semantics": args["--tick-semantics"],
+                "tap_delay": 0, "fingerprint": FP_NEXT if cmd[0] == str(cand) else FP_EXEC,
+                "seconds": 1.0}
+        grid.RD.meta_path(out).write_text(json.dumps(meta), encoding="utf-8")
+        Path(log).write_text("ok\n", encoding="utf-8")
+        return 0, 1.0
+
+    monkeypatch.setattr(grid, "run_cell", fake_run)
+    md_path, work = tmp_path / "grid.md", tmp_path / "work"
+    argv = ["--shared-payloads", "--shared-root", str(root), "--sample", "2", "--split", "val",
+            "--python", "py", "--rs022", "off", "--tables", "16.402.22", "--ticks", "exec",
+            "--presses", "off", "--candidate", str(cand), "--candidate-tables",
+            f"16.402.22,{NEW_ARM}", "--work", str(work), "--out", str(md_path)]
+    assert grid.main(argv) == 0                          # every cell ran
+    names = list(UPDATE_ROWS)
+    assert calls == [(names[0], "py", TARGET), (names[1], str(cand), TARGET),
+                     (names[2], str(cand), NEW_ARM)]
+    out = capsys.readouterr().out
+    assert f"regression guard: BLOCKED ({names[2]})" in out and "series -> " in out
+    report = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert [c["name"] for c in report["cells"]] == names
+    assert Path(report["sample"]["shared"]) == Path(sample["shared"]).resolve()
+    assert report["sample"]["sha256"] == sample["sha256"]
+    assert report["candidate"] == {"cells": names[1:], "blocked": True,
+                                   "blocked_cells": [names[2]]}
+    old, new = report["cells"][1]["guard"], report["cells"][2]["guard"]
+    assert old["blocked"] is False and old["winner"]["diff"] == -0.5   # p 1: not a regression
+    assert new["reasons"] == ["2 matches did not run (limit 0.02)"]
+    assert report["cells"][1]["vs_base"]["winner"]["n"] == 2
+    md = md_path.read_text(encoding="utf-8")
+    assert f"**Regression guard: BLOCKED ({names[2]}).**" in md
+    assert "every run on it appends its numbers to `series.jsonl` there." in md
+    series_path = root / "sample2_val_seed0" / "series.jsonl"
+    lines = [json.loads(x) for x in series_path.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    line = lines[0]
+    assert (line["report"], line["work"], line["base"]) == (str(md_path), str(work.resolve()),
+                                                             names[0])
+    assert line["payloads_sha256"] == sample["sha256"]
+    assert [c["blocked"] for c in line["cells"]] == [None, False, True]
+    assert line["cells"][2] == {
+        "name": names[2], "status": "ran", "interp": "candidate", "table": NEW_ARM,
+        "ticks": "exec", "presses": "off", "version": "0.1.43",
+        "card_table": "cards-160402017-20261019.1", "card_table_fnv1a64": None,
+        "fingerprint": None, "matches": 2, "ran": 0, "winner": None, "crowns": None,
+        "refusals_per_100": 0.0, "blocked": True}
+    assert line["cells"][0]["winner"] == 1.0 and line["cells"][1]["winner"] == 0.5
+    # again with --reuse: no cell runs, the shared file is as it was, the series grows
+    calls.clear()
+    assert grid.main(argv + ["--reuse"]) == 0
+    assert calls == []
+    assert grid.rs_cards.file_sha256(path) == sample["sha256"]
+    assert len(series_path.read_text(encoding="utf-8").splitlines()) == 2
+    # a shared sample picked with other modes is refused before any cell runs
+    other = tmp_path / "other"
+    grid.shared_sample(other, n=2, split="val", seed=0, modes=None, corpus=tmp_path,
+                       pick=lambda *a: (["m1", "m2"], two_payloads()))
+    capsys.readouterr()
+    assert grid.main([*argv[:2], str(other), *argv[3:]]) == 2
+    assert calls == [] and "other settings (modes)" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # the real engine
 # ---------------------------------------------------------------------------
 
@@ -942,3 +1295,28 @@ def test_real_engine_grid_end_to_end(grid, tmp_path):
     assert meta["tick_semantics"] == "tap" and meta["tap_delay"] == 21
     assert meta["engine"]["delay"] == [21, 21]
     assert meta["totals"]["matches"] == 2
+
+
+@pytest.mark.engine
+def test_real_engine_candidate_cells_on_a_shared_sample(grid, tmp_path):
+    """The update grid on two fixture matches: this interpreter as the old engine and as the
+    candidate. The same engine re-drives the same matches the same way, so the guard passes."""
+    texts = [json.dumps(il_payload(tag=f"fixture-{k}", **PLAIN)) for k in range(2)]
+    root = tmp_path / "shared"
+    grid.shared_sample(root, n=2, split="val", seed=0, modes=grid.RD.MODES, corpus=tmp_path,
+                       pick=lambda *a: ([f"fixture-{k}" for k in range(2)], texts))
+    md_path = tmp_path / "grid.md"
+    code = grid.main(["--shared-payloads", "--shared-root", str(root), "--sample", "2",
+                      "--python", sys.executable, "--rs022", "off", "--tables", "16.402.22",
+                      "--candidate", sys.executable, "--ticks", "exec", "--presses", "off",
+                      "--workers", "1", "--work", str(tmp_path / "work"), "--out",
+                      str(md_path)])
+    report = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert code == 0, [c["log_tail"] for c in report["cells"]]
+    assert [c["name"] for c in report["cells"]] == ["main-16.402.22-exec-presses-off",
+                                                    "candidate-16.402.22-exec-presses-off"]
+    assert [c["summary"]["ran"] for c in report["cells"]] == [2, 2]
+    vs = report["cells"][1]["vs_base"]["winner"]
+    assert (vs["n"], vs["diff"]) == (2, 0.0)
+    assert report["candidate"]["blocked"] is False
+    assert (root / "sample2_val_seed0" / "series.jsonl").is_file()
