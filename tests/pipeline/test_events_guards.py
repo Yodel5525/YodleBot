@@ -3,9 +3,13 @@
 Each test replays, with synthetic tracks, one way the owner's 2026-10-29 friendly turned one
 enemy unit into several plays (103 plays of 27 cards for one 8-card deck), and checks the guard
 that answers it against the rules as they were (EventConfig(), the golden behaviour the other
-event tests pin). World millitiles, battle ticks; we are team 1 at high y, the opponent team 0.
-Also: Tracker.inherit_team, public_state.OpponentElixir's unaffordable count and the runners'
---legacy-opp-plays.
+event tests pin). Then the ways the first version of the guards lost real plays (the review of
+e2188e5): a push whose first tracks were flashes and whose later ones were past the river, a
+unit deployed where another label had just stopped or died, a unit seen only in short
+fragments, units spawned past the river by a spell the detector missed. World millitiles,
+battle ticks; we are team 1 at high y, the opponent team 0. Also: Tracker.inherit_team,
+public_state.OpponentElixir's unaffordable count, the runners' --legacy-opp-plays, the HUD towers
+reaching the deriver and the replay's and battle end's counts.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from scripts.vision import tracker as T  # noqa: E402
 from scripts.vision import types as VT  # noqa: E402
 
 CANNON, FIREBALL, HOG, ICE_GOLEM, ICE_SPIRITS, MUSKETEER, SKELETONS, LOG = range(8)
-KNIGHT, SKELETON_ARMY, ROYAL_RECRUITS, GUARDS, MINER = 8, 21, 47, 25, 26
+KNIGHT, SKELETON_ARMY, ROYAL_RECRUITS, GUARDS, MINER, GOBLINS = 8, 21, 47, 25, 26, 30
 HOG26 = range(8)
 E, O, U = VT.ENEMY_TEAM, VT.OWN_TEAM, VT.UNKNOWN_TEAM
 
@@ -35,7 +39,7 @@ def tables() -> EV.EventTables:
                       ICE_SPIRITS: {"IceSpirits": 1}, MUSKETEER: {"Musketeer": 1},
                       SKELETONS: {"Skeleton": 3}, KNIGHT: {"Knight": 1},
                       SKELETON_ARMY: {"Skeleton": 15}, ROYAL_RECRUITS: {"Recruit": 6},
-                      GUARDS: {"SkeletonWarrior": 3}, MINER: {"Miner": 1}},
+                      GUARDS: {"SkeletonWarrior": 3}, MINER: {"Miner": 1}, GOBLINS: {"Goblin": 3}},
         spells={FIREBALL: {"FireballSpell"}, LOG: {"LogProjectile"}})
 
 
@@ -81,9 +85,12 @@ def test_the_guards_are_off_by_default_and_on_in_the_live_config():
     assert on.deploy_anywhere == EV.DEPLOY_ANYWHERE_CLASSES == frozenset({"Miner", "GoblinDrill", "GoblinDrillDig"})
     assert EV.EventConfig(deploy_anywhere="Miner").deploy_anywhere == frozenset({"Miner"})
     assert EV.EventConfig(deploy_anywhere=["Miner"]) == EV.EventConfig(deploy_anywhere={"Miner"})
+    assert (on.reid_min_speed_mt_per_tick, on.late_reach_ticks, on.late_reach_mt, on.late_reach_mt_per_tick) == (
+        40.0, 80, 1500.0, 120.0)
     for bad in ({"min_play_age_ticks": -1}, {"young_drop_ticks": -1}, {"own_recent_ticks": -1},
-                {"reid_motion_cos": 1.5}, {"deploy_zone_mt": -1.0}, {"reid_static_mt_per_tick": -1.0},
-                {"own_recent_radius_mt": -1.0}):
+                {"reid_motion_cos": 1.5}, {"deploy_zone_mt": -1.0}, {"reid_min_speed_mt_per_tick": -1.0},
+                {"own_recent_radius_mt": -1.0}, {"late_reach_ticks": -1}, {"late_reach_mt": -1.0},
+                {"late_reach_mt_per_tick": -1.0}):
         with pytest.raises(ValueError):
             EV.EventConfig(**bad)
 
@@ -115,21 +122,56 @@ def test_a_flash_is_no_play_and_a_unit_becomes_one_once_seen_for_ten_ticks():
 
 
 def test_a_dropped_flash_is_no_predecessor_for_the_unit_seen_next():
+    """A Knight 3000 mt from a flash 25 ticks before is beyond rule 1's reach (1200 + 50 per
+    tick): another unit. The flash is neither its play nor the start of its age."""
     k1 = tk(1, "Knight", E, 9000, 8000, 100, 101)
-    k2 = tk(2, "Knight", E, 9000, 8500, 126, 127)
+    k2 = tk(2, "Knight", E, 9000, 11000, 126, 127)
     old = deriver()
     old.update([k1], 101)
     old.update([k2], 127)
-    assert plays(old) == [(KNIGHT, 100)] and old.how_of(2) == "reacquired"   # the flash's play
+    assert plays(old) == [(KNIGHT, 100), (KNIGHT, 126)]             # the flash was a play
 
     d = live()
     d.update([k1], 101)
     d.update([], 125)
     assert d.how_of(1) == "dropped"
     d.update([k2], 127)
-    assert d.how_of(2) == "pending"                        # not re-acquired from the flash
+    assert d.how_of(2) == "pending"                        # not re-acquired, not continued
     d.update([at(k2, 136)], 136)
-    assert plays(d) == [(KNIGHT, 126)] and d.how_of(2) == "play"
+    assert plays(d) == [(KNIGHT, 126)] and d.how_of(2) == "play" and d.how_of(1) == "dropped"
+    assert (d.opp_stats.dropped, d.opp_stats.fragments) == (1, 0)
+
+
+def test_one_unit_seen_as_short_fragments_is_one_play_dated_at_its_first_sighting():
+    """Review of e2188e5: the age clock restarted on every fragment, so a unit the detector saw
+    only in bursts shorter than min_play_age_ticks never became a play (by the same rule two of
+    our five Hogs on the friendly would have been lost: tracks of 1-4 ticks). The age is the
+    unit's: a young track continues the young one it re-finds by rule 1's reach."""
+    f1 = tk(1, "HogRider", E, 14500, 12000, 300, 303, vy=100)
+    f2 = tk(2, "HogRider", E, 14500, 13100, 311, 314, vy=100)      # 8 ticks on, 1100 mt on
+    f3 = tk(3, "HogRider", E, 14500, 14200, 322, 325, vy=100)
+    old = deriver()
+    for f in (f1, f2, f3):
+        old.update([f], f.last_seen_tick)
+    assert plays(old) == [(HOG, 300)] and [old.how_of(u) for u in (2, 3)] == ["reacquired"] * 2
+
+    d = live()
+    assert d.update([f1], 303).opp_plays == [] and d.how_of(1) == "pending"
+    ev = d.update([f2], 314)                               # 314 - 300 = 14 ticks of the unit
+    assert [(p.card, p.tick, p.exec_tick, p.y_mt, p.uids) for p in ev.opp_plays] == [
+        (HOG, 300, 300, 12000.0, [1, 2])]                   # dated and placed at its first fragment
+    assert (d.how_of(1), d.how_of(2), d.card_of(1)) == ("fragment", "play", HOG)
+    d.update([f3], 325)
+    assert d.how_of(3) == "reacquired" and len(d.opp_plays()) == 1
+    assert (d.opp_stats.plays, d.opp_stats.dropped, d.opp_stats.fragments) == (1, 0, 1)
+
+    # fragments of a unit that never lives 10 ticks in all stay dropped
+    d = live()
+    d.update([tk(1, "HogRider", E, 14500, 12000, 300, 302, vy=100)], 302)
+    d.update([tk(2, "HogRider", E, 14500, 12800, 306, 308, vy=100)], 308)
+    d.update([], 330)
+    assert plays(d) == [] and (d.how_of(1), d.how_of(2)) == ("dropped", "dropped")
+    assert (d.opp_stats.dropped, d.opp_stats.fragments) == (2, 0)
 
 
 def test_a_play_is_named_by_the_label_its_track_has_once_old_enough():
@@ -220,56 +262,148 @@ def test_another_label_needs_a_predecessor_with_a_play_and_no_spell():
     assert plays(d) == [(FIREBALL, 100), (KNIGHT, 110)]
 
 
+def test_a_unit_deployed_where_another_label_stood_or_was_lost_is_a_new_play():
+    """Review of e2188e5: a predecessor slower than 40 mt/tick passed the motion check, so a Hog
+    dropped where their Knight had just died fighting (standing) was taken for that Knight under
+    another label, and the Hog's play was lost. Both must move, the same way."""
+    knight = tk(1, "Knight", E, 3500, 13000, 100, 101, vy=50.0)
+    fight = at(knight, 111, y_mt=13500.0, vx=0.0, vy=0.0)
+    hog = tk(2, "HogRider", E, 3500, 14100, 155, 156)          # 600 mt on, 15 ticks after it died
+    seq = [([knight], 101), ([fight], 111), ([at(fight, 140)], 140), ([hog], 156),
+           ([at(hog, 166, vy=90.0)], 166)]
+    first = EV.EventConfig.live(reid_min_speed_mt_per_tick=0.0)   # nothing standing gets through
+    for d in (live(), deriver(first)):
+        for tracks, tick in seq:
+            d.update(tracks, tick)
+        assert plays(d) == [(KNIGHT, 100), (HOG, 155)] and d.opp_stats.relabelled == 0
+
+    # a Knight lost while walking, a Hog deployed by it (standing while it deploys): not the Knight
+    walker = tk(1, "Knight", E, 3500, 12000, 100, 101, vy=50.0)
+    hog = tk(2, "HogRider", E, 3500, 13300, 121, 122)
+    d = live()
+    for tracks, tick in [([walker], 101), ([at(walker, 111, y_mt=12500.0)], 111), ([hog], 122),
+                         ([at(hog, 131)], 131)]:
+        d.update(tracks, tick)
+    assert plays(d) == [(KNIGHT, 100), (HOG, 121)] and d.how_of(2) == "play"
+
+
 # ---------------------------------------------------------------------------
-# deploy_zone_mt: a unit first seen past the river walked there
+# deploy_zone_mt: a unit first seen past the river walked there, from a reported play
 # ---------------------------------------------------------------------------
-def test_a_unit_first_seen_past_the_river_is_late_unless_a_pocket_is_open():
-    hog = tk(1, "HogRider", E, 14500, 20000, 300, 301, vy=90)
+def _hog_play_then_seen_past_the_river(d, uid, x, t0):
+    """Their Hog: a play at their bridge (first seen t0, 11 ticks), lost, and seen again 20 ticks
+    later 3500 mt on, past the river (beyond rule 1's 1200 + 50 per tick, within the late reach
+    1500 + 120 per tick). Returns the second track's uid."""
+    hog = tk(uid, "HogRider", E, x, 13000, t0, t0 + 1, vy=100.0)
+    d.update([hog], t0 + 1)
+    d.update([at(hog, t0 + 11, y_mt=14000.0)], t0 + 11)
+    seen = tk(uid + 1, "HogRider", E, x, 17500, t0 + 31, t0 + 32, vy=100.0)
+    d.update([seen], t0 + 32)
+    d.update([at(seen, t0 + 42, y_mt=18600.0)], t0 + 42)
+    return uid + 1
+
+
+def test_a_unit_first_seen_past_the_river_is_late_when_a_reported_unit_could_have_walked_there():
     old = deriver()
-    old.update([hog], 301)
-    assert plays(old) == [(HOG, 300)]
+    _hog_play_then_seen_past_the_river(old, 1, 14500, 300)
+    assert plays(old) == [(HOG, 300), (HOG, 331)]            # one Hog, two plays
 
     d = live()
-    d.update([hog], 301)
-    assert d.update([at(hog, 311, y_mt=21000.0)], 311).opp_plays == []
-    assert d.how_of(1) == "late" and d.card_of(1) == HOG and d.opp_stats.late == 1
-    # our right princess tower falls: the right lane is a pocket, the left one is not
-    d.update([], 400, towers={"own_right": VT.TowerHp(0, 3052), "own_left": VT.TowerHp(2000, 3052)})
+    assert _hog_play_then_seen_past_the_river(d, 1, 14500, 300) == 2
+    assert plays(d) == [(HOG, 300)] and d.how_of(2) == "late" and d.card_of(2) == HOG
+    assert d.opp_stats.late == 1 and d.opp_stats.summary()["late"] == 1
+
+
+def test_a_unit_first_seen_past_the_river_with_no_reported_unit_to_come_from_is_a_play():
+    """Review of e2188e5: with the age and zone guards together a real push vanished: its Hog was
+    seen 2 frames at the bridge (dropped: a flash) and then past the river (late), and no play was
+    reported (the friendly: our left tower lost 2,200 HP to it with no opponent play in 29 s).
+    Late needs a reported play's unit that could have walked there; without one the play that put
+    the unit there went unseen, and this is it."""
+    flash = tk(1, "HogRider", E, 14500, 14000, 600, 601, vy=100.0)
+    past = tk(2, "HogRider", E, 14500, 18500, 630, 631, vy=100.0)      # 4500 mt on: no rule 1
+    old = deriver()
+    old.update([flash], 601)
+    old.update([past], 631)
+    assert plays(old) == [(HOG, 600), (HOG, 630)]
+
+    d = live()
+    d.update([flash], 601)
+    d.update([], 622)                                      # unseen 21 ticks: dropped
+    d.update([past], 631)
+    assert d.how_of(1) == "dropped" and d.how_of(2) == "pending"
+    ev = d.update([at(past, 641, y_mt=19500.0)], 641)
+    assert [(p.card, p.tick, p.y_mt) for p in ev.opp_plays] == [(HOG, 630, 18500.0)]
+    assert d.how_of(2) == "play" and d.opp_stats.late == 0
+
+    # a Hog the detector first sees at our tower (its deploy and run missed) is a play too, and so
+    # are its units for a spell the detector missed: a Goblin Barrel's goblins at our tower
+    d = live()
+    d.update([tk(1, "HogRider", E, 14500, 24000, 640, 641)], 641)
+    d.update([tk(1, "HogRider", E, 14500, 24500, 640, 651)], 651)
+    assert plays(d) == [(HOG, 640)]
+    gob = [tk(10 + i, "Goblin", E, 3000 + 400 * i, 24000, 700, 701) for i in range(3)]
+    d.update(gob, 701)
+    ev = d.update([at(g, 711) for g in gob], 711)
+    assert [(p.card, p.tick, p.uids) for p in ev.opp_plays] == [(GOBLINS, 700, [10, 11, 12])]
+
+
+def test_a_fallen_princess_tower_opens_its_lane_and_a_miner_or_a_spell_goes_anywhere():
+    d = live()
+    d.update([], 100, towers={"own_right": VT.TowerHp(0, 3052), "own_left": VT.TowerHp(2000, 3052)})
     assert d.fallen_towers == {"own_right"}
-    right = tk(2, "HogRider", E, 14000, 19000, 410, 411)
-    d.update([right], 411)
-    d.update([at(right, 421)], 421)
-    assert plays(d) == [(HOG, 410)]
-    left = tk(3, "HogRider", E, 3500, 19000, 500, 501)
-    d.update([left], 501)
-    d.update([at(left, 511)], 511)
-    assert plays(d) == [(HOG, 410)] and d.how_of(3) == "late" and d.opp_stats.late == 2
+    assert _hog_play_then_seen_past_the_river(d, 1, 3500, 200) == 2       # the left lane: late
+    assert plays(d) == [(HOG, 200)] and d.how_of(2) == "late"
+    assert _hog_play_then_seen_past_the_river(d, 3, 14500, 400) == 4      # the right lane: a pocket
+    assert plays(d) == [(HOG, 200), (HOG, 400), (HOG, 431)] and d.how_of(4) == "play"
     # a Miner goes anywhere; a spell is never held or judged by where it lands
-    miner = tk(4, "Miner", E, 3500, 25000, 600, 601)
+    miner = tk(5, "Miner", E, 3500, 25000, 600, 601)
     d.update([miner], 601)
     d.update([at(miner, 611)], 611)
     assert plays(d)[-1] == (MINER, 600)
-    ev = d.update([tk(5, "FireballSpell", E, 3500, 25000, 700, 701)], 701)
+    ev = d.update([tk(6, "FireballSpell", E, 3500, 25000, 700, 701)], 701)
     assert [p.card for p in ev.opp_plays] == [FIREBALL]
     # the river's far edge (1000 past the centre) is still in the zone
-    edge = tk(6, "Knight", E, 9000, 17000, 800, 801)
+    edge = tk(7, "Knight", E, 9000, 17000, 800, 801)
     d.update([edge], 801)
     d.update([at(edge, 811)], 811)
-    assert plays(d)[-1] == (KNIGHT, 800)
+    assert plays(d)[-1] == (KNIGHT, 800) and d.opp_stats.late == 1
 
 
-def test_our_unmatched_unit_first_seen_in_the_enemy_half_is_late_too():
-    ours = tk(1, "HogRider", O, 4000, 9000, 300, 301)
-    old = deriver()
-    assert [(x.card, x.slot) for x in old.update([ours], 301).own_landings] == [(HOG, -1)]
+def test_our_unit_re_found_in_the_enemy_half_is_late_and_one_with_nothing_to_come_from_is_a_play():
     d = live()
-    assert d.update([ours], 301).own_landings == []
-    assert d.how_of(1) == "late" and d.card_of(1) == HOG and d.landing_stats.late == 1
+    ours = tk(1, "HogRider", O, 4000, 18000, 300, 301)               # our Hog at our bridge, no tap
+    assert [(x.card, x.slot) for x in d.update([ours], 301).own_landings] == [(HOG, -1)]
+    d.update([at(ours, 320, y_mt=16500.0)], 320)
+    again = tk(2, "HogRider", O, 4000, 14000, 340, 341)              # 20 ticks on, 2500 mt on
+    assert d.update([again], 341).own_landings == []
+    assert d.how_of(2) == "late" and d.card_of(2) == HOG and d.landing_stats.late == 1
     assert d.landing_stats.summary()["late"] == 1 and d.opp_stats.late == 0
-    # an enemy princess tower down opens the pocket for us
-    d.update([], 350, towers={"enemy_left": {"hp": 0, "max": 3052}})
-    ev = d.update([tk(2, "HogRider", O, 4000, 9000, 360, 361)], 361)
-    assert [(x.card, x.slot) for x in ev.own_landings] == [(HOG, -1)]
+    lone = tk(3, "HogRider", O, 14000, 9000, 500, 501)               # nothing of ours near: a play
+    assert [(x.card, x.slot) for x in d.update([lone], 501).own_landings] == [(HOG, -1)]
+    # their left princess tower down: a pocket for us there
+    d.update([], 600, towers={"enemy_left": {"hp": 0, "max": 3052}})
+    mine = tk(4, "Musketeer", O, 4000, 18000, 700, 701)
+    d.update([mine], 701)
+    d.update([at(mine, 720, y_mt=16500.0)], 720)
+    ev = d.update([tk(5, "Musketeer", O, 4000, 14000, 740, 741)], 741)
+    assert [(x.card, x.slot) for x in ev.own_landings] == [(MUSKETEER, -1)] and d.how_of(5) == "play"
+
+
+def test_unknown_classes_the_guards_hold_back_still_count_as_unknown():
+    """OppStats.unknown (the new-card count) went blind to tracks the guards dropped or called
+    late: the class no card puts down is counted whatever the guards did with the track."""
+    d = live()
+    d.update([tk(1, "Witchling", E, 9000, 8000, 100, 101)], 101)
+    d.update([], 123)
+    assert d.how_of(1) == "dropped" and d.opp_stats.unknown == {"Witchling": 1}
+    hog = tk(2, "HogRider", E, 14500, 13000, 300, 301, vy=100.0)
+    d.update([hog], 301)
+    d.update([at(hog, 311, y_mt=14000.0)], 311)
+    odd = tk(3, "Witchling", E, 14500, 17500, 331, 332)
+    d.update([odd], 332)
+    d.update([at(odd, 342)], 342)
+    assert d.how_of(3) == "late" and d.opp_stats.unknown == {"Witchling": 2} and plays(d) == [(HOG, 300)]
 
 
 def test_note_towers_reads_hud_towers_dicts_and_numbers_and_forgets_them_on_reset():
@@ -413,7 +547,8 @@ def test_vision_play_event_config_turns_the_guards_on_unless_legacy():
         VP.event_config(parse(["--legacy-opp-plays", "--unknown-cost", "2"]))
     assert VP.opp_guard_line(EV.EventConfig.live()) == (
         "guards on: an enemy unit is a play once seen for 10 ticks; a lost one may come back under "
-        "another label; no play from a unit first seen over 1000 mt past the river centre")
+        "another label; no play from a unit first seen over 1000 mt past the river centre where a "
+        "reported one could have walked")
     assert VP.opp_guard_line(None).startswith("legacy rules (--legacy-opp-plays)")
     assert VP.opp_guard_line(EV.EventConfig(own_recent_ticks=60)) == "guards on: our classes re-found as ours"
 
@@ -429,3 +564,93 @@ def test_vision_replay_reports_its_guards(tmp_path, monkeypatch, capsys):
     rc, _, s = TLR._replay_main(tmp_path, monkeypatch, "legacy", "--legacy-opp-plays")
     assert rc == 0 and s["opp_guards"]["on"] is False and s["opp_guards"]["deploy_zone_mt"] is None
     assert "  opp plays  legacy rules (--legacy-opp-plays)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the runners' wiring: the HUD towers reach the deriver; what the guards did is reported
+# ---------------------------------------------------------------------------
+class TowerHud:
+    """A HUD reader whose every battle frame reads our left princess tower destroyed."""
+
+    def read(self, rgb, t):
+        return VT.Hud(hand=[7, 2, 6, 4], next=0, elixir_milli=5000, clock_tick=100,
+                      phase=VT.PHASE_REGULATION,
+                      towers={"own_left": VT.TowerHp(0, 3052), "enemy_right": VT.TowerHp(1200, 3052)})
+
+    def reset(self, **kw):
+        pass
+
+
+def test_the_runners_pass_the_hud_towers_to_the_deriver():
+    """A typo in LivePerception.perceive / ReplayPerception.step's towers= would leave every pocket
+    shut, so a real pocket play past the river would be a late sighting."""
+    pytest.importorskip("numpy")
+    from scripts import vision_play as VP
+    from scripts.vision.capture import Frame
+    from scripts.vision.labels import load_class_table
+    from tests.pipeline import test_latency_and_replay as TLR
+    from tests.pipeline import test_vision_play as TVP
+
+    d = EV.EventDeriver(tables(), EV.EventConfig.live(), own_deck=HOG26)
+    size = (225, 400)
+    p = VP.LivePerception(hud_reader=TowerHud(), tracker=T.Tracker(own_classes={"HogRider"}), deriver=d,
+                          geometry=TVP.GEOMETRY, detector=TVP.FakeDetector([], size))
+    vf = p.perceive(Frame(2.0, TVP.battle_image(size), 0.0))
+    assert vf.screen == VT.SCREEN_BATTLE and p.detect_errors == 0 and d.fallen_towers == {"own_left"}
+
+    d = EV.EventDeriver(tables(), EV.EventConfig.live(), own_deck=HOG26)
+    r = TLR.VR.ReplayPerception(hud_reader=TowerHud(), tracker=T.Tracker(own_classes={"HogRider"}), deriver=d,
+                                geometry=TLR.GEOMETRY, names=TLR.VR.Names(load_class_table()), recorded=True)
+    recorded = VT.VisionFrame(t_capture=2.0, tick=100, detections=[], frame_size=(450, 800),
+                              screen=VT.SCREEN_BATTLE)
+    step = r.step(TLR.battle_image(0), 2.0, recorded=recorded)
+    assert step.det_source == "recorded" and d.fallen_towers == {"own_left"}
+
+
+def test_battle_end_logs_the_deriver_and_elixir_counts():
+    pytest.importorskip("numpy")
+    from types import SimpleNamespace
+
+    from scripts import vision_play as VP
+
+    d = live()
+    d.update([tk(1, "Knight", E, 9000, 8000, 100, 101)], 101)
+    d.update([], 123)
+    errors = []
+    me = SimpleNamespace(perception=SimpleNamespace(deriver=d), _error=lambda *a: errors.append(a))
+    ctx = SimpleNamespace(observer=SimpleNamespace(opp=SimpleNamespace(summary=lambda: {"unaffordable": 2})))
+    out = VP.VisionPlay._opp_diagnostics(me, ctx)
+    assert out == {"opp_events": d.opp_stats.summary(), "opp_elixir": {"unaffordable": 2}} and errors == []
+    assert out["opp_events"]["dropped"] == 1 and out["opp_events"]["fragments"] == 0
+    assert VP.VisionPlay._opp_diagnostics(SimpleNamespace(perception=SimpleNamespace()), None) == {}
+
+
+def test_vision_replay_sums_how_the_enemy_tracks_were_explained(tmp_path):
+    """Replay.summary's events carry the deriver's OppStats over the battles ("opp_tracks"), and
+    the printed summary says what the guards held back, so a replay shows what they removed."""
+    pytest.importorskip("numpy")
+    from scripts.vision.capture import FileReplaySource
+    from scripts.vision.labels import load_class_table
+    from tests.pipeline import test_latency_and_replay as TLR
+
+    VR = TLR.VR
+    session = TLR.write_recording(tmp_path / "rec")
+    names = VR.Names(load_class_table())
+    deriver = EV.EventDeriver(EV.EventTables({2: {"HogRider": 1}, 8: {"Knight": 1}}), EV.EventConfig.live(),
+                              own_deck=range(8))
+    perception = VR.ReplayPerception(hud_reader=TLR.ReplayHud(), tracker=T.Tracker(own_classes={"HogRider"}),
+                                     deriver=deriver, geometry=TLR.GEOMETRY, detector=TLR.ReplayDetector(),
+                                     names=names)
+    taps, _ = VR.read_recording_records(session)
+    s = VR.Replay(FileReplaySource(session), perception, taps=taps, names=names,
+                  card_ids={n: i for i, n in TLR.NAMES.items()}, card_names=TLR.NAMES,
+                  live_names=TLR.NAMES).run()
+    e = s["events"]
+    assert (e["opp_plays"], e["opp_cards"], e["own_landed"]) == (1, {"Knight": 1}, 1)   # the Knight, ten ticks on
+    ot = e["opp_tracks"]
+    assert set(ot) == set(EV.OppStats().summary()) - {"unknown"}
+    assert (ot["plays"], ot["dropped"], ot["fragments"], ot["late"], ot["relabelled"]) == (1, 0, 0, 0, 0)
+    assert any(line.startswith("  enemy tracks: 1 plays (0 spells), merged 0, children 0, re-found 0 "
+                               "(0 under another label); held back: young dropped 0, fragments 0, late 0")
+               for line in VR.format_summary(s))
+

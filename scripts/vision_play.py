@@ -39,11 +39,12 @@ latency_probe's --last and the live sessions' image budget).
 
 OPPONENT-PLAY GUARDS (on by default; --legacy-opp-plays turns them off). The event deriver runs
 with scripts/vision/events.LIVE_GUARDS (EventConfig.live(); the events module doc, GUARDS): an
-enemy unit is a play only once its track was seen for 10 ticks (named by the label it has then,
-reported 0.5 s later, still dated at its first sighting), a lost enemy unit may come back under
-another label while it keeps moving the same way, and a unit first seen past the river (no
-princess tower of the other side down in its lane: the HUD's tower reads) walked there and is
-not a play. On the owner's 2026-10-29 friendly: 103 opponent plays of 27 cards -> 39 of 18.
+enemy unit is a play only once it was seen for 10 ticks, over the short tracks of the same unit
+(named by the label it has then, reported about 0.5 s later, still dated at its first sighting),
+a lost enemy unit may come back under another label while both keep moving the same way, and a
+unit first seen past the river (no princess tower of the other side down in its lane: the HUD's
+tower reads) where a unit of a reported play could have walked is not a play. On the owner's
+2026-10-29 friendly: 103 opponent plays of 27 cards -> 46 of 18 (375 elixir -> 155).
 
 UNKNOWN PLAYS (--unknown-plays, off by default; docs/NEW_CARDS_PLAN.md 2.2). An enemy unit no
 card of the event tables explains (a card the detector names and the tables lack, a hero's extra
@@ -1721,7 +1722,7 @@ def opp_guard_line(config: "EV.EventConfig | None") -> str:
         parts.append("a lost one may come back under another label")
     if g["deploy_zone_mt"] is not None:
         parts.append(f"no play from a unit first seen over {g['deploy_zone_mt']:g} mt past the "
-                     "river centre")
+                     "river centre where a reported one could have walked")
     if g["own_reid_cross_team"] or g["own_recent_ticks"]:
         parts.append("our classes re-found as ours")
     return "guards on: " + "; ".join(parts)

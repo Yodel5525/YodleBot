@@ -51,35 +51,61 @@ team is decided (or after ``team_wait_ticks``, by a fallback). In order:
 GUARDS (EventConfig; all OFF in EventConfig() so the rules above stay as they were; the live
 runners turn on LIVE_GUARDS through EventConfig.live(), vision_play / vision_replay
 --legacy-opp-plays turn them off). On the owner's 2026-10-29 friendly the rules above reported
-103 opponent plays of 27 cards for 375 elixir (one deck: 8 cards, ~35-45 plays, ~121 elixir
-earnable): one enemy unit became several tracks, a flash of 1-2 frames was a play, and the card
-was the label of the track's second sighting. Measured offline on that recording, LIVE_GUARDS
-leave 39 plays of 18 cards for 127 elixir, and no play the analysis called real is lost (three
-are merged into the play they belong to: a Guards unit first read as a Recruit, a Skeleton Army
-skeleton first read as a Musketeer, a second Heal spirit). Our own unmatched plays (rule 5) go
-from 84 to 73, the 47 that match the HUD hand kept.
+103 opponent plays of 27 cards for 375 elixir, where the opponent could spend about 120 (one
+8-card deck): one enemy unit became several tracks and plays, a flash of 1-2 frames was a play,
+and the card was the label of the track's second sighting. Measured offline on that recording
+(re-implemented: there is no truth for the opponent's plays, so the checks are the elixir and our
+own side, whose plays the HUD hand confirms), LIVE_GUARDS leave 46 plays of 18 cards for 155
+elixir (19 the elixir counter says could not be paid, against 84), dated at the first sighting
+and reported about 11 ticks later (median). Our own unmatched plays (rule 5) go from 84 to 76
+with the 47 the HUD hand confirms kept; holding our own tracks to the age guard as well (a
+transfer test, not done live) would keep 46 of the 47 (a Hog seen as two 4-tick fragments 54
+ticks apart is lost). What is left is mostly labels and sides (the detector's): 18 cards is still
+more than one deck.
 * min_play_age_ticks (LIVE 10). An enemy UNIT track becomes a new play (rule 5, or 6) only once
-  it was seen over this many ticks; until then it stays pending: its label keeps following the
-  tracker's vote (the play is named by the matured label, not the one of its second sighting) and
-  rules 1-3 are tried again on every update. A pending young track unseen for more than
-  ``young_drop_ticks`` (the tracker's max_age_ticks) is dropped: how_of "dropped", counted in
-  OppStats.dropped, never a predecessor or parent for rules 1-3. The play keeps its first
-  sighting as tick and exec_tick; it is only reported later. Spells and our own tracks are not held.
+  its unit was seen over this many ticks; until then it stays pending: its label keeps following
+  the tracker's vote (the play is named by the matured label, not the one of its second sighting)
+  and rules 1-3 are tried again on every update. The age is the UNIT's: a young track picks up
+  the young (pending or dropped) track it continues, by rule 1's reach (lost at most reid_ticks
+  before, within reid_radius_mt + reid_speed_mt_per_tick per tick, the same label or, with
+  reid_any_label, another one by the motion), and takes its first sighting and birth point; when
+  it becomes (part of) a play, those earlier tracks join it as how_of "fragment". A pending young
+  track unseen for more than ``young_drop_ticks`` (the tracker's max_age_ticks) is dropped: how_of
+  "dropped", counted in OppStats.dropped, never a predecessor or parent for rules 1-3. The play
+  keeps its first sighting as tick and exec_tick; it is only reported later, so it reaches
+  PublicMemory at its true age, about 11 ticks old (the training noise prior,
+  data/noise/default_prior.json opponent_plays, records a play 3 +- 2 ticks late at age 0).
+  Spells and our own tracks are not held. Cost: a play all of whose units die or vanish within
+  this many ticks of their first sighting (Skeletons logged at once) is not reported.
 * reid_any_label (LIVE on). Rule 1 for the enemy also takes a lost track of ANOTHER unit label
-  that explained a play when the motion carries on (headings within ``reid_motion_cos``, or either
-  slower than ``reid_static_mt_per_tick``): the detector flickers between look-alikes (Recruit /
-  SkeletonWarrior, Knight / HogRider, newer cards it has no class for). OppStats.relabelled.
+  that explained a play when the motion carries on: both tracks move at least
+  ``reid_min_speed_mt_per_tick`` and their headings agree within ``reid_motion_cos`` (the
+  detector flickers between look-alikes: Recruit / SkeletonWarrior, Knight / HogRider, newer cards
+  it has no class for). A standing unit (one fighting or dying, or a new one deploying) has no
+  heading, so it is never taken for another label's unit. Rule 1 is tried again while a track
+  waits for its age, so a new unit the detector first sees only once it runs (its deploy missed),
+  the way a unit of another label lost there was walking, can still be taken for that unit.
+  OppStats.relabelled.
 * deploy_zone_mt (LIVE 1000). A unit no rule 1-4 explains, first seen more than this past the
   river centre into the other side's half (y > 17,000 for the opponent: past the river), cannot
-  have been deployed there, so it is a unit seen late, not a play: how_of "late", card_of the
-  class's best guess, nothing reported (OppStats.late; ours LandingStats.late). Classes in
-  ``deploy_anywhere`` (Miner, Goblin Drill) and lanes where a princess tower of the side has
-  fallen (the pocket; update(towers=) or note_towers) are exempt; spells always are.
+  have been deployed there, so it is a unit seen late, not a play, when a track of a REPORTED play
+  of its team (or one on the board at the start) could have walked there: lost at most
+  ``late_reach_ticks`` before and within ``late_reach_mt`` + ``late_reach_mt_per_tick`` per tick
+  of its birth point, or still seen within ``late_reach_mt``. Then how_of "late", card_of the
+  class's best guess, nothing reported (OppStats.late; ours LandingStats.late). Without such a
+  track the play that put it there went unseen (its first tracks were flashes, a Goblin Barrel
+  missed): it is a play as usual, dated at its first sighting. Classes in ``deploy_anywhere``
+  (Miner, Goblin Drill) and lanes where a princess tower of the other side has fallen (the
+  pocket; update(towers=) or note_towers) are exempt; spells always are. The HUD reads a fallen
+  tower seconds late (hud.TowerHpFilter confirms a zero over 2.5 s): a unit deployed in the pocket
+  before that is a play unless it lands next to a unit of a reported play (the tower's attackers),
+  and then it stays a late sighting (late is not revisited: re-opening the pocket's late units
+  would turn the attackers' re-found tracks into plays).
 * own_reid_cross_team (OFF). Rule 1 across teams for the classes our deck puts down: an enemy
   track of one of them where our same-class track was lost is ours (the deriver tells the tracker,
-  Tracker.inherit_team, so the board shows it as ours too). The data did not support it: after the
-  live guards it changed no play, and the two plays it removed alone were the opponent's Skeleton
-  Army mixing with our Skeletons.
+  Tracker.inherit_team, so the board shows it as ours too). The data did not support it: on top of
+  the first version of the live guards it changed no play, and the two plays it removed alone were
+  the opponent's Skeleton Army mixing with our Skeletons.
 * own_recent_ticks (OFF, 0). An enemy track of one of our classes born in the enemy half while
   our same-class track was seen at most this long before (within ``own_recent_radius_mt``) is
   ours. It lost real opponent plays (an opponent Hog Rider and Skeletons) on the data.
@@ -178,7 +204,7 @@ MID_X_MT = 9_000.0
 #: the Goblin Drill (its building and its digging form).
 DEPLOY_ANYWHERE_CLASSES = frozenset({"Miner", "GoblinDrill", "GoblinDrillDig"})
 #: The guards the live runners turn on (module doc, GUARDS; EventConfig.live): measured on the
-#: owner's 2026-10-29 friendly, 103 opponent plays -> 39 with no real play lost.
+#: owner's 2026-10-29 friendly, 103 opponent plays of 27 cards -> 46 of 18 (375 elixir -> 155).
 LIVE_GUARDS: Mapping[str, Any] = {"min_play_age_ticks": 10, "reid_any_label": True,
                                   "deploy_zone_mt": 1000.0}
 #: The princess towers whose fall opens a pocket (scripts/vision/types.TOWER_KEYS).
@@ -655,9 +681,12 @@ class EventConfig:
     young_drop_ticks: int = 20               # ... a waiting one unseen longer is dropped (tracker max_age)
     reid_any_label: bool = False             # rule 1 (enemy): a lost track of another unit label ...
     reid_motion_cos: float = 0.3             # ... whose heading agrees this well (cosine) ...
-    reid_static_mt_per_tick: float = 40.0    # ... or either of which moves slower than this
-    deploy_zone_mt: float | None = None      # a unit first seen this far past the river centre: late
-    deploy_anywhere: frozenset = DEPLOY_ANYWHERE_CLASSES   # ... except these classes
+    reid_min_speed_mt_per_tick: float = 40.0  # ... both moving at least this fast
+    deploy_zone_mt: float | None = None      # a unit first seen this far past the river centre is late ...
+    late_reach_ticks: int = 80               # ... when a reported play's track lost this recently ...
+    late_reach_mt: float = 1500.0            # ... (or still seen) this close to where it was first seen,
+    late_reach_mt_per_tick: float = 120.0    # ... plus this much per tick it was lost, could walk there
+    deploy_anywhere: frozenset = DEPLOY_ANYWHERE_CLASSES   # never late: these classes
     own_reid_cross_team: bool = False        # rule 1 across teams for our deck's classes
     own_recent_ticks: int = 0                # our class in the enemy half, ours seen this recently: ours
     own_recent_radius_mt: float = 6000.0     # ... this close to it
@@ -671,7 +700,7 @@ class EventConfig:
         for name in ("play_window_ticks", "just_dead_ticks", "reid_ticks", "team_wait_ticks",
                      "ambiguity_wait_ticks", "unit_sight_lag_ticks", "spell_sight_lag_ticks",
                      "tap_max_lag_ticks", "forget_ticks", "min_play_age_ticks", "young_drop_ticks",
-                     "own_recent_ticks"):
+                     "own_recent_ticks", "late_reach_ticks"):
             if getattr(self, name) < 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
         if not -1.0 <= self.reid_motion_cos <= 1.0:
@@ -689,7 +718,8 @@ class EventConfig:
             raise ValueError(f"EventConfig.unknown_cost must be a whole elixir cost >= 0, "
                              f"got {self.unknown_cost!r}")
         for name in ("merge_radius_mt", "child_radius_mt", "reid_radius_mt", "reid_speed_mt_per_tick",
-                     "excess_weight", "missing_weight", "reid_static_mt_per_tick", "own_recent_radius_mt"):
+                     "excess_weight", "missing_weight", "reid_min_speed_mt_per_tick", "own_recent_radius_mt",
+                     "late_reach_mt", "late_reach_mt_per_tick"):
             if not getattr(self, name) >= 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
         if self.tap_min_lag_ticks > self.tap_max_lag_ticks:
@@ -791,7 +821,8 @@ class OppStats:
     unknown: Counter = field(default_factory=Counter)    # class -> tracks no card explains
     unknown_plays: int = 0         # UNKNOWN plays reported (rule 6; not in `plays`)
     # GUARDS (module doc); all 0 with the guards off
-    dropped: int = 0               # young tracks lost before min_play_age_ticks: no play
+    dropped: int = 0               # young tracks lost before min_play_age_ticks and part of no play
+    fragments: int = 0             # young tracks a later track of the same unit made part of a play
     late: int = 0                  # units first seen past the river (deploy_zone_mt): no play
     relabelled: int = 0            # rule 1 across labels (reid_any_label), also in `reacquired`
     cross_team: int = 0            # enemy-seen tracks taken as our units (own_reid_cross_team,
@@ -802,8 +833,8 @@ class OppStats:
                 "children": self.children, "reacquired": self.reacquired,
                 "ambiguous": self.ambiguous, "fallback_team": self.fallback_team,
                 "unknown": dict(self.unknown), "unknown_plays": self.unknown_plays,
-                "dropped": self.dropped, "late": self.late, "relabelled": self.relabelled,
-                "cross_team": self.cross_team}
+                "dropped": self.dropped, "fragments": self.fragments, "late": self.late,
+                "relabelled": self.relabelled, "cross_team": self.cross_team}
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +875,7 @@ class _Rec:
     team: int = UNKNOWN_TEAM          # the team it was classified under
     state: str = PENDING
     how: str = ""                     # play | merged | child | reacquired | landing | unknown |
-    #                                   unknown_play | ignored | primed | dropped | late (how_of)
+    #                                   unknown_play | ignored | primed | dropped | fragment | late
     card: int | None = None
     play: _Play | None = None
     succeeded: bool = False           # a newer track was taken as this one re-acquired
@@ -852,6 +883,8 @@ class _Rec:
     vy: float = 0.0
     young: bool = False               # held back by min_play_age_ticks (pending again)
     fell_back: bool = False           # its team came from _fallback_team (counted once)
+    chained: bool = False             # min_play_age_ticks: looked for the young track it continues
+    fragments: list = field(default_factory=list)   # ... those tracks' uids, oldest first
 
 
 # ---------------------------------------------------------------------------
@@ -1015,8 +1048,10 @@ class EventDeriver:
         "play" (5: a new play's first track, ours without a tap too), "unknown_play" (6: the
         first track of an UNKNOWN play), "unknown" (no rule; an enemy one is counted in
         OppStats.unknown), "ignored" (EventTables.ignore), "primed" (on the board at the first
-        update), "dropped" (GUARDS: lost before min_play_age_ticks), "late" (GUARDS: first seen
-        past the river, deploy_zone_mt); "pending" while it waits for its team (or its age);
+        update), "dropped" (GUARDS: lost before min_play_age_ticks), "fragment" (GUARDS: a young
+        track a later track of the same unit continued, part of that one's play), "late" (GUARDS:
+        first seen past the river, deploy_zone_mt); "pending" while it waits for its team (or its
+        age);
         None for a uid this battle has not shown, or one forgotten after ``forget_ticks``.
         A track own_reid_cross_team or own_recent_ticks took as ours is "reacquired"."""
         rec = self._recs.get(int(uid))
@@ -1135,14 +1170,19 @@ class EventDeriver:
             if mine is not None:                         # own_recent_ticks: one of our units
                 self._take_as_own(rec, mine, tracker)
                 return
-            if rec.last_tick - rec.first_tick < cfg.min_play_age_ticks:
-                rec.state, rec.team, rec.young = PENDING, UNKNOWN_TEAM, True    # not a play yet
-                return
-        if not spell and self._out_of_zone(rec, team):
+            if cfg.min_play_age_ticks:
+                if not rec.chained:                      # the unit's age, not the uid's
+                    rec.chained = True
+                    self._continue_fragment(rec, team)
+                if rec.last_tick - rec.first_tick < cfg.min_play_age_ticks:
+                    rec.state, rec.team, rec.young = PENDING, UNKNOWN_TEAM, True    # not a play yet
+                    return
+        if not spell and self._late(rec, team):
             prefer = self.own_deck if team == self.own_team else None
             rec.how, rec.card = "late", self.tables.card_guess(rec.cls, prefer)
             if enemy:
                 self.opp_stats.late += 1
+                self._count_unknown(rec)
             else:
                 self.landing_stats.late += 1
             return
@@ -1160,6 +1200,7 @@ class EventDeriver:
                      rec.last_tick, [rec.uid], candidates=cands, counts=Counter({rec.cls: 1}))
         self._plays.append(play)
         rec.play, rec.how = play, "play"
+        self._adopt_fragments(rec, play)
         if spell or len(cands) == 1:
             self._resolve(play)
         else:
@@ -1178,17 +1219,109 @@ class EventDeriver:
 
     def _drop_young(self, rec: _Rec, team: int) -> None:
         """A track min_play_age_ticks held back was lost before it was old enough: a flash or
-        a fragment, not a play (how_of "dropped"; no predecessor or parent for rules 1-3)."""
+        a fragment, not a play (how_of "dropped"; no predecessor or parent for rules 1-3, but a
+        later track of the same unit may still continue it: _continue_fragment)."""
         rec.state, rec.how, rec.young = DONE, "dropped", False
         rec.team = team if team in (0, 1) else self._fallback_team(rec)
         if rec.team == self.enemy_team:
             self.opp_stats.dropped += 1
+            self._count_unknown(rec)
+
+    def _count_unknown(self, rec: _Rec) -> None:
+        """OppStats.unknown for an enemy track a guard held back (dropped, late) whose class no
+        card puts down: the new-card count keeps counting it, as it did before the guards."""
+        cls = rec.cls
+        if not (self.tables.unit_cards(cls) or self.tables.is_spell(cls) or cls in self.tables.ignore):
+            self.opp_stats.unknown[cls] += 1
+
+    def _continue_fragment(self, rec: _Rec, team: int) -> None:
+        """min_play_age_ticks: young unit `rec` of `team` continues the young track _fragment_of
+        finds (pending: dropped now). It takes that track's first sighting, birth point and
+        fragments, so the age, the deploy zone and the play's tick and place are the unit's; the
+        fragments join the play it becomes part of (_adopt_fragments)."""
+        frag = self._fragment_of(rec, team)
+        if frag is None:
+            return
+        if frag.state == PENDING:
+            self._drop_young(frag, team)
+        frag.succeeded = True
+        rec.fragments = [*frag.fragments, frag.uid]
+        rec.first_tick, rec.first_t, rec.bx, rec.by = frag.first_tick, frag.first_t, frag.bx, frag.by
+
+    def _fragment_of(self, rec: _Rec, team: int) -> _Rec | None:
+        """The young track (pending, or dropped) of `team` that unit `rec` continues by rule 1's
+        reach: lost 1..reid_ticks before rec's first sighting, within reid_radius_mt +
+        reid_speed_mt_per_tick per tick of rec's birth point, not seen dying, of rec's label or,
+        with reid_any_label, another unit label it carries on the motion of (_moving_on); the
+        nearest one, else None."""
+        cfg = self.config
+        best, best_d = None, math.inf
+        for r in self._recs.values():
+            if r is rec or r.succeeded or self.tables.is_spell(r.cls):
+                continue
+            if not ((r.state == PENDING and r.young and r.seen_team == team)
+                    or (r.state == DONE and r.how == "dropped" and r.team == team)):
+                continue
+            if r.cls != rec.cls and not (cfg.reid_any_label and self._moving_on(r, rec)):
+                continue
+            gap = rec.first_tick - r.last_tick
+            if not 0 < gap <= cfg.reid_ticks:
+                continue
+            if r.hp is not None and r.hp <= cfg.reid_max_dead_hp:
+                continue
+            d = _dist(r.x, r.y, rec.bx, rec.by)
+            if d <= cfg.reid_radius_mt + cfg.reid_speed_mt_per_tick * gap and d < best_d:
+                best, best_d = r, d
+        return best
+
+    def _adopt_fragments(self, rec: _Rec, play: _Play) -> None:
+        """The young tracks `rec` continued (_continue_fragment) join rec's `play` as how_of
+        "fragment", before rec in its uids; they are no longer counted as dropped."""
+        for uid in rec.fragments:
+            frag = self._recs.get(uid)
+            if frag is None or frag.how != "dropped":
+                continue
+            frag.how, frag.play, frag.card = "fragment", play, rec.card
+            if uid not in play.uids:
+                play.uids.insert(play.uids.index(rec.uid) if rec.uid in play.uids else len(play.uids), uid)
+            if isinstance(play.record, OppPlay) and uid not in play.record.uids:
+                play.record.uids.append(uid)
+            if frag.team == self.enemy_team:
+                self.opp_stats.dropped -= 1
+                self.opp_stats.fragments += 1
+
+    def _late(self, rec: _Rec, team: int) -> bool:
+        """deploy_zone_mt: whether unit `rec` of `team` is a unit seen late, not a play: first
+        seen out of its side's zone (_out_of_zone) where a track of a reported play of its team
+        could have walked (_walked_from). Out of the zone with no such track, the play that put
+        it there went unseen, and rec is that play."""
+        return self._out_of_zone(rec, team) and self._walked_from(rec, team) is not None
+
+    def _walked_from(self, rec: _Rec, team: int) -> _Rec | None:
+        """The nearest track of `team` first seen no later than `rec` that belongs to a reported
+        play (or was on the board at the first update) and could have walked to rec's birth
+        point: lost 1..late_reach_ticks before rec's first sighting within late_reach_mt +
+        late_reach_mt_per_tick per tick, or seen since within late_reach_mt; else None."""
+        cfg = self.config
+        best, best_d = None, math.inf
+        for r in self._recs.values():
+            if r is rec or r.state != DONE or r.team != team or r.first_tick > rec.first_tick:
+                continue
+            if r.how != "primed" and (r.play is None or r.play.record is None):
+                continue
+            gap = rec.first_tick - r.last_tick
+            if gap > cfg.late_reach_ticks:
+                continue
+            d = _dist(r.x, r.y, rec.bx, rec.by)
+            if d <= cfg.late_reach_mt + cfg.late_reach_mt_per_tick * max(gap, 0) and d < best_d:
+                best, best_d = r, d
+        return best
 
     def _out_of_zone(self, rec: _Rec, team: int) -> bool:
         """deploy_zone_mt: unit `rec` of `team` was first seen more than deploy_zone_mt past the
         river centre into the other side's half (team 1 defends high y), outside a pocket a
         fallen princess tower of the other side opened in its lane, and its class cannot be put
-        down anywhere (deploy_anywhere): it walked there, so it is not a new play."""
+        down anywhere (deploy_anywhere): it cannot have been deployed there."""
         cfg = self.config
         if cfg.deploy_zone_mt is None or rec.cls in cfg.deploy_anywhere:
             return False
@@ -1238,6 +1371,7 @@ class EventDeriver:
                      card=UNKNOWN_CARD, candidates=(UNKNOWN_CARD,), counts=Counter({rec.cls: 1}))
         self._plays.append(play)
         rec.play, rec.how = play, "unknown_play"
+        self._adopt_fragments(rec, play)
         opp = OppPlay(card=UNKNOWN_CARD, tick=play.tick,
                       exec_tick=self.exec_tick(UNKNOWN_CARD, KIND_UNIT, play.tick),
                       x_mt=play.x, y_mt=play.y, kind=KIND_UNIT, uids=list(play.uids),
@@ -1255,6 +1389,7 @@ class EventDeriver:
         play.last_tick = max(play.last_tick, rec.last_tick)
         if isinstance(play.record, OppPlay):
             play.record.uids.append(rec.uid)
+        self._adopt_fragments(rec, play)
 
     def _reacquired(self, rec: _Rec, team: int) -> _Rec | None:
         """Rule 1: the lost track that `rec` is the same unit as, or None. With reid_any_label an
@@ -1288,13 +1423,14 @@ class EventDeriver:
         return best
 
     def _moving_on(self, old: _Rec, new: _Rec) -> bool:
-        """reid_any_label: whether `new` carries on `old`'s motion: either is slower than
-        reid_static_mt_per_tick (no heading to compare), or their headings agree by more than
-        reid_motion_cos (cosine of the angle between the tracker's velocities)."""
+        """reid_any_label: whether `new` carries on `old`'s motion: both move at least
+        reid_min_speed_mt_per_tick and their headings agree by more than reid_motion_cos (cosine
+        of the angle between the tracker's velocities). A standing track has no heading: a unit
+        fighting or dying where a new one is deployed (deploying, so standing too) is not it."""
         cfg = self.config
         s_old, s_new = math.hypot(old.vx, old.vy), math.hypot(new.vx, new.vy)
-        if s_old < cfg.reid_static_mt_per_tick or s_new < cfg.reid_static_mt_per_tick:
-            return True
+        if min(s_old, s_new) <= 0.0 or min(s_old, s_new) < cfg.reid_min_speed_mt_per_tick:
+            return False
         return (old.vx * new.vx + old.vy * new.vy) / (s_old * s_new) > cfg.reid_motion_cos
 
     def _mergeable(self, rec: _Rec, team: int, spell: bool) -> _Play | None:

@@ -66,9 +66,13 @@ enemy tracks no card explained, by class). --unknown-cost sets the elixir each i
 to replay the default chain.
 
 OPPONENT-PLAY GUARDS. The deriver runs with events.LIVE_GUARDS, as vision_play does live (the
-events module doc, GUARDS: a play once its track was seen 10 ticks, a lost unit re-found under
-another label, no play from a unit first seen past the river); --legacy-opp-plays replays the
-rules as they were before, to compare. The summary's "opp_guards" says which ran.
+events module doc, GUARDS: a play once its unit was seen 10 ticks, a lost unit re-found under
+another label, no play from a unit first seen past the river where a reported play's unit could
+have walked); --legacy-opp-plays replays the rules as they were before, to compare. The
+summary's "opp_guards" says which ran, and its events' "opp_tracks" how the deriver explained the
+enemy tracks (events.OppStats, summed over the battles: plays, merged, children, re-found and
+relabelled, and what the guards held back: young tracks dropped, fragments, late sightings),
+printed under the events line.
 
 Not here: fitting the perception noise profile (V11's fit_noise_profile, from these errors
 and own-tap ground truth) needs E17's profile format, which is not built yet.
@@ -778,6 +782,7 @@ class Replay:
         self.perception = perception
         self.unknown_plays = bool(unknown_plays)       # N02: the summary counts UNKNOWN plays
         self.unknown_tracks: Counter = Counter()       # class -> enemy tracks no card explains
+        self.opp_tracks: dict[str, int] = {}           # events.OppStats counts of the battles over
         self.battle = battle if battle is not None else VP.BattleState()
         self.recorder = recorder
         self.labels = labels
@@ -964,8 +969,18 @@ class Replay:
         stats = getattr(getattr(self.perception, "deriver", None), "opp_stats", None)
         return Counter(getattr(stats, "unknown", None) or {})
 
+    def _opp_tracks_now(self) -> dict[str, int]:
+        """The deriver's counts of how it explained the enemy tracks since its last reset
+        (events.OppStats.summary without its unknown classes, which unknown_tracks has)."""
+        stats = getattr(getattr(self.perception, "deriver", None), "opp_stats", None)
+        summary = stats.summary() if callable(getattr(stats, "summary", None)) else {}
+        return {str(k): int(v) for k, v in summary.items() if isinstance(v, int) and not isinstance(v, bool)}
+
     def _keep_unknown_tracks(self) -> None:
+        """Keep what the deriver counted before a reset forgets it (a battle's start or end)."""
         self.unknown_tracks.update(self._opp_unknown_now())
+        for k, v in self._opp_tracks_now().items():
+            self.opp_tracks[k] = self.opp_tracks.get(k, 0) + v
 
     def summary(self) -> dict[str, Any]:
         gaps = describe(self.intervals)
@@ -985,6 +1000,8 @@ class Replay:
         events = {"opp_plays": self.events["opp_plays"], "opp_cards": dict(self.opp_cards),
                   "own_landed": self.events["own_landed"], "own_missed": self.events["own_missed"],
                   "own_unmatched": self.events["own_unmatched"], "landing_stats": landing}
+        now = self._opp_tracks_now()
+        events["opp_tracks"] = {k: self.opp_tracks.get(k, 0) + now.get(k, 0) for k in {**self.opp_tracks, **now}}
         if self.unknown_plays:
             events["opp_unknown"] = self.events["opp_unknown"]
             events["unknown_tracks"] = dict(sorted((self.unknown_tracks + self._opp_unknown_now()).items()))
@@ -1037,6 +1054,12 @@ def format_summary(s: Mapping[str, Any]) -> list[str]:
     e = s["events"]
     lines.append(f"events: {e['opp_plays']} opponent plays {e['opp_cards'] or ''}; own landed {e['own_landed']}, "
                  f"missed {e['own_missed']}, not ours to match {e['own_unmatched']}; taps replayed {s['taps']['replayed']}")
+    ot = e.get("opp_tracks")
+    if ot:
+        lines.append(f"  enemy tracks: {ot.get('plays', 0)} plays ({ot.get('spells', 0)} spells), merged "
+                     f"{ot.get('merged', 0)}, children {ot.get('children', 0)}, re-found {ot.get('reacquired', 0)} "
+                     f"({ot.get('relabelled', 0)} under another label); held back: young dropped "
+                     f"{ot.get('dropped', 0)}, fragments {ot.get('fragments', 0)}, late {ot.get('late', 0)}")
     if "opp_unknown" in e:
         lines.append(f"  UNKNOWN plays (--unknown-plays): {e['opp_unknown']}; enemy tracks no card explained: "
                      + (", ".join(f"{k} {v}" for k, v in e["unknown_tracks"].items()) or "none"))
