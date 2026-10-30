@@ -40,6 +40,15 @@ Repeat `digits` on different screenshots until `list` shows 0-9 for each font. F
 greyed art take a shot while the card is unaffordable (--variants greyed,...); for
 evolved or hero art, while that form is in hand (--variants evo / hero).
 
+Faster, from a whole recording (scripts/vision/harvest.py): `clock-sweep` labels
+every second of the clock from one frame you read; `harvest` clusters the elixir,
+tower, hand or next-card crops into a contact sheet and `harvest-label` stores the
+clusters you name:
+
+    python -m scripts.vision.templates clock-sweep --recording REC --anchor REC/images/00001200.jpg --text 1:48
+    python -m scripts.vision.templates harvest --recording REC --what tower --out tmp/harvest_tower.png
+    python -m scripts.vision.templates harvest-label --sheet tmp/harvest_tower.json --map "0=3,1=0,2=5"
+
 Matching (numpy only; OpenCV is never needed):
 * cards and labels: zero-mean, unit-norm greyscale signatures compared by dot
   product = normalised cross-correlation, the method of scripts/brain/cards.py
@@ -817,6 +826,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--label", required=True, choices=CLOCK_LABELS,
                    help="regulation ('Time left') or overtime")
     p.set_defaults(func=_cmd_label)
+    from .harvest import add_parsers           # whole recordings: clock-sweep, harvest, harvest-label
+    add_parsers(sub, common)
     args = ap.parse_args(argv)
     try:
         return int(args.func(args))

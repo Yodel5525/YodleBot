@@ -488,7 +488,36 @@ notepad data\vision\hud_regions_pc.json     # fix the "px" box [x0, y0, x1, y1] 
 
 The readers use `hud_regions_pc.json` automatically when it exists. Do not edit `hud_regions_1080x1920.json`.
 
-**6. Templates.** Open the frame, read what it shows, and store it. An example frame: the clock at 1:48, 2 elixir, a hand of Log, Hog Rider (greyed), Skeletons and Fireball (greyed), Ice Spirits next, and tower numbers 3052 and 2101 (theirs) and 3052 and 2731 (ours):
+**6. Templates.** The fast route reads the whole recording: `clock-sweep` for the clock, and `harvest` plus `harvest-label` for the elixir count, the tower numbers, the hand and the next card. The one-frame commands further down are the fallback, and they are still how the clock's label is stored.
+
+*a) Clock.* Read the clock on one frame (`$I`), and the sweep counts the seconds from it through the whole recording. Check what it would store with `--dry-run` first:
+
+```powershell
+& $BB -m scripts.vision.templates clock-sweep --recording $REC --anchor $I --text 1:48 --dry-run
+& $BB -m scripts.vision.templates clock-sweep --recording $REC --anchor $I --text 1:48
+```
+
+- It prints the range it labelled (for example `labelled 3:00 down to 0:00`), every stretch it skipped as ambiguous, and each glyph it stored. It stores only the characters `templates list` reports missing; add `--all` to store every character.
+- `lost the count` or `count check failed` means it could not count through a stretch, and stopped on that side. Read the clock on a frame after that point (set `$J` to it, like `$I`) and add it as a second anchor: `--anchor $I --text 1:48 --anchor $J --text 0:31` (one `--text` per `--anchor`, in the same order).
+- It stops at the end of regulation. If the friendly went to overtime, add an overtime frame (`$K`) as the last anchor, plus `--until-overtime`: `--anchor $I --text 1:48 --anchor $K --text 1:47 --until-overtime`.
+
+*b) Elixir, towers, hand and next card.* `harvest` crops every image and groups crops that look alike. It writes a contact sheet with one tile per group: `#id n=size` (a `g` marks greyed cards), then the group's most typical crop, a middle one and its least typical one. Open the sheet, then give each group you can read its value:
+
+```powershell
+& $BB -m scripts.vision.templates harvest --recording $REC --what elixir --out tmp\harvest_elixir.png
+start tmp\harvest_elixir.png
+& $BB -m scripts.vision.templates harvest-label --sheet tmp\harvest_elixir.json --map "0=7,1=3,2=1,3=0"
+```
+
+Do the same with `--what tower`, `--what hand` and `--what next`, for example `--map "0=HogRider,1=greyed:HogRider,2=Log,3=empty"` for the hand.
+
+- Digits: one group is one digit, so `10` elixir shows up as two groups, `1` and `0`.
+- Cards: the simulator's name; put `greyed:` in front of a greyed card (`5=greyed:Cannon`), and `empty` for an empty slot. A group the sheet marks `g` must be labelled `greyed:...`, and only those. Otherwise `harvest-label` stores nothing and says which group is wrong (`--force` stores it anyway).
+- Leave out every group whose three crops are not all the same digit or card. Also leave out the tower groups that show a king's level badge (`11`) instead of hit points. Groups you leave out are not stored.
+- Several groups for one digit or card is normal, for example the two tower colours. Label them all.
+- If a group mixes two digits, run `harvest` again with a higher `--min-ncc` (the default is 0.9 for digits and 0.8 for cards). `--max-clusters` (default 80) sets how many groups the sheet shows, largest first.
+
+*c) One frame at a time (fallback, and the clock label).* Open the frame, read what it shows, and store it. An example frame: the clock at 1:48, 2 elixir, a hand of Log, Hog Rider (greyed), Skeletons and Fireball (greyed), Ice Spirits next, and tower numbers 3052 and 2101 (theirs) and 3052 and 2731 (ours):
 
 ```powershell
 & $BB -m scripts.vision.templates digits --image $I --font clock --text 1:48
@@ -505,7 +534,7 @@ The readers use `hud_regions_pc.json` automatically when it exists. Do not edit 
 - In overtime: `& $BB -m scripts.vision.templates label --image $I --label overtime`.
 - `found 5 glyphs ... but the text has 4 characters` means the box or the frame is not clean. Try another frame, or crop by hand with `--box x0,y0,x1,y1`.
 
-Repeat on other frames until this shows `complete` for all three fonts, and `base, greyed` for every card:
+Run `harvest` or the one-frame commands again (on other frames or groups) until this shows `complete` for all three fonts, and `base, greyed` for every card:
 
 ```powershell
 & $BB -m scripts.vision.templates list --deck HogRider,Musketeer,Cannon,IceGolemite,IceSpirits,Skeletons,Fireball,Log
