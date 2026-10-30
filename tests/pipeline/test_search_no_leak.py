@@ -7,8 +7,10 @@ plan's two checks, through rs_search.SearchSeat's own act() (a stub of RSAgent's
 checkpoint and no torch; tools/rs_rebuild.py's real Rebuilder on test_rs_rebuild's CycleBattle;
 test_rs_search's FakePolicy):
   * two observed states that differ only in privileged fields (test_rs_rebuild.push_state and
-    its noised twin) give the same public view, the same RootSpec (its key), the same rows for
-    the policy, the same search record and the same decision;
+    its noised twin, with the opponent's deck, hand costs, abilities, evolutions and Mirror
+    target and every hidden entity column changed too: more_privileged) give the same public
+    view, the same RootSpec (its key), the same rows for the policy, the same search record
+    and the same decision;
   * a proxy of the match battle records every attribute the seat reaches: a public preset
     (s_root, s_idle) reaches check_deploy only (d0's legality and the candidates' tap-time
     checks through the same object); only the privileged s_true reaches more (save, load,
@@ -146,12 +148,37 @@ def record(seat):
     return {k: v for k, v in seat.last_search.to_json().items() if k != "ms"}
 
 
+#: The hidden entity columns more_privileged changes (push_state's noised twin changes
+#: target_uid and stun_ticks).
+HIDDEN_COLUMNS = {"attack_phase": 2, "charge": 500, "shield": 10, "buffs": [["rage", 300]],
+                  "dest_x": 1, "dest_y": 2, "mount_uid": 7, "knockback_ticks": 3,
+                  "facing": [1, 2], "ability_ticks": 4}
+
+
+def more_privileged(RBT, state):
+    """push_state's noised twin with the rest of what no screen shows changed too: the
+    opponent's whole deck, its hand costs, abilities, evolutions and Mirror target, and every
+    hidden entity column."""
+    out = copy.deepcopy(state)
+    out["players"][1].update(
+        deck=[RBT.WITCH, RBT.TESLA, RBT.MIRROR, RBT.COLLECTOR, RBT.ZAP, RBT.ARROWS, RBT.GIANT,
+              RBT.BABYD],
+        hand_costs=[9, 9, 9, 9], abilities=[[1, 0, 2]], evo=[1], mirror_target=RBT.GIANT)
+    for e in out["entities"]:
+        for name, value in HIDDEN_COLUMNS.items():
+            e[FIELD[name]] = copy.deepcopy(value)
+    return out
+
+
 def test_privileged_fields_change_nothing_the_search_sees(leak, monkeypatch):
     RBT = leak.RBT
-    plain_state, noised_state = RBT.push_state(), RBT.push_state(noised=True)
+    plain_state = RBT.push_state()
+    noised_state = more_privileged(RBT, RBT.push_state(noised=True))
     # the noised twin holds what no screen shows
     them = noised_state["players"][1]
     assert them["hand"] != plain_state["players"][1]["hand"] and them["pending"]
+    assert them["deck"] != plain_state["players"][1]["deck"] and them["abilities"]
+    assert them["hand_costs"] != plain_state["players"][1]["hand_costs"]
     assert noised_state["projectiles"] and len(noised_state["entities"]) == len(
         plain_state["entities"]) + 1
     a, cmd_a, _, rb_a = play(leak, monkeypatch, "s_idle", plain_state)

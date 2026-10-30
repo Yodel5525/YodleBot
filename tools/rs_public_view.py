@@ -220,6 +220,15 @@ SPELL_KEEP = ("team", "card_id", "x", "y")
 #: "public" are built).
 TOP_KEYS = ("tick", "tick_ms", "regular_ticks", "overtime_ticks", "elixir_rate", "overtime",
             "game_over", "winner", "perception", "observer")
+#: The top-level keys a public view may hold (is_public): TOP_KEYS and those the view builds.
+VIEW_KEYS = frozenset(TOP_KEYS) | {"players", "entities", "spells", "projectiles", "public"}
+#: The keys of a public opponent block (is_public): public_state's live block; the simulator
+#: view's adds "pending", always [].
+OPP_KEYS = frozenset({"team", "elixir_milli", "hand", "hand_costs", "next_card", "deck", "crowns",
+                      "tower_hp", "tower_max_hp", "king_active", "pending", "pending_cost"})
+#: The spell columns a public spell row may hold a value in (the rest are 0): SPELL_KEEP, the aim
+#: (which must be the centre) and ticks_flown (the sightings' age).
+SPELL_PUBLIC = SPELL_KEEP + ("aim_x", "aim_y", "ticks_flown")
 #: own_sent keeps our plays this many ticks back (a spell's flight is shorter).
 SENT_RECENT_TICKS = 100
 
@@ -896,19 +905,43 @@ def sent_rows(sent: Iterable[Sequence[int]] | None, team: int,
 def is_public(state: Mapping[str, Any], team: int, *,
               fields: Mapping[str, int] | Sequence[str] | None = None,
               spell_fields: Mapping[str, int] | Sequence[str] | None = None) -> list[str]:
-    """What in `state` a screen does not show to `team` ([] when it is public): an opponent block
-    with elixir, hand, next card or pending plays; projectiles; an enemy with an UNSEEN_STATUS
-    bit (or unreported status), except the uids Permanence kept (state["public"]["kept"]); an
-    entity column outside PUBLIC_FIELDS that is not ENTITY_DEFAULTS'; a status bit outside
-    PUBLIC_STATUS (kept rows aside); a spell whose aim is not its centre."""
+    """What in `state` a screen does not show to `team` ([] when it is public): a top-level key
+    outside VIEW_KEYS; an opponent block with a key outside OPP_KEYS, with elixir, hand, hand
+    costs, next card or pending plays, or (a view, with its "public" block) a deck card neither
+    its opp_plays nor the board show; projectiles; an enemy with an UNSEEN_STATUS bit (or
+    unreported status), except the uids Permanence kept (state["public"]["kept"]); an entity
+    column outside PUBLIC_FIELDS that is not ENTITY_DEFAULTS'; a status bit outside
+    PUBLIC_STATUS (kept rows aside); a spell whose aim is not its centre, or with a value in a
+    column outside SPELL_PUBLIC. A live caller's opponent deck must come from the plays its
+    memory view (public_view's mem_view) holds, as public_state's does (ctx.opp_cards and
+    ctx.memory are fed by the same plays)."""
     team = _team(team)
     F, SF = _fields(fields), _spell_fields(spell_fields)
     problems: list[str] = []
+    extra = sorted(str(k) for k in state if k not in VIEW_KEYS)
+    if extra:
+        problems.append(f"top-level keys {extra} (no view has them)")
     them = state["players"][1 - team]
+    odd = sorted(str(k) for k in them if k not in OPP_KEYS)
+    if odd:
+        problems.append(f"opponent block keys {odd}")
     if them.get("elixir_milli"):
         problems.append(f"opponent elixir {them['elixir_milli']}")
     if them.get("hand"):
         problems.append(f"opponent hand {list(them['hand'])}")
+    if them.get("hand_costs"):
+        problems.append(f"opponent hand costs {list(them['hand_costs'])}")
+    pub = state.get("public")
+    if isinstance(pub, Mapping) and "opp_plays" in pub:
+        shown = {int(p[0]) for p in pub.get("opp_plays") or () if p and p[0] is not None}
+        shown |= {int(_get(e, F["card_id"], -1)) for e in state.get("entities") or ()
+                  if int(_get(e, F["team"], team)) != team}
+        shown |= {int(_get(sp, SF["card_id"], -1)) for sp in state.get("spells") or ()
+                  if int(_get(sp, SF["team"], team)) != team}
+        unseen = [c for c in them.get("deck") or () if c is not None and int(c) >= 0
+                  and int(c) not in shown]
+        if unseen:
+            problems.append(f"opponent deck cards {unseen} that no play or board shows")
     if them.get("next_card", EMPTY_CARD) not in (EMPTY_CARD, None):
         problems.append(f"opponent next card {them['next_card']}")
     if them.get("pending") or them.get("pending_cost"):
@@ -930,10 +963,14 @@ def is_public(state: Mapping[str, Any], team: int, *,
         for name, i in private:
             if _get(e, i, ENTITY_DEFAULTS.get(name, 0)) != ENTITY_DEFAULTS.get(name, 0):
                 problems.append(f"uid {uid} {name} {e[i]!r}")
+    spell_private = [(name, i) for name, i in SF.items() if name not in SPELL_PUBLIC]
     for sp in state.get("spells") or ():
         if (_get(sp, SF["aim_x"], None), _get(sp, SF["aim_y"], None)) != (
                 _get(sp, SF["x"], None), _get(sp, SF["y"], None)):
             problems.append(f"spell card {_get(sp, SF['card_id'], None)} has an aim")
+        for name, i in spell_private:
+            if _get(sp, i, 0) not in (0, None):
+                problems.append(f"spell card {_get(sp, SF['card_id'], None)} {name} {sp[i]!r}")
     return problems
 
 
@@ -966,6 +1003,11 @@ class Permanence:
     lifetimes       card id -> lifetime ticks (lifetimes_from_card_table); others the default
     spell_cards     our spell card ids (spell_ids): a spell of ours landing on a building that
                     then vanished destroyed it; empty: the rule is off
+    rewind_ticks    a view tick more than this below the last one is a new battle (reset); a
+                    smaller step back is clock noise and is read at the last tick (the memo's
+                    clock never goes back). 0 (the default): any step back is a new battle.
+                    None: never (a simulator seat lives for one match, and its noised view tick
+                    steps back within it)
     """
 
     def __init__(self, fields: Mapping[str, int] | Sequence[str] | None = None, *, team: int,
@@ -974,8 +1016,9 @@ class Permanence:
                  grace_ticks: int = GRACE_TICKS, rate_window_ticks: int = RATE_WINDOW_TICKS,
                  merge_mt: float = MERGE_MT, spell_cards: Iterable[int] = (),
                  spell_hit_mt: float = SPELL_HIT_MT, spell_window_ticks: int = SPELL_WINDOW_TICKS,
-                 sub: int = SUBTILE_PER_MILLITILE):
+                 sub: int = SUBTILE_PER_MILLITILE, rewind_ticks: int | None = 0):
         self.F = _fields(fields)
+        self.rewind_ticks = None if rewind_ticks is None else max(0, int(rewind_ticks))
         self.team = _team(team)
         self.enemy = 1 - self.team
         self.hiders = frozenset(int(c) for c in hiders)
@@ -1084,7 +1127,11 @@ class Permanence:
         F = self.F
         tick = int(view["tick"])
         if self.tick is not None and tick < self.tick:
-            self.reset()                    # the clock went back: a new battle
+            if self.rewind_ticks is not None and tick < self.tick - self.rewind_ticks:
+                self.reset()                # the clock went back: a new battle
+            else:
+                tick = self.tick            # clock noise: read at the last tick
+                self.stats["rewinds"] += 1
         self.tick = tick
         visible = self._visible(view)
         for uid, e in visible.items():

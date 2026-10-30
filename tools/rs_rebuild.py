@@ -1015,16 +1015,20 @@ def infer_aim(caster: int, x: float, y: float, targets: Sequence[tuple[float, fl
 class SpellSightings:
     """The first sighting of each spell row (team, card) of a battle's views, for a rolling spell's
     re-roll (module doc, RECASTS). update(view) once per decision, ticks in order; a tick that goes
-    back starts a new battle; a row seen again within SIGHT_GAP_TICKS and SIGHT_REACH_MT_PER_TICK
-    per tick of its last sighting is the same spell."""
+    back more than rewind_ticks (default 0: any step back; None: never, a simulator seat whose
+    noised view tick steps back within its one match) starts a new battle; a row seen again
+    within SIGHT_GAP_TICKS and SIGHT_REACH_MT_PER_TICK per tick of its last sighting is the same
+    spell."""
 
     def __init__(self, spell_fields: Mapping[str, int] | Sequence[str] | None = None, *,
                  sub: int = SUBTILE_PER_MILLITILE, gap_ticks: int = SIGHT_GAP_TICKS,
-                 reach_mt_per_tick: float = SIGHT_REACH_MT_PER_TICK):
+                 reach_mt_per_tick: float = SIGHT_REACH_MT_PER_TICK,
+                 rewind_ticks: int | None = 0):
         self.SF = _index(spell_fields, PV.SPELL_FIELDS_FALLBACK)
         self.sub = int(sub)
         self.gap = int(gap_ticks)
         self.reach = float(reach_mt_per_tick) * self.sub
+        self.rewind_ticks = None if rewind_ticks is None else max(0, int(rewind_ticks))
         self.reset()
 
     def reset(self) -> None:
@@ -1034,7 +1038,8 @@ class SpellSightings:
     def update(self, view: Mapping[str, Any]) -> None:
         SF = self.SF
         tick = int(view["tick"])
-        if self.tick is not None and tick < self.tick:
+        rewind = self.rewind_ticks
+        if self.tick is not None and rewind is not None and tick < self.tick - rewind:
             self.reset()
         if self.tick == tick:
             return

@@ -120,8 +120,16 @@ def test_agent_spec_to_dict_is_unchanged_without_a_search(env):
 def test_agent_spec_search_holds_its_full_content(env, monkeypatch):
     M, SR, RB = env.match, env.search, env.rebuild
     a = M.AgentSpec("a.pt", name="s", search="s_root", latency_ticks=2)
+    # the full content, less the SEAT_OPTIONAL fields at their preset's value (verify off)
     full = SR.SearchConfig.named("s_root").to_json()
+    assert SR.SEAT_OPTIONAL == ("verify",) and full["verify"] is False
+    full.pop("verify")
     assert a.search == {**full, "rebuild": pinned(env)} == SR.seat_search("s_root")
+    assert SR.seat_config(a.search) == SR.SearchConfig.named("s_root")
+    on = SR.seat_search("s_root", verify=True)
+    assert on["verify"] is True and SR.seat_config(on).verify is True
+    assert {k: v for k, v in on.items() if k != "verify"} == a.search
+    assert SR.seat_search(on) == on and SR.seat_search(a.search) == a.search
     assert list(a.to_dict()) == OLD_AGENT_KEYS + ["search", "latency_ticks"]
     assert a.to_dict()["search"] == a.search and a.to_dict()["latency_ticks"] == 2
     back = M.AgentSpec.from_dict(json.loads(json.dumps(a.to_dict())))
@@ -144,6 +152,11 @@ def test_agent_spec_search_holds_its_full_content(env, monkeypatch):
     probed = M.AgentSpec("a.pt", search="s_idle@probes+R2")
     assert probed.search["rebuild"] == pinned(env, report.replace(level="R2"))
     assert "probes" not in probed.search["rebuild"] and "notes" not in probed.search["rebuild"]
+    # where they came from is not in the key, so the command lines print it
+    assert SR.probes_source("s_idle@probes+R2") == "reports/x.json"
+    assert SR.probes_source({"preset": "s_idle", "rebuild": "probes"}) == "reports/x.json"
+    assert SR.probes_source("s_idle@R2") is None and SR.probes_source("s_idle") is None
+    assert SR.probes_source(None) is None and SR.probe_report_source() == "reports/x.json"
     monkeypatch.setattr(RB.RebuildSettings, "from_report", None)   # never read again
     assert M.AgentSpec.from_dict(probed.to_dict()) == probed
     # the privileged ceiling says so
@@ -327,6 +340,45 @@ def test_a_search_seat_plays_a_match_through_build_seat(env, monkeypatch):
     s = M.search_summary([r], "s")
     assert (s["games"], s["decisions"], s["searches"], s["privileged"]) == (1, 3, 3, False)
     assert "s search (s_idle)" in M._search_line("s", s)
+    assert info["search_ms"]["n"] == 3 and info["root_fallbacks"] == {}
+    # the hold and the battle memo run on the seat's decision clock (decisions x cadence), not
+    # on the view's tick; a seat plays one match
+    assert seat._search_decisions == 3 and seat.searcher.memo.last_tick == 2 * spec.cadence
+    seat.unran = Counter()
+    with pytest.raises(SR.SearchError, match="one match"):
+        seat.act(battle, {}, 0, {}, 200, 18, mod)
+
+
+def test_own_plays_in_flight_follow_the_hand_and_legacy_refusals_pair(env):
+    """OUR OWN CLOCK (rs_search THE SEAT): the sends are dated view tick + delay, and clock noise
+    on both ticks can put a recent play on the wrong side of the in-flight cut; the hand says
+    which side (the engine cycles a card out when its play runs). And under --mem-lag legacy
+    the seat's refusals are keyed at the decision tick."""
+    SR = env.search
+    off = SR.rs_memory.TOKEN_OFFSET
+
+    class Stub(SR.SearchSeatMixin):
+        pass
+
+    seat = Stub().setup_search("s_root", team=0, delay=24)
+    # hand Cannon, Musketeer, Skeletons, Log (0, 5, 6, 7) at the noised tick 1000
+    rows = [(700, 5, 1, 1), (800, 3, 2, 2), (900, 4, 3, 3), (1003, 2, 4, 4), (998, 7, 5, 5)]
+    got = seat._by_hand(rows, [0, 5, 6, 7], 1000)
+    assert got == [(700, 5, 1, 1),        # four later sends: the clock's call (it cycled back)
+                   (800, 3, 2, 2), (900, 4, 3, 3),
+                   (999, 2, 4, 4),        # the Hog left the hand: it ran (own clock said 1003)
+                   (1000, 7, 5, 5)]       # the Log is still in the hand: in flight (said 998)
+    assert seat.search_stats == Counter({"inflight_ran": 1, "inflight_late": 1})
+    assert seat._by_hand([], [0, 5, 6, 7], 1000) == []
+    # refusals: run_match's k-th seat.sent row (true clock) names the k-th own send
+    seat.search_stats.clear()
+    seat._search_sent = [(1124, 2, 1, 1), (1134, 5, 2, 2), (1144, 6, 3, 3)]
+    seat.sent = [(1122, 2, 1, 1), (1135, 5, 2, 2), (1145, 6, 3, 3)]
+    exec_key = Counter({(0, 5 + off, 1135): 1})           # L03's memory: the exec tick
+    assert seat._own_rows(exec_key) == [(1124, 2, 1, 1), (1144, 6, 3, 3)]
+    legacy = Counter({(0, 5 + off, 1135 - 24): 1})        # --mem-lag legacy: the decision tick
+    assert seat._own_rows(legacy) == [(1124, 2, 1, 1), (1144, 6, 3, 3)]
+    assert seat._own_rows(Counter()) == seat._search_sent and not seat.search_stats
 
 
 # ---------------------------------------------------------------------------
@@ -391,12 +443,20 @@ def test_league_search_players_options_and_identities(env):
 
 
 def test_league_worker_mb(env):
-    LE = env.league
+    M, LE = env.match, env.league
     assert LE.worker_cap(8, available=8192, cpus=16, per_worker_mb=1800)[0] == 2
     assert LE.worker_cap(8, available=8192, cpus=16)[0] == 4            # 1200 MB each
     run = ["run", "--candidate", "a.pt", "--champion", "b.pt"]
-    assert LE.build_parser().parse_args(run).worker_mb == LE.WORKER_MB
+    assert LE.build_parser().parse_args(run).worker_mb is None          # by the players
     assert LE.build_parser().parse_args(run + ["--worker-mb", "1800"]).worker_mb == 1800
+    # none given: 1200 MB a worker, 1800 when some player searches
+    plain = {"a": M.AgentSpec("a.pt"), "b": M.AgentSpec("b.pt")}
+    assert LE.default_worker_mb(plain) == LE.WORKER_MB == 1200
+    srch = {**plain, "s": M.AgentSpec("a.pt", search="s_root")}
+    assert LE.default_worker_mb(srch) == LE.SEARCH_WORKER_MB == 1800
+    assert LE.default_worker_mb({n: LE.identity(a, None) for n, a in srch.items()}) == 1800
+    # the @probes note names the report the settings were pinned from
+    assert LE.probes_note(["a.pt", "b.pt,search=s_root@R2"]) is None
 
 
 def games(LE, n, *, privileged=True):
@@ -450,10 +510,13 @@ def test_merge_search_info_sums_games(env):
     a = {"preset": "s_idle", "privileged": False, "decisions": 10, "searches": 4, "overrides": 1,
          "vetoes": 3, "outcomes": {"searched": 4, "not_triggered": 6},
          "override_by": {"2>wait": 1}, "ms": {"total": 50.0, "trials": 30.0},
-         "decision_ms": {"n": 10, "sum": 50.0, "p50": 4.0, "p95": 9.0, "max": 12.0}}
+         "decision_ms": {"n": 10, "sum": 50.0, "p50": 4.0, "p95": 9.0, "max": 12.0},
+         "root_fallbacks": {"rebuild:reset_refused": 2}, "rebuild": {"roots": 10, "built": 8},
+         "seat": {"inflight_late": 1}, "search_ms": {"n": 10, "sum": 20.0, "p95": 3.0, "max": 4.0}}
     b = {"preset": "s_idle", "privileged": False, "decisions": 6, "searches": 2, "overrides": 0,
          "vetoes": 2, "outcomes": {"searched": 2, "low_fidelity": 4}, "fidelity_skips": 4,
-         "ms": {"total": 30.0}, "decision_ms": {"n": 6, "sum": 30.0, "p95": 11.0, "max": 11.5}}
+         "ms": {"total": 30.0}, "decision_ms": {"n": 6, "sum": 30.0, "p95": 11.0, "max": 11.5},
+         "root_fallbacks": {"low_fidelity": 4}, "rebuild": {"roots": 6, "built": 6}}
     m = SR.merge_search_info([a, None, b, {}])
     assert (m["games"], m["decisions"], m["searches"], m["overrides"], m["vetoes"]) == (
         2, 16, 6, 1, 5)
@@ -462,7 +525,18 @@ def test_merge_search_info_sums_games(env):
     assert m["ms"] == {"total": 80.0, "trials": 30.0}
     assert m["decision_ms"] == {"n": 16, "mean": 5.0, "p95_max": 11.0, "max": 12.0}
     assert m["presets"] == ["s_idle"] and m["privileged"] is False
+    # the root's fallbacks, the rebuilder's and the seat's counters, the search's own ms
+    assert m["root_fallbacks"] == {"low_fidelity": 4, "rebuild:reset_refused": 2}
+    assert m["rebuild"] == {"built": 14, "roots": 16} and m["seat"] == {"inflight_late": 1}
+    assert m["search_ms"] == {"n": 10, "mean": 2.0, "p95_max": 3.0, "max": 4.0}
+    line = env.match._search_line("s", m)
+    assert "root fallbacks {'low_fidelity': 4, 'rebuild:reset_refused': 2}" in line
+    assert "own clock {'inflight_late': 1}" in line
+    assert "the search adds mean 2.0 p95 <= 3.0 ms (charge latency_ticks >= 1)" in line
     assert SR.merge_search_info([None, {}]) is None
+    # the charge: ceil(ms / 50), 0 for nothing, None unmeasured
+    assert [SR.latency_ticks_for(v) for v in (None, 0.0, 3.0, 50.0, 50.4, 101.0)] == [
+        None, 0, 1, 1, 2, 3]
 
 
 def test_importing_rs_search_imports_no_rs_match():

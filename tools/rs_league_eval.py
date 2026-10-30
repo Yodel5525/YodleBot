@@ -109,8 +109,9 @@ A run warns when a search's opponent model (S07) is a gate seat's checkpoint (se
 WORKERS. Each worker process holds torch, royalesim and two policies (about WORKER_MB = 1.2 GB);
 worker_cap() keeps RESERVE_MB (3 GB) for the parent and the system, at most MAX_WORKERS (6) and
 one CPU free: on the owner's 16 GB PC with MuMu and the browser closed that is 4-6 workers. A
-search player's worker holds a rebuild Battle and its trials too: --worker-mb (about 1800 with a
-search) sets the memory per worker the cap counts.
+search player's worker holds a rebuild Battle and its trials too: --worker-mb sets the memory per
+worker the cap counts, by default SEARCH_WORKER_MB (1800) when some player searches
+(default_worker_mb).
 
 Never imports scripts/gamestate; nothing here touches the emulator.
 """
@@ -180,6 +181,9 @@ POOL_GAMES = 100
 #: parent and the system, the hard cap for a 16 GB PC, and what is assumed free when the free
 #: memory cannot be read.
 WORKER_MB = 1200
+#: The same when some player searches: a rebuild Battle and its trials besides the policies
+#: (docs/LIVE_SEARCH_PLAN.md 6.2); --worker-mb's default then (default_worker_mb).
+SEARCH_WORKER_MB = 1800
 RESERVE_MB = 3072
 MAX_WORKERS = 6
 ASSUMED_AVAILABLE_MB = 8192
@@ -558,6 +562,26 @@ def privileged_players(players: Mapping[str, Any]) -> list[str]:
         return []
     import rs_search
     return sorted(n for n, s in searching.items() if rs_search.is_privileged(s))
+
+
+def default_worker_mb(players: Mapping[str, Any]) -> int:
+    """The memory per worker the cap counts when none is given: WORKER_MB, or SEARCH_WORKER_MB
+    when some player searches (module doc, WORKERS)."""
+    if any(_search_of(p) is not None for p in players.values()):
+        return SEARCH_WORKER_MB
+    return WORKER_MB
+
+
+def probes_note(raws: Iterable[Any]) -> str | None:
+    """A line naming the S01 report the players' "@probes" rebuild settings were pinned from
+    (rs_search.probe_report_source; the pinned settings leave that provenance out of the
+    identity), or None when no player text with a search asks for the probes."""
+    texts = [str(r) for r in raws if r is not None]
+    if not any("search" in t and "probes" in t for t in texts):
+        return None
+    import rs_search
+    return (f"note: the @probes search players' rebuild settings come from "
+            f"{rs_search.probe_report_source()} (pinned now)")
 
 
 def check_search_players(players: Mapping[str, Any]) -> None:
@@ -1475,7 +1499,7 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
              play: Callable[[Any], Any] | None = None, stop_early: bool = True,
              rating_anchor: str | None = None, final: bool = False, decide: str | None = None,
              echo: Callable[[str], Any] | None = None, max_errors: int = MAX_ERRORS,
-             presses: bool | None = None, worker_mb: int = WORKER_MB) -> dict:
+             presses: bool | None = None, worker_mb: int | None = None) -> dict:
     """Play what the gate needs and report (module doc). pairs: an rs_match.PairSet (or a list
     of DeckPairs) of the protocol's split; players: AgentSpecs, dicts or [NAME=]CKPT[,K=V] text
     (`decide` / `presses`: the defaults of the players that set none; V2 PLAYERS).
@@ -1484,7 +1508,7 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     members (pool_selection; the champion's games give pool_collapse its reference on the same
     positions). stop_early=False plays every phase for every candidate. play(spec) ->
     MatchResult replaces the engine (tests); workers > 1 runs worker processes (worker_cap, at
-    worker_mb each). Search players: module doc, SEARCH PLAYERS."""
+    worker_mb each; None: default_worker_mb). Search players: module doc, SEARCH PLAYERS."""
     config = config or GateConfig()
     protocol = (protocol or Protocol()).resolved()
     if protocol.split == FINAL_SPLIT and not final:
@@ -1533,7 +1557,8 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
     append_records(log_path, [header])
     done = log.done(pd)
     if play is None and workers > 1:
-        workers = worker_cap(workers, per_worker_mb=worker_mb)[0]
+        per = default_worker_mb(players) if worker_mb is None else int(worker_mb)
+        workers = worker_cap(workers, per_worker_mb=per)[0]
     plist = _pair_list(pairs)
     champ = roles.champion
     anchor_names = list(roles.anchors)
@@ -1669,9 +1694,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="play every phase for every candidate (no early stop)")
     run.add_argument("--workers", type=int, default=4,
                      help=f"worker processes, capped for memory (about {WORKER_MB} MB each)")
-    run.add_argument("--worker-mb", type=int, default=WORKER_MB, metavar="MB",
-                     help=f"memory per worker the cap counts (default {WORKER_MB}; about 1800 "
-                          "with a search player)")
+    run.add_argument("--worker-mb", type=int, default=None, metavar="MB",
+                     help=f"memory per worker the cap counts (default {WORKER_MB}, or "
+                          f"{SEARCH_WORKER_MB} when a player searches)")
     run.add_argument("--max-errors", type=int, default=MAX_ERRORS)
     run.add_argument("--allow-vocab-drift", action="store_true")
     run.add_argument("--log", type=Path, default=None,
@@ -1760,8 +1785,10 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         roles = prepare_players(args.candidate, args.champion, args.anchor, args.pool, protocol,
                                 decide=args.decide, presses=True if args.presses else None)
         check_search_players(roles.players)
-        if args.worker_mb < 1:
+        if args.worker_mb is not None and args.worker_mb < 1:
             raise ValueError(f"--worker-mb {args.worker_mb}: at least 1 MB")
+        worker_mb = (default_worker_mb(roles.players) if args.worker_mb is None
+                     else args.worker_mb)
     except (ValueError, TypeError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
@@ -1814,10 +1841,13 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         print(f"error: the gate needs {need} pairings; the {split} split gives {len(pairs)}"
               f"{' in ' + str(pairs_path) if pairs_path.exists() else ''}", file=sys.stderr)
         return 1
-    workers, why = worker_cap(args.workers, per_worker_mb=args.worker_mb)
+    workers, why = worker_cap(args.workers, per_worker_mb=worker_mb)
     print(f"engine: {cfg.describe()}\nprotocol: {protocol.describe()}\npairs: {len(pairs)} of "
           f"the {split} split [{pairs.digest()}] in {pairs_path}\nlog: {log_path}\nworkers: {why}",
           flush=True)
+    note = probes_note([*args.candidate, args.champion, *args.anchor, *args.pool])
+    if note:
+        print(note, flush=True)
     try:
         rep = evaluate(pairs, protocol, candidates=list(roles.players[c] for c in roles.candidates),
                        champion=roles.players[roles.champion],
@@ -1826,7 +1856,7 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                        log_path=log_path, workers=workers, stop_early=not args.full,
                        rating_anchor=args.rating_anchor, final=args.final,
                        echo=lambda s: print(s, flush=True), max_errors=args.max_errors,
-                       worker_mb=args.worker_mb)
+                       worker_mb=worker_mb)
     except FinalSplitError as exc:
         ap.error(str(exc))
     except (ValueError, RuntimeError) as exc:

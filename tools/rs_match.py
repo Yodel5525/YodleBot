@@ -1623,7 +1623,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"ticks added to {side.upper()}'s command delay: the search's compute "
                             "time (S01 bench: ceil(p95 ms / 50)); default 0")
     g.add_argument("--search-verify", action="store_true",
-                   help="the searches check every restore of their rebuilt root (state_json)")
+                   help="the searches check every restore of their rebuilt root (state_json); "
+                        "a smoke-run switch: the same games, keyed apart from the arm without it")
     rs_engine.add_engine_args(ap)
     return ap
 
@@ -1663,16 +1664,30 @@ def search_summary(results: Sequence[MatchResult], name: str) -> dict | None:
 
 
 def _search_line(name: str, s: Mapping[str, Any]) -> str:
+    """The summary line of an agent's search (merge_search_info): its fallbacks (the search's
+    and the look-ahead root's: s_root's show only there), the in-flight corrections of its own
+    clock, the ms per decision, and the ms the search adds to the plain decision with the
+    latency charge they call for (rs_search.latency_ticks_for of its p95 bound)."""
+    import rs_search
     fallbacks = {k: v for k, v in (s.get("outcomes") or {}).items() if k not in ("searched", "root")}
-    dm = s.get("decision_ms") or {}
+    dm, sm = s.get("decision_ms") or {}, s.get("search_ms") or {}
     mean, p95 = dm.get("mean"), dm.get("p95_max")
+    extra = sm.get("p95_max")
+    charge = rs_search.latency_ticks_for(extra)
+    seat = {k: v for k, v in (s.get("seat") or {}).items() if v}
+
+    def num(v: Any) -> str:
+        return "-" if v is None else f"{float(v):.1f}"
+
     return (f"{name} search ({'/'.join(s.get('presets') or ())}"
             f"{', PRIVILEGED: reads the true battle' if s.get('privileged') else ''}): "
             f"{s.get('decisions', 0)} decisions, {s.get('lookahead', 0)} on the root at B, "
             f"{s.get('searches', 0)} searched, {s.get('overrides', 0)} overrides, "
-            f"{s.get('vetoes', 0)} vetoes, {s.get('errors', 0)} errors, fallbacks {fallbacks}, ms "
-            f"per decision mean {mean if mean is not None else '-'} p95 <= "
-            f"{p95 if p95 is not None else '-'}")
+            f"{s.get('vetoes', 0)} vetoes, {s.get('errors', 0)} errors, fallbacks {fallbacks}, "
+            f"root fallbacks {s.get('root_fallbacks') or {}}"
+            f"{f', own clock {seat}' if seat else ''}; ms per decision mean {num(mean)} p95 <= "
+            f"{num(p95)}; the search adds mean {num(sm.get('mean'))} p95 <= {num(extra)} ms"
+            f"{f' (charge latency_ticks >= {charge})' if charge is not None else ''}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1718,10 +1733,13 @@ def main(argv: list[str] | None = None) -> int:
             pairs.save(args.pairs_file)
     print(f"engine: {cfg.describe()}\npairs: {len(pairs)} of the {split} split "
           f"[{pairs.digest()}], {args.seats} seat(s) each", flush=True)
-    for a in agents:
+    for a, side in zip(agents, ("a", "b")):
         if a.search is not None:
+            import rs_search
+            source = rs_search.probes_source(getattr(args, f"search_{side}", None))
             print(f"{a.label}: search {a.search['preset']} (rebuild {a.search['rebuild']['level']}"
-                  f"), latency {a.latency_ticks} tick(s)"
+                  f"{f', settings from {source}' if source else ''}), latency "
+                  f"{a.latency_ticks} tick(s)"
                   + (": PRIVILEGED, its trials read the true battle (a ceiling, never promoted)"
                      if a.privileged else ""), flush=True)
     base = ("a" in args.base_forms, "b" in args.base_forms)

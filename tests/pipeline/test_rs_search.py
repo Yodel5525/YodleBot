@@ -698,6 +698,47 @@ def test_a_wait_verdict_holds_until_a_new_opponent_play():
     assert rec.outcome == SR.R_SEARCHED                          # and it runs out after 10 ticks
 
 
+def test_the_hold_and_the_battle_run_on_the_decision_clock():
+    """clock_tick (the simulator seat's decisions x cadence): the view's tick carries perception
+    clock noise; the hold and the new-battle check do not."""
+    rb = FakeRebuilder()
+    s = searcher(rb=rb, policy=FakePolicy(value=value_by_card({"wait": 1.0})))
+    d, rec = run(s, clock_tick=0)
+    assert rec.override and d.reason == SR.REASON_WAIT and s.memo.hold_until == 10
+    # the noised view tick reads 5 ticks on, the clock a whole cadence: not held
+    _, rec = run(s, make_view(tick=T0 + 5), clock_tick=10)
+    assert rec.outcome == SR.R_SEARCHED and s.memo.hold_until == 20
+    # the view tick steps back (clock noise), the clock does not: the same battle
+    _, rec = run(s, make_view(tick=T0 - 8), clock_tick=20)
+    assert rec.outcome == SR.R_SEARCHED and s.memo.last_tick == 20
+    assert s.stats["battles"] == 0
+    # the clock itself going back is a new battle
+    run(s, clock_tick=0)
+    assert s.stats["battles"] == 1
+
+
+@pytest.mark.parametrize("rb_kw, why", [
+    ({"refuse": "reset_refused"}, "rebuild:reset_refused"),
+    ({"spec_error": "no card left"}, SR.R_SPEC),
+    ({"fidelity": 0.5}, SR.R_FIDELITY),
+    ({"over": True}, SR.R_ROOT_OVER),
+])
+def test_root_fallbacks_are_counted_by_reason_s_root_included(rb_kw, why):
+    s = searcher("s_root", rb=FakeRebuilder(**rb_kw))
+    d, rec = run(s)
+    assert rec.outcome == SR.R_ROOT and not rec.lookahead       # s_root's outcome says nothing
+    assert d.command == (0, 2, *tap(309)) and d.mode == "legacy"
+    assert s.summary()["root_fallbacks"] == {why: 1} and s.summary()["outcomes"] == {"root": 1}
+    # a search counts them beside its outcome
+    s = searcher(rb=FakeRebuilder(**rb_kw))
+    _, rec = run(s)
+    assert rec.outcome == why and s.summary()["root_fallbacks"] == {why: 1}
+    # a usable root: none
+    s = searcher("s_root")
+    _, rec = run(s)
+    assert rec.lookahead and s.summary()["root_fallbacks"] == {}
+
+
 def test_worlds_run_every_candidate_once_each_with_their_own_generator():
     seen = []
 

@@ -1024,6 +1024,27 @@ def test_r2_recasts_spells_at_known_or_inferred_aims_and_r1_drops_them(ps):
     assert sights.first(1, LOG) == (1995, *mt(9000, 13000))
 
 
+def test_spell_sightings_start_a_new_battle_only_on_a_step_back_they_do_not_tolerate():
+    def seen(tick, y_mt):
+        x, y = mt(9000, y_mt)
+        return {"tick": tick, "spells": [[1, LOG, 0, x, y, x, y, 0, 0, 0, 0, 0]]}
+
+    plain = RB.SpellSightings()                         # the default: any step back
+    plain.update(seen(1995, 13000))
+    plain.update(seen(1990, 12800))
+    assert plain.first(1, LOG) == (1990, *mt(9000, 12800))
+    seat = RB.SpellSightings(rewind_ticks=None)        # a simulator seat: never
+    for tick, y in ((1995, 13000), (1990, 12800), (2000, 12500)):
+        seat.update(seen(tick, y))
+    assert seat.first(1, LOG) == (1995, *mt(9000, 13000))
+    some = RB.SpellSightings(rewind_ticks=10)
+    some.update(seen(1995, 13000))
+    some.update(seen(1990, 12800))
+    assert some.first(1, LOG) == (1995, *mt(9000, 13000))
+    some.update(seen(100, 13000))
+    assert some.first(1, LOG) == (100, *mt(9000, 13000))
+
+
 # ---------------------------------------------------------------------------
 # settings from the S01 probes
 # ---------------------------------------------------------------------------

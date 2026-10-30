@@ -125,8 +125,11 @@ SearchSeat, S08; the live SearchDecider, S13), one call per decision:
   3. cfg.max_trials 0 (s_root) stops here: d0 exactly as decide gave it ("root"). So does a press
      ("press"), and a battle where search is off ("disabled").
   4. HOLD. After the search chose waiting over a play, that verdict holds for cfg.hold_ticks
-     (the simulator's cadence, 10): a play d0 draws meanwhile becomes a wait ("search_hold";
-     never when d0 is capped). A new opponent play ends the hold early.
+     (the simulator's cadence, 10) on the decision clock (decide's clock_tick, else the view's
+     tick): a play d0 draws meanwhile becomes a wait ("search_hold"; never when d0 is capped).
+     A new opponent play ends the hold early. In the simulator the seat's clock counts its
+     decisions (one per cadence), so at hold_ticks = cadence the next decision is never held:
+     the hold acts live only, where decisions come faster than the cadence.
   5. TRIGGERS (any): d0 is a play ("play"); the view shows more opponent plays than at the last
      search ("opp_play"); d0's spendable elixir >= cfg.elixir_trigger ("elixir"); rs_decide.
      threat_lane reports a push on the view ("push"). None: d0 ("not_triggered"). For a
@@ -174,8 +177,11 @@ SearchSeat, S08; the live SearchDecider, S13), one call per decision:
      _decide and to_record read it unchanged.
 FALLBACKS (SearchRecord.outcome) are counted per reason; an exception inside the search plays d0
 ("exception"), and cfg.max_errors of them in one battle turn search off for the rest of it
-("disabled"; a tick going back, or new_battle(), starts a new battle). A rebuilder refusal
-"error" counts as one. SearchLeakError and the config errors are never swallowed.
+("disabled"; the decision clock going back, or new_battle(), starts a new battle). A rebuilder
+refusal "error" counts as one. SearchLeakError and the config errors are never swallowed. Every
+decision whose look-ahead root was not usable is also counted by its reason in summary()'s
+root_fallbacks ("rebuild:<reason>", "spec_refused", "low_fidelity", "root_game_over",
+"exception"): s_root's outcome is always "root", so its fallbacks show only there.
 
 PRESETS (SearchConfig.named / resolve; plan 3.2). A preset name expands to its full dict
 (expand), so a game key records what the preset holds, not just its name:
@@ -187,8 +193,9 @@ PRESETS (SearchConfig.named / resolve; plan 3.2). A preset name expands to its f
   s_true   as s_idle with the trials on the TRUE delayed battle: the privileged ceiling (M2b;
            THE TRUE COPY below). PRIVILEGED, NEVER PROMOTABLE: SearchConfig.privileged;
            check_promotable and check_live raise PrivilegedSearchError for it (the live runner
-           calls check_live); tools/rs_league_eval.py gives a candidate whose games say so the
-           gate decision "privileged" (never promoted, never admitted); a Searcher refuses it
+           is to call check_live, S14); tools/rs_league_eval.py gives a candidate named so, or
+           whose games say so, the gate decision "privileged" (never promoted, never admitted;
+           it reads is_privileged, not check_promotable); a Searcher refuses it
            unless built with privileged=True, and every SearchRecord and summary() of it says
            privileged.
 "off" / None resolve to no search. level (None: the rebuilder's) picks R1 / R2 per search; R0
@@ -233,11 +240,25 @@ THE SEAT (S08; tools/rs_match.py). An rs_match.AgentSpec with `search` is played
                       so the seat keeps its own sends as live dates its taps: (view tick + delay,
                       card, x, y), paired by order with run_match's seat.sent (one entry per card
                       play) to leave out the plays the engine refused. The seat never needs the
-                      true clock.
+                      true clock. Clock noise on both the send's tick and now's can misplace a
+                      recent play on either side of the in-flight cut, so the cut is checked
+                      against our hand, the live rule (rs_decide.prune_pending): a card still in
+                      the hand has not run (it stays in flight), one that left it has (_by_hand;
+                      counted in search_info "seat": inflight_late, inflight_ran). The noised
+                      tick also steps back now and then (sigma 2: rarely; doubled noise: about
+                      15 times a game), so nothing in the seat takes that for a new battle: the
+                      Searcher's hold and battle memo run on the seat's decision clock (its
+                      decisions x cadence: clock_tick), and Permanence and the rebuilder's
+                      spell sightings never reset on a rewind (rewind_ticks None). A SearchSeat
+                      plays one match (build_seat makes one per match; another match's refusals
+                      Counter raises SearchError).
                       search_info() is what rs_match.seat_info records: the preset, its key, the
                       rebuild settings' key and level, privileged, the delays, Searcher.summary()
                       (decisions, searches, overrides by incumbent > choice, vetoes, fallbacks
-                      by reason, triggers, ms per stage) and the spread of ms per decision.
+                      by reason and the root's (root_fallbacks), triggers, ms per stage), the
+                      spread of ms per decision (decision_ms) and of what the search adds to
+                      the plain decision's row and d0 (search_ms: the latency charge's measure,
+                      plan 6.3, latency_ticks_for).
                       A SearchSeat refuses a lead (the look-ahead is the search's), hold_pending
                       (it reads the battle's pending commands) and s_reply until S07 gives the
                       opponent world model (check_seat). The battle it reaches: check_deploy
@@ -326,8 +347,11 @@ __all__ = [
     "cvar",
     "expand",
     "is_privileged",
+    "latency_ticks_for",
     "merge_search_info",
     "opponent_checkpoint",
+    "probe_report_source",
+    "probes_source",
     "rebuild_settings",
     "resolve",
     "seat_config",
@@ -675,6 +699,14 @@ SEAT_REBUILD = "rebuild"
 REBUILD_DEFAULTS, REBUILD_PROBES = "defaults", "probes"
 REBUILD_TOKENS = (REBUILD_DEFAULTS, REBUILD_PROBES, RB.R1, RB.R2)
 REBUILD_PROVENANCE = ("probes", "notes")
+#: SearchConfig fields a seat's search (AgentSpec.search, and so the game keys and identities of
+#: tools/rs_league_eval.py) holds only when they differ from what its preset gives back (resolve):
+#: fields that only check (verify), and every field added later (S07 adds opp_ckpt here), so a
+#: new field leaves the key of every search that does not use it as it was. Every other field is
+#: always held: a preset name expands to its content (plan 3.2).
+SEAT_OPTIONAL = ("verify",)
+#: The same for RebuildSettings fields added later (none yet), against RebuildSettings().
+REBUILD_OPTIONAL: tuple[str, ...] = ()
 
 # Outcomes (SearchRecord.outcome): what one call did. Every one but R_SEARCHED plays d0 (R_HELD a
 # held wait).
@@ -936,7 +968,10 @@ def is_privileged(value: Any) -> bool:
 
 def check_promotable(value: Any, what: str = "a promoted candidate") -> SearchConfig | None:
     """resolve(value), or PrivilegedSearchError for a privileged search: s_true is a ceiling,
-    never promoted (plan 3.2, 7.4). The gate (tools/rs_league_eval.py) calls this."""
+    never promoted (plan 3.2, 7.4). For a caller that must refuse one outright (check_live).
+    The gate (tools/rs_league_eval.py) does not call it: it reads is_privileged instead
+    (privileged_players, and Game.privileged from the games' own records) and gives such a
+    candidate the decision "privileged", never promoted (rs_league_eval.gate)."""
     cfg = resolve(value)
     if cfg is not None and cfg.privileged:
         raise PrivilegedSearchError(f"search {cfg.preset!r}: its trials read the TRUE battle (a "
@@ -1276,9 +1311,11 @@ def _rl(name: str) -> Any:
 
 @dataclasses.dataclass
 class _Memo:
-    """One battle's search state: its last tick, exceptions, the hold, the opponent plays seen."""
+    """One battle's search state: its last tick (on the decision clock: decide's clock_tick, else
+    the view's tick), exceptions, the hold, the opponent plays seen."""
 
     last_tick: int | None = None
+    clock: int = 0
     errors: int = 0
     disabled: bool = False
     hold_until: int | None = None
@@ -1372,7 +1409,12 @@ class Searcher:
     def _battle_at(self, now: int) -> None:
         if self.memo.last_tick is not None and now < self.memo.last_tick:
             self.new_battle()
-        self.memo.last_tick = now
+        self.memo.last_tick = self.memo.clock = now
+
+    def _root_failed(self, why: str) -> None:
+        """Count a decision whose look-ahead root was not usable, by reason (summary's
+        root_fallbacks): s_root reports its fallbacks here, its outcome is always "root"."""
+        self.stats[f"root_fallback:{why}"] += 1
 
     # ------------------------------------------------------------ the decision
     def decide(self, view: Mapping[str, Any], *, team: int, land_ticks: int, legality: Any,
@@ -1380,10 +1422,14 @@ class Searcher:
                pending: Iterable[Any] | None = None, dt: int | None = None,
                aim: Callable | None = None, blocked_tiles: Any = None,
                opp_fill: Iterable[int] = (), seed: int = 0,
-               true_battle: Any = None) -> tuple[Any, SearchRecord]:
+               true_battle: Any = None,
+               clock_tick: int | None = None) -> tuple[Any, SearchRecord]:
         """(the Decision to act on, its SearchRecord) for `team` on the public `view` (module
         doc, THE SEARCH). true_battle: the TRUE match battle, for the privileged s_true's trials
-        only (module doc, THE TRUE COPY); a public preset refuses it."""
+        only (module doc, THE TRUE COPY); a public preset refuses it. clock_tick: the decision
+        clock the hold and the new-battle check run on (None: the view's tick, live's HUD
+        clock); the simulator seat passes its own elapsed ticks, because its view's tick carries
+        perception clock noise and can step back within a battle (module doc, THE SEAT)."""
         cfg = self.config
         if true_battle is not None and not cfg.privileged:
             raise PrivilegedSearchError(f"search {cfg.preset!r} is public: it never takes the "
@@ -1396,7 +1442,8 @@ class Searcher:
         now = int(view["tick"])
         delay = max(0, int(land_ticks))
         land = now + delay
-        self._battle_at(now)
+        clock = now if clock_tick is None else int(clock_tick)
+        self._battle_at(clock)
         memo = self.memo
         self._check_view(view, team)
         self._law_now = self._law_for(view)
@@ -1408,6 +1455,8 @@ class Searcher:
         if cfg.lookahead and self.landing and not memo.disabled:
             tried = True
             built, why = self._root(view, team, land, seed, opp_fill, rec)
+            if built is None:
+                self._root_failed(why)
         t = self.clock()
         row = None
         if built is not None:
@@ -1417,6 +1466,7 @@ class Searcher:
             except Exception as exc:            # the plain row below; counted
                 self._error(rec, f"root row: {type(exc).__name__}: {exc}")
                 built, why = None, R_EXCEPTION
+                self._root_failed(why)
         if row is None:
             row = row_fn(view, now)
         b = self.policy.batch(row)
@@ -1435,7 +1485,7 @@ class Searcher:
         if d0.is_press:
             return self._done(rec, d0, R_PRESS, t0)
         if memo.hold_until is not None:
-            if now < memo.hold_until and opp_count <= memo.hold_opp:
+            if clock < memo.hold_until and opp_count <= memo.hold_opp:
                 if not d0.is_play:
                     return self._done(rec, d0, R_HELD, t0)
                 if not d0.capped:
@@ -1451,6 +1501,7 @@ class Searcher:
                 return self._done(rec, d0, why, t0)
             built, why = self._root(view, team, land, seed, opp_fill, rec)
             if built is None:
+                self._root_failed(why)
                 return self._done(rec, d0, why, t0)
         try:
             return self._search(rec, d0, pol, b, built, view, team, land, legality, row_fn, dt,
@@ -1579,7 +1630,7 @@ class Searcher:
         else:
             decision = as_wait(d0, REASON_WAIT)
             if d0.is_play:                      # the verdict holds (module doc, step 4)
-                self.memo.hold_until = now + cfg.hold_ticks
+                self.memo.hold_until = self.memo.clock + cfg.hold_ticks
                 self.memo.hold_opp = self.memo.opp_seen
         self.stats["overrides"] += 1
         self.stats[f"override:{inc.label}>{pick.label}"] += 1
@@ -1875,8 +1926,10 @@ class Searcher:
 
     def summary(self) -> dict[str, Any]:
         """The counters (S08: seat_info): decisions, searches, overrides and vetoes, outcomes
-        (fallbacks by reason), triggers, overrides by incumbent > choice (card id or "wait"),
-        exceptions, battles search was turned off in, ms per stage (sums), the rebuilder's."""
+        (fallbacks by reason), root_fallbacks (decisions whose look-ahead root was not usable,
+        by reason: s_root's fallbacks, whose outcome is always "root"), triggers, overrides by
+        incumbent > choice (card id or "wait"), exceptions, battles search was turned off in, ms
+        per stage (sums), the rebuilder's."""
         s = self.stats
 
         def prefixed(p: str) -> dict[str, int]:
@@ -1889,6 +1942,7 @@ class Searcher:
                 "searches": int(s["searches"]), "overrides": int(s["overrides"]),
                 "vetoes": int(s["vetoes"]), "errors": int(s["errors"]),
                 "disabled": int(s["disabled"]), "outcomes": prefixed("outcome:"),
+                "root_fallbacks": prefixed("root_fallback:"),
                 "triggers": prefixed("trigger:"), "override_by": prefixed("override:"),
                 "ms": {k: round(float(v), 3) for k, v in sorted(self.ms.items())},
                 "rebuild": rb_summary() if callable(rb_summary) else {}}
@@ -1899,8 +1953,22 @@ class Searcher:
 # ===========================================================================
 
 def _pinned(settings: Any) -> dict[str, Any]:
-    """A RebuildSettings as a seat's search pins it: to_json() less the provenance fields."""
-    return {k: v for k, v in settings.to_json().items() if k not in REBUILD_PROVENANCE}
+    """A RebuildSettings as a seat's search pins it: to_json() less the provenance fields, and
+    less the REBUILD_OPTIONAL fields that are at RebuildSettings()'s value."""
+    base = RB.RebuildSettings().to_json() if REBUILD_OPTIONAL else {}
+    return {k: v for k, v in settings.to_json().items() if k not in REBUILD_PROVENANCE
+            and not (k in REBUILD_OPTIONAL and v == base.get(k))}
+
+
+def _seat_json(cfg: SearchConfig) -> dict[str, Any]:
+    """cfg.to_json() less the SEAT_OPTIONAL fields that are at the value resolve gives them back
+    from the preset alone (its PRESETS entry, else SearchConfig()'s)."""
+    out = cfg.to_json()
+    base = resolve({"preset": cfg.preset})
+    for name in SEAT_OPTIONAL:
+        if name in out and out[name] == getattr(base, name):
+            del out[name]
+    return out
 
 
 def rebuild_settings(value: Any = None) -> Any:
@@ -1936,10 +2004,13 @@ def rebuild_settings(value: Any = None) -> Any:
 
 def seat_search(value: Any, *, verify: bool | None = None) -> dict[str, Any] | None:
     """What rs_match.AgentSpec.search holds for `value` (module doc, THE SEAT): None for no
-    search; else SearchConfig.to_json() and "rebuild", the pinned RebuildSettings (rebuild_settings
-    of "name@tokens"' tokens, or of a mapping's "rebuild"; to_json() less the provenance).
+    search; else SearchConfig.to_json() (less the SEAT_OPTIONAL fields at their preset's value:
+    verify only when on) and "rebuild", the pinned RebuildSettings (rebuild_settings of
+    "name@tokens"' tokens, or of a mapping's "rebuild"; to_json() less the provenance).
     Idempotent: seat_search(seat_search(x)) == seat_search(x). verify, when not None, sets
-    SearchConfig.verify (rs_match --search-verify)."""
+    SearchConfig.verify (rs_match --search-verify; a verified arm's games are keyed apart from
+    the same arm's without it, though they are the same games: verify must reach the workers,
+    which get the spec alone)."""
     rebuild: Any = None
     if isinstance(value, str):
         text = value.strip()
@@ -1961,7 +2032,35 @@ def seat_search(value: Any, *, verify: bool | None = None) -> dict[str, Any] | N
         return None
     if verify is not None:
         cfg = cfg.replace(verify=bool(verify))
-    return {**cfg.to_json(), SEAT_REBUILD: _pinned(rebuild_settings(rebuild))}
+    return {**_seat_json(cfg), SEAT_REBUILD: _pinned(rebuild_settings(rebuild))}
+
+
+def probes_source(value: Any) -> str | None:
+    """Where a seat search's "@probes" settings come from (module doc, THE SEAT): the path of the
+    S01 engine report RebuildSettings.from_report() reads now, or "defaults" when there is none
+    (the plan's defaults are pinned then); None when `value` does not ask for the probes. The
+    pinned settings leave this provenance out of the key, so the command lines print it."""
+    rebuild: Any = None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{"):
+            try:
+                value = json.loads(text)
+            except ValueError:
+                return None
+        elif "@" in text:
+            rebuild = text.split("@", 1)[1].strip()
+    if isinstance(value, Mapping):
+        rebuild = value.get(SEAT_REBUILD)
+    if not isinstance(rebuild, str) or REBUILD_PROBES not in _rebuild_tokens(rebuild):
+        return None
+    return probe_report_source()
+
+
+def probe_report_source() -> str:
+    """The S01 engine report "@probes" reads now (RebuildSettings.from_report's provenance: its
+    path), or "defaults" when there is none."""
+    return str(RB.RebuildSettings.from_report().probes or "defaults")
 
 
 def seat_config(value: Any) -> SearchConfig | None:
@@ -1998,6 +2097,32 @@ def _quantile(values: Sequence[float], q: float) -> float | None:
     return v[min(len(v) - 1, max(0, math.ceil(float(q) * len(v)) - 1))]
 
 
+def _spread(ms: Sequence[float]) -> dict[str, Any]:
+    """n, sum, p50, p95 and max of per-decision milliseconds (search_info)."""
+    return {"n": len(ms), "sum": round(sum(ms), 3), "p50": _num(_quantile(ms, 0.5)),
+            "p95": _num(_quantile(ms, 0.95)), "max": _num(max(ms)) if ms else None}
+
+
+def _pooled(spreads: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """_spread()s of several games together: n and sum added, the mean, the largest p95 (an
+    upper bound of the pooled p95, not it) and the largest max."""
+    dm = [d or {} for d in spreads]
+    n = sum(int(d.get("n") or 0) for d in dm)
+    total = sum(float(d.get("sum") or 0.0) for d in dm)
+    p95 = [float(d["p95"]) for d in dm if d.get("p95") is not None]
+    top = [float(d["max"]) for d in dm if d.get("max") is not None]
+    return {"n": n, "mean": _num(total / n) if n else None,
+            "p95_max": _num(max(p95)) if p95 else None, "max": _num(max(top)) if top else None}
+
+
+def latency_ticks_for(ms: float | None, tick_ms: float = 50.0) -> int | None:
+    """The latency charge for a search's p95 milliseconds per decision: ceil(ms / tick_ms)
+    (plan 6.3; 0 for none), None when unmeasured."""
+    if ms is None:
+        return None
+    return max(0, math.ceil(float(ms) / float(tick_ms) - 1e-9))
+
+
 #: search_info() counts merge_search_info adds over games.
 _INFO_COUNTS = ("decisions", "lookahead", "searches", "overrides", "vetoes", "errors", "disabled",
                 "fidelity_skips")
@@ -2005,9 +2130,10 @@ _INFO_COUNTS = ("decisions", "lookahead", "searches", "overrides", "vetoes", "er
 
 def merge_search_info(infos: Iterable[Mapping[str, Any] | None]) -> dict[str, Any] | None:
     """search_info() of several games together (None when there is none): the counts added;
-    outcomes, triggers and override_by merged; ms per stage summed; decision_ms with n and sum
-    added, mean, the largest p95 (an upper bound of the pooled p95, not it) and the largest
-    max."""
+    outcomes, root_fallbacks, triggers, override_by, the rebuilder's counters ("rebuild") and
+    the seat's ("seat") merged; ms per stage summed; decision_ms and search_ms (the part the
+    search adds to the plain decision: the latency charge's measure) with n and sum added,
+    mean, the largest p95 (an upper bound of the pooled p95, not it) and the largest max."""
     infos = [i for i in infos if isinstance(i, Mapping) and i]
     if not infos:
         return None
@@ -2016,23 +2142,18 @@ def merge_search_info(infos: Iterable[Mapping[str, Any] | None]) -> dict[str, An
         "privileged": any(bool(i.get("privileged")) for i in infos)}
     for k in _INFO_COUNTS:
         out[k] = sum(int(i.get(k) or 0) for i in infos)
-    for k in ("outcomes", "triggers", "override_by"):
+    for k in ("outcomes", "root_fallbacks", "triggers", "override_by", "rebuild", "seat"):
         total: Counter = Counter()
         for i in infos:
-            total.update({str(name): int(n) for name, n in (i.get(k) or {}).items()})
+            total.update({str(name): int(n) for name, n in (i.get(k) or {}).items()
+                          if _is_number(n)})
         out[k] = dict(sorted(total.items()))
     ms: Counter = Counter()
     for i in infos:
         ms.update({str(name): float(v or 0.0) for name, v in (i.get("ms") or {}).items()})
     out["ms"] = {k: round(v, 3) for k, v in sorted(ms.items())}
-    dm = [i.get("decision_ms") or {} for i in infos]
-    n = sum(int(d.get("n") or 0) for d in dm)
-    total_ms = sum(float(d.get("sum") or 0.0) for d in dm)
-    p95 = [float(d["p95"]) for d in dm if d.get("p95") is not None]
-    top = [float(d["max"]) for d in dm if d.get("max") is not None]
-    out["decision_ms"] = {"n": n, "mean": _num(total_ms / n) if n else None,
-                          "p95_max": _num(max(p95)) if p95 else None,
-                          "max": _num(max(top)) if top else None}
+    out["decision_ms"] = _pooled(i.get("decision_ms") for i in infos)
+    out["search_ms"] = _pooled(i.get("search_ms") for i in infos)
     return out
 
 
@@ -2115,6 +2236,9 @@ class SearchSeatMixin:
         self.search_stats: Counter = Counter()
         self._search_sent: list[tuple[int, int, int, int]] = []
         self._search_ms: list[float] = []
+        self._search_inc_ms: list[float] = []
+        self._search_decisions = 0
+        self._search_match: Any = None
         self._search_keep: Any = None
         self._search_F: dict | None = None
         self._search_SF: dict | None = None
@@ -2165,10 +2289,17 @@ class SearchSeatMixin:
         self._search_F = F
         self._search_SF = RR.spell_index(royalesim)
         self._search_mirror = tuple(PV.mirror_ids(cat))
+        # A seat plays one match (rs_match.build_seat makes one per match), so nothing here
+        # starts a new battle when the view's tick steps back: under perception clock noise it
+        # does within a match (module doc, THE SEAT, OUR OWN CLOCK).
         self._search_keep = PV.Permanence(fields=F, team=team,
                                           hiders=PV.card_ids(PV.HIDER_NAMES, names),
-                                          spell_cards=PV.spell_ids(cat), sub=sub)
+                                          spell_cards=PV.spell_ids(cat), sub=sub,
+                                          rewind_ticks=None)
         rb = self.search_rebuilder(royalesim, sub, F)
+        sightings = getattr(rb, "sightings", None)
+        if sightings is not None and hasattr(sightings, "rewind_ticks"):
+            sightings.rewind_ticks = None
         self.searcher = Searcher(self.search_policy(), rb, self.search_config,
                                  dcfg=self.decide_config(),
                                  landing=RD.obs_delay_ticks(getattr(self, "meta", None)) == 0,
@@ -2179,7 +2310,9 @@ class SearchSeatMixin:
     def _own_rows(self, own_unran: Mapping[tuple, int]) -> list[tuple[int, int, int, int]]:
         """Our sends on our own clock (module doc, THE SEAT), less the plays the engine refused:
         our k-th send is run_match's k-th seat.sent row (true clock), whose (card, exec tick)
-        the seat's own `unran` entries name."""
+        the seat's own `unran` entries name. Under --mem-lag legacy run_match dates the memory
+        entry, and so the unran entry, at the decision tick (exec tick - our delay): that key is
+        tried when the exec tick's has none."""
         mine = list(self._search_sent)
         true = [tuple(int(v) for v in s[:4]) for s in (getattr(self, "sent", None) or ())]
         if len(true) != len(mine):
@@ -2192,17 +2325,47 @@ class SearchSeatMixin:
                 if true[i][1] != row[1]:
                     self.search_stats["sent_mismatch"] += 1
                 key = (true[i][1], true[i][0])
+                if drop[key] <= 0:
+                    key = (true[i][1], true[i][0] - int(self.search_delay))
                 if drop[key] > 0:
                     drop[key] -= 1
                     continue
             out.append(row)
         return out
 
+    def _by_hand(self, rows: Sequence[tuple[int, int, int, int]], hand: Iterable[int],
+                 now: int) -> list[tuple[int, int, int, int]]:
+        """Our sends (own clock, refusals out) with the in-flight cut corrected by our hand, the
+        live rule (rs_decide.prune_pending): the engine cycles a card out of the hand only when
+        its play RUNS, so a recent play whose card is still in the hand has not run, and one
+        whose card has left it has. Our own clock is the noised view tick + delay, so it can
+        call a play landed that has not run yet, or in flight when it has run (perception
+        clock noise on both ticks). A play still in the hand whose own-clock tick has passed is
+        dated `now` (it lands at the root's first tick); one that has left the hand but whose
+        own-clock tick is still ahead is dated now - 1 (out of own_inflight, still in own_sent,
+        where its aim is read). Only sends with fewer than HAND_SIZE later ones are judged: a
+        card comes back to the hand only after HAND_SIZE later plays have run."""
+        hand = {int(c) for c in hand or () if int(c) >= 0}
+        n, now = len(rows), int(now)
+        out = []
+        for i, (exec_tick, card, x, y) in enumerate(rows):
+            if n - 1 - i < RD.HAND_SIZE:
+                if int(card) in hand:
+                    if exec_tick < now:
+                        exec_tick = now
+                        self.search_stats["inflight_late"] += 1
+                elif exec_tick >= now:
+                    exec_tick = now - 1
+                    self.search_stats["inflight_ran"] += 1
+            out.append((int(exec_tick), int(card), int(x), int(y)))
+        return out
+
     def search_view(self, state: Mapping[str, Any], team: int,
                     mem: Mapping[str, Any] | None) -> dict:
         """The seat's public view of `state` (the observed state run_match hands it) at its tick
         (module doc, THE SEAT): public_view with the seat's own count of the opponent's elixir,
-        our sends on our own clock, the refusals left out, then Permanence."""
+        our sends on our own clock, the refusals left out, the in-flight cut checked against our
+        hand (_by_hand), then Permanence."""
         team = int(team)
         reading = PV.SeatOppElixir(self).view(team, mem, int(state["tick"]))
         unran = dict(getattr(self, "unran", None) or {})
@@ -2214,9 +2377,10 @@ class SearchSeatMixin:
         cycle = PV.CardCycle.from_plays([c for c, _ in PV.plays_of(mem, team, own)],
                                         hand=me.get("hand"), next_card=me.get("next_card"),
                                         deck=me.get("deck") or (), mirror=self._search_mirror)
+        sent = self._by_hand(self._own_rows(own), me.get("hand") or (), int(state["tick"]))
         view = PV.public_view(state, team, mem, fields=self._search_F,
                               spell_fields=self._search_SF, opp_elixir=reading,
-                              sent=self._own_rows(own), unran=opp, mirror=self._search_mirror,
+                              sent=sent, unran=opp, mirror=self._search_mirror,
                               own_cycle=cycle)
         # What the cut removed, counted (unseen enemies, projectiles), is itself privileged: an
         # invisible unit's existence. Nothing downstream reads it; the search never gets it.
@@ -2238,11 +2402,21 @@ class SearchSeatMixin:
         if getattr(self, "noise", None) is not None:
             raise SearchError("a SearchSeat decides on run_match's observed state; it applies no "
                               "perception noise of its own (rs_eval.play's seat.noise)")
+        unran = getattr(self, "unran", None)
+        if self._search_decisions and unran is not self._search_match:
+            raise SearchError("a SearchSeat plays one match (rs_match.build_seat makes one per "
+                              "match): run_match handed it a new match's refusals")
+        self._search_match = unran
         self._team = team
         searcher = self._ensure_search(team, sub, royalesim)
         view = self.search_view(state, team, mem)
         now = int(view["tick"])
         shift = int(tick) - now                 # 0 under run_match: its tick is the view's
+        # The decision clock (the hold, the new-battle check): run_match asks a seat once per
+        # cadence, so the decisions so far x cadence is our elapsed time, which never steps back
+        # as the noised view tick can (module doc, THE SEAT, OUR OWN CLOCK).
+        clock = self._search_decisions * int(getattr(self, "cadence", RD.DECIDE) or RD.DECIDE)
+        self._search_decisions += 1
 
         def row_fn(s: Mapping[str, Any], t: int) -> Any:
             return self.search_row(s, team, mem, sub, royalesim, int(t) + shift)
@@ -2251,9 +2425,15 @@ class SearchSeatMixin:
         d, rec = searcher.decide(view, team=team, land_ticks=self.search_delay,
                                  legality=RD.BattleLegality(battle), rng=self.rng, row_fn=row_fn,
                                  tick=int(tick), aim=aim, seed=self.search_seed,
-                                 true_battle=battle if cfg.privileged else None)
+                                 true_battle=battle if cfg.privileged else None,
+                                 clock_tick=clock)
         self.last_decision, self.last_search = d, rec
-        self._search_ms.append(float(rec.ms.get("total") or 0.0))
+        total = float(rec.ms.get("total") or 0.0)
+        self._search_ms.append(total)
+        # What the search adds to the plain seat's decision (its row and d0 are the plain
+        # seat's work too): the latency charge's measure (plan 6.3, p95_search_ms).
+        self._search_inc_ms.append(max(0.0, total - float(rec.ms.get("row") or 0.0)
+                                       - float(rec.ms.get("d0") or 0.0)))
         if self.records is not None:
             self.records.append(rec.to_json())
         cmd = d.command
@@ -2275,10 +2455,9 @@ class SearchSeatMixin:
             "rebuild_key": self.rebuild_settings.key, "rebuild_level": self.rebuild_settings.level,
             "delay": int(self.search_delay), "opp_delay": int(self.search_opp_delay)}
         out.update({k: v for k, v in s.items() if k not in out})
-        out["fidelity_skips"] = int((s.get("outcomes") or {}).get(R_FIDELITY, 0))
-        out["decision_ms"] = {"n": len(ms), "sum": round(sum(ms), 3),
-                              "p50": _num(_quantile(ms, 0.5)), "p95": _num(_quantile(ms, 0.95)),
-                              "max": _num(max(ms)) if ms else None}
+        out["fidelity_skips"] = int((s.get("root_fallbacks") or {}).get(R_FIDELITY, 0))
+        out["decision_ms"] = _spread(ms)
+        out["search_ms"] = _spread(list(getattr(self, "_search_inc_ms", None) or ()))
         out["seat"] = {k: int(v) for k, v in sorted(self.search_stats.items())}
         return out
 

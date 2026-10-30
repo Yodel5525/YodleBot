@@ -183,6 +183,40 @@ def test_is_public_names_what_is_privileged_and_the_view_is_idempotent():
     assert {e[FIELD["uid"]] for e in zero["entities"]} == set(TOWERS) | {20, 30, 31, 32, 33}
 
 
+def test_is_public_checks_the_block_keys_the_deck_and_the_spell_columns_too():
+    state = noised_state()
+    mem = memory(*NOISED_MEMORY).view(300, rs_memory.BOARD_LAG)
+    view = PV.public_view(state, 1, mem, fields=FIELD, opp_elixir=(6500, True), sent=SENT)
+    assert PV.is_public(view, 1, fields=FIELD) == []
+
+    def problems(change):
+        v = copy.deepcopy(view)
+        change(v)
+        return PV.is_public(v, 1, fields=FIELD)
+
+    def has(found, needle):
+        return any(needle in p for p in found)
+
+    # the opponent's true deck: cards no play (Knight, Arrows) and no board (the Mini P.E.K.K.A
+    # tunnelling) shows
+    assert has(problems(lambda v: v["players"][0].update(deck=list(range(8, 16)))),
+               "opponent deck cards [9, 10, 12, 14, 15]")
+    assert problems(lambda v: v["players"][0].update(deck=[KNIGHT, ARROWS, MINIPEKKA])) == []
+    assert has(problems(lambda v: v["players"][0].update(hand_costs=[3, 3, 5, 3])),
+               "opponent hand costs")
+    assert has(problems(lambda v: v["players"][0].update(abilities=[[1, 0, 2]])),
+               "opponent block keys ['abilities']")
+    assert has(problems(lambda v: v.update(debug={"true_deck": list(range(8, 16))})),
+               "top-level keys ['debug']")
+    delay_col = PV.SPELL_FIELDS_FALLBACK.index("delay_ticks")
+    assert has(problems(lambda v: v["spells"][0].__setitem__(delay_col, 3)),
+               "spell card 11 delay_ticks 3")
+    # the noised state itself says all of it
+    raw = PV.is_public(state, 1, fields=FIELD)
+    for needle in ("top-level keys ['debug']", "opponent block keys", "opponent hand costs"):
+        assert has(raw, needle), (needle, raw)
+
+
 def test_refused_plays_are_left_out_and_the_winner_shows_only_at_the_end():
     mem = memory(*NOISED_MEMORY).view(300, rs_memory.BOARD_LAG)
     unran = Counter({(0, ARROWS + rs_memory.TOKEN_OFFSET, 200): 1})
@@ -548,6 +582,23 @@ def test_a_reacquired_track_phantoms_reports_and_a_new_battle():
     keep.apply(seen_at(70))
     assert sorted(keep.memos) == [42]
     assert keep.apply(seen_at(0))["public"]["kept"] == [] and keep.memos == {}
+
+
+def test_permanence_reads_a_small_step_back_as_clock_noise_when_told():
+    """A simulator seat's view tick carries perception clock noise and steps back within its one
+    match: rewind_ticks None never starts a new battle; a tolerance only past it."""
+    keep = PV.Permanence(FIELD, team=1, hiders=[TESLA], rewind_ticks=None)
+    keep.apply(seen_at(100, building(32, TESLA, 1000)))
+    assert keep.apply(seen_at(110, building(32, TESLA, 1000,
+                                            status=PV.STATUS_HIDDEN)))["public"]["kept"] == [32]
+    assert keep.apply(seen_at(103))["public"]["kept"] == [32]     # read at 110
+    assert keep.tick == 110 and keep.stats["rewinds"] == 1
+    assert keep.apply(seen_at(0))["public"]["kept"] == [32] and keep.stats["rewinds"] == 2
+    keep = PV.Permanence(FIELD, team=1, hiders=[TESLA], rewind_ticks=10)
+    keep.apply(seen_at(100, building(32, TESLA, 1000)))
+    keep.apply(seen_at(110, building(32, TESLA, 1000, status=PV.STATUS_HIDDEN)))
+    assert keep.apply(seen_at(103))["public"]["kept"] == [32]
+    assert keep.apply(seen_at(50))["public"]["kept"] == [] and keep.memos == {}
 
 
 def test_lifetimes_from_a_card_table():
