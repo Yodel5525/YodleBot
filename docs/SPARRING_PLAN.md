@@ -152,16 +152,18 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
   - L03: the league evaluation and promotion gate (`tools/rs_league_eval.py`).
 - Next on the PC: `scripts/second_model.ps1` (runbook section 19) trains a decision-time model and compares it fairly with the first one at the 21-tick delay.
 
-**Batch 5: model and data**
-- E14: observation v2.
-- E15: model v2 with an ability head and a critic.
-- E18: full-corpus memory-mapped training with mirroring.
-- Upgrading V06 to the v2 model.
-- V11 (rest): fit the perception-noise profile from replay errors and the bot's own taps.
-- Wiring left from batch 4:
-  - `--noise` in rows and `rs_eval`;
-  - visibility in `rs_selfplay`;
-  - own-pending and press inputs in `RSAgent` and the live runner.
+**Batch 5: model and data** (code done 2026-10-30, not yet run on the PC)
+- E14: observation v2 (`tools/rs_schema.py`, `rs_rows --schema v2`): opponent elixir counted from seen plays, spells in flight, own pending plays, evolution state per hand slot, ability buttons, form and burrow unit features.
+- E15: TokenPolicy v2: token groups, ability-button gate, critic head.
+- E18: full-corpus path:
+  - `rs_rows --all-matches --wait-keep-at-build`;
+  - `tools/rs_rows_compact.py` to per-column `.npy`;
+  - `train_tokens --memmap --mirror`.
+- E17 hooks: `--noise` in rows and `rs_eval`.
+- V11 rest: `tools/fit_noise_profile.py` writes `data/noise/measured.json`.
+- V06 for v2: presses, own-pending and the critic value in `rs_decide`. The live runner picks legacy or v2 by checkpoint.
+- `rs_selfplay`: engine settings carried to workers, visibility from the checkpoint.
+- Next on the PC: `scripts/third_model.ps1` (runbook section 20), about 7-12 h.
 
 **Batch 6: RL**
 - R01: vectorised rollouts.
