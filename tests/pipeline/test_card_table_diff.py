@@ -218,7 +218,7 @@ def test_the_fixture_diff(ctd):
         assert r[s] == EMPTY, s
     assert r["forms"] == {"added": [{"base": "Giant", "form": "evolution",
                                      "names": ["Giant_EV1"]}],
-                          "removed": [], "renamed": []}
+                          "removed": [], "renamed": [], "records": []}
     assert [c["name"] for c in t["cards"]] == ["Skeletons", "Skeletons_EV1", "BlowdartGoblin"]
     skel, evo, dart = t["cards"]
     assert skel == {"name": "Skeletons", "section": "cards", "kind": "card", "base": "Skeletons",
@@ -239,7 +239,8 @@ def test_the_fixture_diff(ctd):
     assert v == {"class": "NEW_FORMS", "balance": "major", "reasons": [
         "NEW_FORMS: new forms: Giant evolution",
         "BALANCE: 3 cards changed (2 OUR DECK, 1 OTHER); 1 unattached values; units +1 -0 "
-        "(major)"]}
+        "(major)",
+        "ENGINE_ONLY: table: 1 value changed in other sections (thin_slice)"]}
     json.dumps(ctd.diff(old_table(), new_table()))          # all of it is JSON
 
 
@@ -390,7 +391,7 @@ def test_roster_classes(ctd):
         t["hero_forms"][0]["name"] = "GiantHero_hero"
     v, t = balance(ctd, renamed)
     assert t["roster"]["forms"] == {"added": [], "removed": [],
-                                    "renamed": ["GiantHero_hero", "Giant_hero"]}
+                                    "renamed": ["GiantHero_hero", "Giant_hero"], "records": []}
     assert v == {"class": "BALANCE", "balance": "minor", "reasons": [
         "BALANCE: form records renamed: GiantHero_hero, Giant_hero (minor)"]}
 
@@ -406,6 +407,67 @@ def test_roster_classes(ctd):
     v, t = balance(ctd, new_projectile)
     assert v == {"class": "BALANCE", "balance": "minor",
                  "reasons": ["BALANCE: projectiles +1 -0 (minor)"]}
+
+
+def test_a_form_record_added_or_removed_under_a_kept_form(ctd):
+    """A second evolution next to the first (Skeletons_EV2 by Skeletons_EV1) is not a rename:
+    the form has more records, which classes NEW_FORMS as a new form does."""
+    def ev2(t):
+        t["evolutions"].append({"name": "Skeletons_EV2", "form_of": "Skeletons",
+                                "summon_character": "Skeleton_EV1"})
+    v, t = balance(ctd, ev2)
+    assert t["roster"]["forms"] == {"added": [], "removed": [], "renamed": [], "records": [
+        {"base": "Skeletons", "form": "evolution", "added": ["Skeletons_EV2"], "removed": []}]}
+    assert v == {"class": "NEW_FORMS", "balance": None, "reasons": [
+        "NEW_FORMS: form records added or removed: Skeletons evolution +Skeletons_EV2"]}
+    result = ctd.diff(old_table(), t_with(ev2))
+    assert "  form records of Skeletons evolution: added Skeletons_EV2" in \
+        ctd.summary_lines(result)
+    assert "Form records of Skeletons evolution: added Skeletons_EV2." in \
+        ctd.render_md(result).splitlines()
+    # the other way: one of two records gone
+    gone = ctd.diff_tables(t_with(ev2), old_table())
+    assert gone["roster"]["forms"]["records"] == [
+        {"base": "Skeletons", "form": "evolution", "added": [], "removed": ["Skeletons_EV2"]}]
+    assert ctd.classify(gone)["class"] == "NEW_FORMS"
+
+    # one renamed and one added: the count grew, so not a rename
+    def both(t):
+        t["evolutions"][0]["name"] = "Skeletons_EVA"
+        t["evolutions"].append({"name": "Skeletons_EVB", "form_of": "Skeletons"})
+    v, t = balance(ctd, both)
+    assert t["roster"]["forms"]["renamed"] == []
+    assert v["reasons"] == ["NEW_FORMS: form records added or removed: Skeletons evolution "
+                            "+Skeletons_EVA +Skeletons_EVB -Skeletons_EV1"]
+
+
+def t_with(edit):
+    t = old_table()
+    edit(t)
+    return t
+
+
+def test_other_sections_and_new_sections_are_engine_only(ctd):
+    """Table bytes no other rule reads still change the table (and its FNV): never SAME."""
+    def thin(t):
+        t["thin_slice"] = ["Knight", "Archer"]
+    v, t = balance(ctd, thin)
+    assert v == {"class": "ENGINE_ONLY", "balance": None, "reasons": [
+        "ENGINE_ONLY: table: 1 value changed in other sections (thin_slice)"]}
+
+    def section(t):
+        t["thin_slice_display"] = ["Knight"]
+        del t["thin_slice"]
+    v, t = balance(ctd, section)
+    assert t["sections"] == {"added": ["thin_slice_display"], "removed": ["thin_slice"]}
+    assert v["class"] == "ENGINE_ONLY" and v["reasons"] == [
+        "ENGINE_ONLY: table: sections added: thin_slice_display; sections removed: thin_slice"]
+    # a prose section added or removed is not a change
+    old = old_table()
+    del old["vintage_warning"]
+    t = ctd.diff_tables(old, old_table())
+    assert t["sections"]["added"] == ["vintage_warning"]
+    assert ctd.classify(t)["class"] == "SAME"
 
 
 def test_a_map_change_is_listed_under_every_card_that_reaches_it(ctd):
@@ -494,7 +556,10 @@ def test_ledger_diff(ctd):
     # the table and the ledger together: the worse class, reasons most severe first
     both = ctd.diff(old_table(), new_table(), old_ledger(), new_ledger())
     assert both["class"] == "NEW_FORMS"
-    assert [r.split(":")[0] for r in both["reasons"]] == ["NEW_FORMS", "BALANCE", "ENGINE_ONLY"]
+    assert [r.split(":")[0] for r in both["reasons"]] == ["NEW_FORMS", "BALANCE", "ENGINE_ONLY",
+                                                          "ENGINE_ONLY"]
+    assert both["reasons"][2].startswith("ENGINE_ONLY: table: ")       # the table's thin_slice
+    assert both["reasons"][3].startswith("ENGINE_ONLY: ledger: ")
 
 
 # ---------------------------------------------------------------------------

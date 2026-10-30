@@ -7,7 +7,8 @@ and how often each ending agrees with the recording.
     .venvs\royalegym\Scripts\python.exe tools\rs_fidelity_grid.py --dry-run      the commands only
     .venvs\royalegym\Scripts\python.exe tools\rs_fidelity_grid.py --shared-payloads ^
         --tables 16.402.22 --ticks exec --presses off --rs022 off ^
-        --candidate .venvs\rs_next\Scripts\python.exe --candidate-tables 16.402.22,<new arm>
+        --candidate .venvs\rs_next\Scripts\python.exe --candidate-tables 16.402.22,<new arm> ^
+        --candidate-target <new arm> --work <stage folder>\grid
                                           the quick grid of an update (docs/SEASON_UPDATES.md)
 
 Why (rsim-01, rsim-03, tokens-01): every fidelity number so far (winner agreement 62.6%, exact
@@ -63,11 +64,14 @@ Updates (U10 of docs/SEASON_UPDATES.md; without these flags the grid is as befor
    is BLOCKED when its winner agreement drops by GUARD_WINNER_DROP (2 points) or more with an
    exact McNemar p below GUARD_P (0.05) on the matches both ran, when its refusals rise by more
    than GUARD_REFUSALS (1.0) per 100 plays, when more of its matches fail than the reference's
-   plus GUARD_FAILED (1%) of the sample, or when it or its reference did not run. The report's
-   "candidate" entry says whether any candidate cell is BLOCKED. This guards against
-   regressions only: IL_Replay was played under older balance, so it cannot show that a new
-   table matches today's game. --reuse compares no interpreter (as before): give each
-   candidate engine its own --work.
+   plus GUARD_FAILED (1%) of the sample, or when it or its reference did not run. Section 9
+   blocks on the target cell: --candidate-target TABLES (each one of --candidate-tables;
+   default every candidate cell) names it, and the report's "candidate" entry is BLOCKED when
+   a target cell is (or there is none); another candidate cell whose guard fails, such as the
+   new engine on the old table, is listed as noted, not blocking. The exit code does not say
+   BLOCKED: read the report's "candidate". This guards against regressions only: IL_Replay
+   was played under older balance, so it cannot show that a new table matches today's game.
+   --reuse compares no interpreter (as before): give each candidate engine its own --work.
 5. Shared payloads. --shared-payloads keeps the sample in <shared root>/<sample name>/
    (payloads.jsonl and sample.json; --shared-root, default
    <runs root>/fidelity_grid/shared_samples), picked once and never rewritten, whatever --work
@@ -75,7 +79,9 @@ Updates (U10 of docs/SEASON_UPDATES.md; without these flags the grid is as befor
    shared sample picked with other settings, or whose payload file changed since (delete the
    folder to pick it again). Every run on it appends its cells' numbers (engine version, card
    table and FNV, winner and crowns agreement, refusals, guard) as one line to series.jsonl
-   there: the time series.
+   there: the time series. --reuse with --shared-payloads needs --work: the default work
+   folder is keyed by the sample name, so it is every update's, and its cells (of an earlier
+   engine, on the same payloads) would pass for this run's.
 
 Exit codes: 0 every cell ran; 1 a cell failed; 2 a bad argument, no match to re-drive, or a
 shared sample that does not fit.
@@ -490,15 +496,27 @@ def fresh(meta: Any, cell: Cell, sha256: str, tap_delay: int = RD.TAP_DELAY) -> 
             and meta.get("tick_semantics") == cell.ticks and delay == want_delay and same_table)
 
 
+def guard_verdict(cand: Mapping[str, Any]) -> str:
+    """A report's "candidate" entry as 'pass', 'BLOCKED (<target cells>)' or 'BLOCKED (no
+    target cell)'."""
+    if not cand["blocked"]:
+        return "pass"
+    return f"BLOCKED ({', '.join(cand['blocked_cells']) or 'no target cell'})"
+
+
 def build_report(sample: Mapping[str, Any], entries: Sequence[Mapping[str, Any]], *,
                  generated: str | None = None, target: float = TARGET_WINNER,
-                 matches: int | None = None) -> dict[str, Any]:
+                 matches: int | None = None,
+                 target_tables: Sequence[str] | None = None) -> dict[str, Any]:
     """The grid's numbers. entries: one per cell, in grid order, with "cell" (Cell), "status"
     ("ran" / "reused" / "failed"), "returncode", "seconds", "rows" (the cell's output rows),
     "meta" (its meta.json, or {}), and optionally "out", "log", "log_tail". With candidate
     cells, each gets "guard" (regression; `matches` is the sample's size) and the report
-    "candidate" ({"cells", "blocked", "blocked_cells"}); without them the report is as
-    before."""
+    "candidate" ({"cells", "target_cells", "blocked", "blocked_cells", "noted_cells"}): the
+    target cells are the candidate cells on target_tables (arm names as parse_tables gives
+    them; None: every candidate cell), and only they make it BLOCKED (section 9: "the target
+    cell"); a failed guard of another candidate cell is listed in noted_cells. Without
+    candidate cells the report is as before."""
     entries = list(entries)
     base_rows = entries[0].get("rows") or [] if entries else []
     cells = []
@@ -533,10 +551,18 @@ def build_report(sample: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]
             cells[k]["guard"] = None if ref is None else regression(
                 cells[ref], entries[ref].get("rows") or [], cells[k],
                 entries[k].get("rows") or [], matches)
-        blocked = [cells[k]["name"] for k in candidates
+        targets = [k for k in candidates if target_tables is None
+                   or cells[k]["settings"]["table"] in target_tables]
+        failing = [k for k in candidates
                    if cells[k]["guard"] is None or cells[k]["guard"]["blocked"]]
+        blocked = [cells[k]["name"] for k in failing if k in targets]
         report["candidate"] = {"cells": [cells[k]["name"] for k in candidates],
-                               "blocked": bool(blocked), "blocked_cells": blocked}
+                               "target_cells": [cells[k]["name"] for k in targets],
+                               # no target cell at all cannot pass the guard
+                               "blocked": bool(blocked) or not targets,
+                               "blocked_cells": blocked,
+                               "noted_cells": [cells[k]["name"] for k in failing
+                                               if k not in targets]}
     return report
 
 
@@ -638,6 +664,8 @@ def render(report: Mapping[str, Any]) -> str:
           "100 plays, or when more matches fail than the reference's plus "
           f"{100 * GUARD_FAILED:.0f}% of the sample. It guards against regressions only: "
           "IL_Replay was played under older balance.\n")
+        cand = report["candidate"]
+        targets = set(cand.get("target_cells", cand["cells"]))
         w("| cell | reference | winner vs reference | refusals / 100 plays (change) | "
           "matches that did not run (limit) | guard |")
         w("|---|---|---|---|---|---|")
@@ -645,17 +673,19 @@ def render(report: Mapping[str, Any]) -> str:
             if not is_candidate(c):
                 continue
             g = c.get("guard")
+            failed = "BLOCKED" if c["name"] in targets else "not the target cell, would block"
             if g is None:
-                w(f"| {c['name']} | none | n/a | n/a | n/a | BLOCKED: no reference cell |")
+                w(f"| {c['name']} | none | n/a | n/a | n/a | {failed}: no reference cell |")
                 continue
-            verdict = "BLOCKED: " + "; ".join(g["reasons"]) if g["blocked"] else "pass"
+            verdict = f"{failed}: " + "; ".join(g["reasons"]) if g["blocked"] else "pass"
             w(f"| {c['name']} | {g['reference']} | {fmt_diff(g['winner'])} | "
               f"{c['summary']['refusals_per_100']:.2f} ({g['refusals_rise']:+.2f}) | "
               f"{g['failed']} ({g['failed_limit']:g}) | {_cellsafe(verdict)} |")
-        cand = report["candidate"]
-        verdict = (f"BLOCKED ({', '.join(cand['blocked_cells'])})" if cand["blocked"]
-                   else "pass")
+        verdict = guard_verdict(cand)
         w(f"\n**Regression guard: {verdict}.**\n")
+        if cand.get("noted_cells"):
+            w(f"Not the target cell, so not blocking: {', '.join(cand['noted_cells'])} "
+              "(section 9 blocks on the target cell only).\n")
 
     reasons: Counter = Counter()
     for c in cells:
@@ -944,6 +974,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "--tables); an arm this checkout does not know is passed as it is")
     ap.add_argument("--candidate-label", default=CANDIDATE, metavar="NAME",
                     help=f"the candidate cells' name prefix (default {CANDIDATE})")
+    ap.add_argument("--candidate-target", default=None, metavar="TABLES",
+                    help="the candidate tables whose cells decide the regression guard "
+                         "(section 9: the target cell), comma-separated, each one of "
+                         "--candidate-tables (default every candidate cell)")
     ap.add_argument("--shared-payloads", action="store_true",
                     help="re-drive the shared sample of --sample/--split/--seed (picked once "
                          "into --shared-root, never rewritten) and append the numbers to its "
@@ -985,10 +1019,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate = candidate_python(args.candidate)
         label = candidate_label(args.candidate_label)
         if candidate is None and (args.candidate_tables is not None
-                                  or args.candidate_label != CANDIDATE):
-            raise ValueError("--candidate-tables and --candidate-label: only with --candidate")
+                                  or args.candidate_label != CANDIDATE
+                                  or args.candidate_target is not None):
+            raise ValueError("--candidate-tables, --candidate-label and --candidate-target: "
+                             "only with --candidate")
         candidate_tables = (parse_tables(args.candidate_tables)
                             if args.candidate_tables is not None else None)
+        target_tables = None
+        if args.candidate_target is not None:
+            target_tables = parse_tables(args.candidate_target)
+            outside = [t for t in target_tables if t not in (candidate_tables or tables)]
+            if outside:
+                raise ValueError(f"--candidate-target: {', '.join(outside)} is not one of the "
+                                 "candidate tables "
+                                 f"({', '.join(candidate_tables or tables)})")
+        if args.reuse and args.shared_payloads and args.work is None:
+            # every update shares the sample, so the default work folder (keyed by the sample
+            # name) holds an earlier update's cells, and --reuse compares no interpreter
+            raise ValueError("--reuse with --shared-payloads: give --work, a folder of this "
+                             "update's own (the default one is every update's, so --reuse "
+                             "would keep cells of an earlier engine)")
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     name = (Path(args.payloads).stem if args.payloads
@@ -1064,7 +1114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  {cell.name}: {status}, ran {s['ran']}/{s['matches']}, winner "
               f"{fmt_rate(s['winner'])}, crowns {fmt_rate(s['crowns'])}, refusals "
               f"{s['refusals_per_100']:.2f} per 100 plays ({seconds:.0f}s)", flush=True)
-    report = build_report(sample, entries, matches=matches)
+    report = build_report(sample, entries, matches=matches, target_tables=target_tables)
     out_md = Path(args.out)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(render(report), encoding="utf-8")
@@ -1076,8 +1126,9 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"{100 * TARGET_WINNER:.1f}% target)", flush=True)
     cand = report.get("candidate")
     if cand:
-        print("regression guard: " + (f"BLOCKED ({', '.join(cand['blocked_cells'])})"
-                                      if cand["blocked"] else "pass"), flush=True)
+        print(f"regression guard: {guard_verdict(cand)}"
+              + (f" (not the target cell, not blocking: {', '.join(cand['noted_cells'])})"
+                 if cand["noted_cells"] else ""), flush=True)
     if shared_root is not None:
         series = append_series(Path(sample["shared"]) / SHARED_SERIES,
                                series_line(report, out=out_md, work=work))

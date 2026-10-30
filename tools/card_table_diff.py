@@ -19,8 +19,10 @@ Tables (diff_tables):
 * Roster: names added to and removed from cards, evolutions, hero_forms and towers (records
   keyed by "name") and from units, projectiles, area_effect_objects and buffs (keyed maps). A
   form is its (base card, kind) pair, the record's "form_of" and "evolution" or "hero": a new
-  pair is a new form (Evo Giant: ("Giant", "evolution")); a record added or removed while its
-  pair stays is "renamed", not a new form.
+  pair is a new form (Evo Giant: ("Giant", "evolution")). Under a pair both sides have, records
+  added and removed in equal numbers are "renamed", not a new form; a changed number of records
+  is a form record added or removed ("records": a second evolution, Giant_EV2 next to
+  Giant_EV1), classed as a new or removed form is.
 * Values: every record is flattened to leaf paths (lists of records by index, a list of plain
   values as one leaf) and compared. Provenance is ignored: the keys in IGNORED_KEYS and those
   ending in _provenance or _note, at any depth (prose, extraction notes, display names, the
@@ -51,14 +53,22 @@ engine's default arm).
 
 Class (classify), the part of docs/SEASON_UPDATES.md 4.4 the data decides; the stage (U09) adds
 what only the engines show (a pinned card that stops loading, ENTITY_FIELDS, ABILITY_BUTTONS,
-SPELL_FIELDS, STATUS_BITS, the schema digest) and takes the worse of the two (worst):
+SPELL_FIELDS, STATUS_BITS, the schema digest; and a royalesim version change with byte-equal
+tables and ledger, a Rust-only release, which is at least ENGINE_ONLY: checkpoints get the
+version note and RL runs a new --name) and takes the worse of the two (worst):
   BREAKING     a base card or a tower removed from the table
   NEW_CARDS    a base card added
-  NEW_FORMS    an evolution or hero form (base, kind) added or removed
+  NEW_FORMS    an evolution or hero form (base, kind) added or removed, or a form record added
+               or removed under a form both sides have
   BALANCE      a table value changed, a field or a unit / projectile / area effect / buff record
                added or removed, a form record renamed
-  ENGINE_ONLY  a ledger value changed, a ledger key added or removed
+  ENGINE_ONLY  a ledger value changed, a ledger key added or removed; a value changed in a table
+               section this tool does not know ("other"), a table section added or removed
   SAME         none of these (arm, status and meta changes are listed only)
+The class is the update's, not each checkpoint's: a unit record added or removed renumbers
+the name-sorted unit types (3.3), so a --units types checkpoint is refused in any class that
+adds one, BALANCE included. The stage's checkpoint table comes from loading each checkpoint
+(tools/rs_vocab.py check), never from the class.
 
 Exit codes: 0 the diff was written (whatever the class); 1 an input is missing, not JSON, not a
 table or ledger, or the two files of a pair are of different kinds; 2 bad arguments.
@@ -407,11 +417,24 @@ def diff_tables(old: Mapping[str, Any], new: Mapping[str, Any], *,
                   for base, kind in fb if (base, kind) not in fa],
         "removed": [{"base": base, "form": kind, "names": fa[(base, kind)]}
                     for base, kind in fa if (base, kind) not in fb]}
-    kept = {pair for pair in fa if pair in fb}
-    roster["forms"]["renamed"] = sorted(
-        {item["name"] for s in ("evolutions", "hero_forms")
-         for change in ("added", "removed") for item in roster[s][change]
-         if (item["form_of"], ROSTER[s]) in kept})
+    # a form kept on both sides: records added and removed in equal numbers are renamed; a
+    # changed number of records is a form record added or removed (Giant_EV2 next to Giant_EV1)
+    section_of = {kind: s for s, kind in ROSTER.items()}
+    renamed: set[str] = set()
+    form_records = []
+    for base, kind in sorted(pair for pair in fa if pair in fb):
+        section = section_of[kind]
+        added = [i["name"] for i in roster[section]["added"] if i["form_of"] == base]
+        removed = [i["name"] for i in roster[section]["removed"] if i["form_of"] == base]
+        if not (added or removed):
+            continue
+        if len(fa[(base, kind)]) == len(fb[(base, kind)]):
+            renamed.update(added + removed)
+        else:
+            form_records.append({"base": base, "form": kind, "added": added,
+                                 "removed": removed})
+    roster["forms"]["renamed"] = sorted(renamed)
+    roster["forms"]["records"] = form_records
     raw = 0
     map_changes: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for section in MAPS:
@@ -609,6 +632,11 @@ def classify(table: Mapping[str, Any] | None = None,
             if items:
                 found.append(("NEW_FORMS", f"{verb} forms: " + ", ".join(
                     f"{f['base']} {f['form']}" for f in items)))
+        if r["forms"].get("records"):
+            found.append(("NEW_FORMS", "form records added or removed: " + ", ".join(
+                f"{f['base']} {f['form']} " + " ".join(
+                    [f"+{n}" for n in f["added"]] + [f"-{n}" for n in f["removed"]])
+                for f in r["forms"]["records"])))
         records_moved = [s for s in MAPS if r[s]["added"] or r[s]["removed"]]
         balance = balance_size(table)
         if balance is not None:
@@ -626,6 +654,21 @@ def classify(table: Mapping[str, Any] | None = None,
             if r["forms"]["renamed"]:
                 parts.append("form records renamed: " + ", ".join(r["forms"]["renamed"]))
             found.append(("BALANCE", "; ".join(parts) + f" ({balance})"))
+        # table bytes that no rule above reads (sections this tool does not know, sections
+        # added or removed) still change the table's FNV: ENGINE_ONLY, never SAME
+        others = sorted({str(c["path"]).split(".")[0].split("[")[0] for c in table["other"]})
+        secs = {change: [s for s in table["sections"][change]
+                         if s not in IGNORED_TOP and not ignored(s)]
+                for change in ("added", "removed")}
+        parts = []
+        if others:
+            n = len(table["other"])
+            parts.append(f"{n} value{'s' if n != 1 else ''} changed in other sections ("
+                         + ", ".join(others) + ")")
+        parts += [f"sections {change}: " + ", ".join(names)
+                  for change, names in secs.items() if names]
+        if parts:
+            found.append(("ENGINE_ONLY", "table: " + "; ".join(parts)))
     if ledger is not None:
         c = ledger["counts"]
         if c["value"] or c["added"] or c["removed"]:
@@ -704,6 +747,8 @@ def summary_lines(result: Mapping[str, Any], *, per_card: int = 3) -> list[str]:
                 L.append(f"  form {change}: {f['base']} {f['form']} ({', '.join(f['names'])})")
         if r["forms"]["renamed"]:
             L.append("  form records renamed: " + ", ".join(r["forms"]["renamed"]))
+        for f in r["forms"].get("records", ()):
+            L.append(f"  form records of {f['base']} {f['form']}: {changed_list(f)}")
         for s in ROSTER:
             for change in ("added", "removed"):
                 if r[s][change]:
@@ -779,6 +824,8 @@ def render_md(result: Mapping[str, Any]) -> str:
         for change in ("added", "removed"):
             for f in r["forms"][change]:
                 w(f"\nForm {change}: {f['base']} {f['form']} ({', '.join(f['names'])}).")
+        for f in r["forms"].get("records", ()):
+            w(f"\nForm records of {f['base']} {f['form']}: {changed_list(f)}.")
         w("")
         w("### Values per card\n")
         if not t["cards"]:

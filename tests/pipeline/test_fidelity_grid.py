@@ -1055,7 +1055,8 @@ def test_report_with_a_candidate(grid):
                              "refusals_rise": pytest.approx(-2.75), "failed": 2,
                              "failed_reference": 3, "failed_limit": pytest.approx(3.07),
                              "blocked": False, "reasons": []}
-    assert rep["candidate"] == {"cells": [name], "blocked": False, "blocked_cells": []}
+    assert rep["candidate"] == {"cells": [name], "target_cells": [name], "blocked": False,
+                                "blocked_cells": [], "noted_cells": []}
     json.dumps(rep)
     lines = grid.render(rep).splitlines()
     for line in (
@@ -1069,12 +1070,44 @@ def test_report_with_a_candidate(grid):
     ):
         assert line in lines, line
     failed = grid.build_report(SAMPLE, candidate_entries(grid, "failed"), matches=7)
-    assert failed["candidate"] == {"cells": [name], "blocked": True, "blocked_cells": [name]}
+    assert failed["candidate"] == {"cells": [name], "target_cells": [name], "blocked": True,
+                                   "blocked_cells": [name], "noted_cells": []}
     assert failed["cells"][1]["guard"]["reasons"] == ["the cell did not run",
                                                       "7 matches did not run (limit 3.07)"]
     md = grid.render(failed)
     assert f"**Regression guard: BLOCKED ({name}).**" in md
     assert "| BLOCKED: the cell did not run; 7 matches did not run (limit 3.07) |" in md
+
+
+def test_report_guard_blocks_on_the_target_cells_only(grid):
+    """docs/SEASON_UPDATES.md section 9 blocks on the target cell: with --candidate-target
+    naming the new arm, the new engine failing on the old table is noted, not blocking."""
+    ents = candidate_entries(grid, "failed") + [
+        {"cell": grid.Cell("candidate", "pyc", NEW_ARM, "exec", "off"), "status": "ran",
+         "returncode": 0, "seconds": 2.0, "rows": BASE, "meta": {"fingerprint": FP_NEXT}}]
+    old_name = "candidate-16.402.22-exec-presses-off"
+    new_name = f"candidate-{NEW_ARM}-exec-presses-off"
+    every = grid.build_report(SAMPLE, ents, matches=7)          # default: every candidate cell
+    assert every["candidate"] == {"cells": [old_name, new_name],
+                                  "target_cells": [old_name, new_name], "blocked": True,
+                                  "blocked_cells": [old_name], "noted_cells": []}
+    rep = grid.build_report(SAMPLE, ents, matches=7, target_tables=[NEW_ARM])
+    assert rep["cells"][2]["guard"]["blocked"] is False                 # BASE against BASE
+    assert rep["candidate"] == {"cells": [old_name, new_name], "target_cells": [new_name],
+                                "blocked": False, "blocked_cells": [],
+                                "noted_cells": [old_name]}
+    md = grid.render(rep)
+    assert "**Regression guard: pass.**" in md
+    assert (f"Not the target cell, so not blocking: {old_name} (section 9 blocks on the "
+            "target cell only).") in md
+    assert ("| not the target cell, would block: the cell did not run; 7 matches did not run "
+            "(limit 3.07) |") in md
+    # no candidate cell on the target tables cannot pass
+    none = grid.build_report(SAMPLE, ents, matches=7, target_tables=["client15535"])
+    assert none["candidate"]["blocked"] is True and none["candidate"]["blocked_cells"] == []
+    assert grid.guard_verdict(none["candidate"]) == "BLOCKED (no target cell)"
+    assert grid.guard_verdict(rep["candidate"]) == "pass"
+    assert grid.guard_verdict(every["candidate"]) == f"BLOCKED ({old_name})"
 
 
 def two_payloads():
@@ -1146,10 +1179,20 @@ def test_main_candidate_flags_and_dry_run(grid, tmp_path, capsys):
                   ["--payloads", str(payloads), "--candidate-label", "next"],
                   ["--payloads", str(payloads), "--candidate", str(tmp_path / "nope")],
                   ["--payloads", str(payloads), "--candidate", str(cand),
-                   "--candidate-label", "main"]):
+                   "--candidate-label", "main"],
+                  ["--payloads", str(payloads), "--candidate-target", "16.402.22"],
+                  ["--payloads", str(payloads), "--candidate", str(cand),
+                   "--candidate-target", NEW_ARM]):          # not one of the candidate tables
         with pytest.raises(SystemExit):
             grid.main(base + extra)
     capsys.readouterr()
+    # --reuse on a shared sample needs a work folder of the run's own
+    no_work = [a for a in base if a not in ("--work", str(tmp_path / "work"))]
+    with pytest.raises(SystemExit) as exc:
+        grid.main(no_work + ["--shared-payloads", "--reuse", "--shared-root",
+                             str(tmp_path / "s")])
+    assert exc.value.code == 2
+    assert "--reuse with --shared-payloads: give --work" in capsys.readouterr().err
     shared = tmp_path / "shared"
     assert grid.main(base + ["--shared-payloads", "--shared-root", str(shared), "--sample",
                              "5", "--candidate", str(cand), "--candidate-tables",
@@ -1218,8 +1261,9 @@ def test_main_update_grid_on_a_shared_sample(grid, tmp_path, monkeypatch, capsys
     assert [c["name"] for c in report["cells"]] == names
     assert Path(report["sample"]["shared"]) == Path(sample["shared"]).resolve()
     assert report["sample"]["sha256"] == sample["sha256"]
-    assert report["candidate"] == {"cells": names[1:], "blocked": True,
-                                   "blocked_cells": [names[2]]}
+    assert report["candidate"] == {"cells": names[1:], "target_cells": names[1:],
+                                   "blocked": True, "blocked_cells": [names[2]],
+                                   "noted_cells": []}
     old, new = report["cells"][1]["guard"], report["cells"][2]["guard"]
     assert old["blocked"] is False and old["winner"]["diff"] == -0.5   # p 1: not a regression
     assert new["reasons"] == ["2 matches did not run (limit 0.02)"]
@@ -1248,6 +1292,17 @@ def test_main_update_grid_on_a_shared_sample(grid, tmp_path, monkeypatch, capsys
     assert calls == []
     assert grid.rs_cards.file_sha256(path) == sample["sha256"]
     assert len(series_path.read_text(encoding="utf-8").splitlines()) == 2
+    # the target cell named: the old table's candidate cell passes, the new arm's failure is
+    # noted and does not block (section 9 blocks on the target cell)
+    capsys.readouterr()
+    assert grid.main(argv + ["--reuse", "--candidate-target", "16.402.22"]) == 0
+    assert calls == []
+    assert (f"regression guard: pass (not the target cell, not blocking: {names[2]})"
+            in capsys.readouterr().out)
+    report = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert report["candidate"] == {"cells": names[1:], "target_cells": [names[1]],
+                                   "blocked": False, "blocked_cells": [],
+                                   "noted_cells": [names[2]]}
     # a shared sample picked with other modes is refused before any cell runs
     other = tmp_path / "other"
     grid.shared_sample(other, n=2, split="val", seed=0, modes=None, corpus=tmp_path,
