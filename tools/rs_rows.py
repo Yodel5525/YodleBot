@@ -123,10 +123,42 @@ press head): a press row's act_card is 0, so it trains as a wait. rows_for's inf
 "presses" (rs_presses.PressLog counts), and manifest.json sums them under "presses" with
 press_rows. vocab.json adds "presses" (rs_presses.vocab_entry) and the three columns in
 "extra_columns" (press_vocab).
+
+Decision time (E11; tokens-01/05/10): `--obs-delay 0` (the default) observes each play at the
+tick it ran, the recorded tick, so the rows, vocab.json and manifest.json are byte-identical to
+the rows before E11. `--obs-delay D --obs-delay-jitter J` observes each play where its player
+tapped it: tap = exec - D_i, D_i = D + an integer drawn uniformly from [-J, J], floored at tick
+0 (tap_delays: one draw per play in queue order from numpy default_rng([tap_seed(tag), 0]), the
+seed the first 16 hex digits of sha1(replay tag); presses, under --presses on, from stream 1,
+so --presses leaves the plays' taps alone). J <= D, and D + J < HORIZON. The engine still runs
+every action at its recorded tick with no command delay, and the loop also stops at every tap,
+so a row at tick t shows state(t), the board about D ticks before its play lands, and the
+memory view(t, max(BOARD_LAG, L)), L = --mem-lag (alias --opp-lag; --mem-lag legacy is refused).
+A play row's label is the play it taps (card and tile, as before); when that card is not in the
+engine's hand at t (a card a pending play of the same side cycles in), sim/model_tokens
+.target_slot gives -1 and the row trains the tile head only (info "not_in_hand" counts them).
+A press row (presses on) sits at its tap too; its command still goes in at the recorded tick.
+Wait rows: every WAIT_EVERY ticks for a side with no tap (play or press) in [t, t + W],
+`--wait-window W` (default 10; with D = 0 that is exactly the legacy rule). Every row has two
+more columns: "own_pending" (PENDING_SLOTS int16 card tokens) and "own_pending_land"
+(PENDING_SLOTS float16, (exec - t) / PENDING_SCALE clipped at 1): the side's own plays tapped
+before t that run at or after t (tap < t <= exec), soonest first. That is the spec's
+tap <= t < exec with two boundary changes: the row's own tap is left out (it is the row's
+label), and a play that runs at t is still pending, since state(t) is taken before the step
+that runs it (tools/rs_memory.py, "the engine's phase"). Presses are not pending tokens.
+hand_exact is honest (exact_hand): True once the side has run at least EXACT_PLAYS plays, the
+last four distinct, and no Mirror among its last EXACT_MIRROR_WINDOW (sim/replay_rows
+.cycle_hand); legacy rows keep True. The trust cut, the outcome window and trusted_v2 count
+from the row's tick, as before. vocab.json: obs_delay ticks and jitter, "decision_rows"
+(DecisionRule.to_json) and DECISION_FIELDS last in "extra_columns" (decision_vocab);
+rows_for's info and manifest.json get "decision" counts (play_rows, press_rows, not_in_hand,
+clamped, pending_rows, exact_rows). sim/train_tokens.py reads none of the new columns (E14 /
+E15 will): the legacy model trains on decision-time rows as they are, schema rs_rows/legacy.
 """
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import json
 import math
@@ -217,6 +249,218 @@ def press_vocab(presses) -> dict:
     if rs_presses.press_mode(presses) == rs_presses.PRESS_OFF:
         return {}
     return {"presses": rs_presses.vocab_entry(BUTTONS, HAND_SIZE)}
+
+
+#: --wait-window (module doc, "Decision time"): a decision-time wait row needs no tap of its side
+#: in [t, t + W]. The legacy rows' rule (no play in (t, t + 10], none at t) is W = 10 at D = 0.
+WAIT_WINDOW = 10
+#: own_pending: how many of a side's pending plays a row shows, and the ticks that read 1.0.
+PENDING_SLOTS, PENDING_SCALE = 4, 40
+#: The columns decision-time rows add to FIELDS.
+DECISION_FIELDS = ("own_pending", "own_pending_land")
+#: exact_hand (tokens-10): the plays after which the FIFO cycle names the hand whatever the deal,
+#: and how far back a Mirror spoils it (sim/replay_rows.cycle_hand); the catalogue name.
+EXACT_PLAYS, EXACT_MIRROR_WINDOW, MIRROR = 4, 8, "Mirror"
+#: tap_delays' rng streams, one per kind of action.
+STREAM_PLAYS, STREAM_PRESSES = 0, 1
+#: decision_rule: the settings a DecisionRule's JSON carries, and the keys that only describe it.
+_DECISION_KEYS = ("delay", "jitter", "wait_window")
+_DECISION_NOTES = ("seed", "streams", "tap_floor", "pending_slots", "pending_scale",
+                   "pending_rule", "hand_exact")
+
+
+@dataclass(frozen=True)
+class DecisionRule:
+    """--obs-delay, --obs-delay-jitter and --wait-window; decision_rule() gives a checked one.
+    delay 0 (the default): the rows at the tick each play ran, the rows before E11."""
+    delay: int = 0
+    jitter: int = 0
+    wait_window: int = WAIT_WINDOW
+
+    @property
+    def on(self) -> bool:
+        return self.delay > 0
+
+    def to_json(self) -> dict:
+        """vocab.json "decision_rows"; decision_rule() reads it back."""
+        return {"delay": self.delay, "jitter": self.jitter, "wait_window": self.wait_window,
+                "seed": "int(sha1(replay_tag)[:16], 16)",
+                "streams": {"plays": STREAM_PLAYS, "presses": STREAM_PRESSES},
+                "tap_floor": 0, "pending_slots": PENDING_SLOTS, "pending_scale": PENDING_SCALE,
+                "pending_rule": "own plays with tap < t <= exec, soonest first",
+                "hand_exact": (f"honest: >= {EXACT_PLAYS} plays run, the last {EXACT_PLAYS} "
+                               f"distinct, no {MIRROR} in the last {EXACT_MIRROR_WINDOW}")}
+
+
+DECISION = DecisionRule()
+
+
+def _ticks(value, what: str) -> int:
+    """`value` as an int >= 0 (numpy integers and strings of digits too); ValueError otherwise."""
+    if isinstance(value, str):
+        try:
+            value = int(value.strip(), 10)
+        except ValueError:
+            raise ValueError(f"{what}: ticks (an int >= 0), got {value!r}") from None
+    if isinstance(value, bool):
+        raise ValueError(f"{what}: ticks (an int >= 0), got {value!r}")
+    try:
+        ticks = operator.index(value)
+    except TypeError:
+        raise ValueError(f"{what}: ticks (an int >= 0), got {value!r}") from None
+    if ticks < 0:
+        raise ValueError(f"{what} must be >= 0, got {ticks}")
+    return int(ticks)
+
+
+def decision_rule(value=None) -> DecisionRule:
+    """--obs-delay as rows_for, build and vocab_record take it: None (the module's DECISION), a
+    delay in ticks (the other settings at their defaults), a DecisionRule or its to_json().
+    ValueError for a negative or non-integer setting, a jitter above the delay (a tap after
+    its play), delay + jitter >= HORIZON (the outcome window would miss the play), or a
+    --wait-window other than WAIT_WINDOW without a delay (the legacy rows have their own)."""
+    if value is None:
+        value = DECISION
+    if isinstance(value, dict):
+        unknown = sorted(set(value) - set(_DECISION_KEYS) - set(_DECISION_NOTES))
+        if unknown:
+            raise ValueError(f"--obs-delay: unknown setting(s) {unknown}")
+        value = DecisionRule(**{k: value[k] for k in _DECISION_KEYS if k in value})
+    elif not isinstance(value, DecisionRule):
+        value = DecisionRule(delay=value)
+    delay = _ticks(value.delay, "--obs-delay")
+    jitter = _ticks(value.jitter, "--obs-delay-jitter")
+    window = _ticks(value.wait_window, "--wait-window")
+    if jitter > delay:
+        raise ValueError(f"--obs-delay-jitter {jitter} is more than --obs-delay {delay}: a play "
+                         f"would be tapped after it ran")
+    if delay + jitter >= HORIZON:
+        raise ValueError(f"--obs-delay {delay} + jitter {jitter} must stay under the {HORIZON}-tick "
+                         f"outcome window")
+    if not delay and window != WAIT_WINDOW:
+        raise ValueError(f"--wait-window applies to decision-time rows (--obs-delay > 0); the "
+                         f"rows at execution keep their {WAIT_WINDOW}-tick rule")
+    return DecisionRule(delay, jitter, window)
+
+
+def decision_vocab(rule=None) -> dict:
+    """vocab_record keywords for --obs-delay: none for 0 (the vocab.json of the rows before
+    E11), else {"decision": the rule}."""
+    rule = decision_rule(rule)
+    return {"decision": rule} if rule.on else {}
+
+
+def describe_decision(rule=None) -> str:
+    """One line for the console."""
+    rule = decision_rule(rule)
+    if not rule.on:
+        return "at execution (each play row at the tick the play ran, as before)"
+    jitter = f" +- {rule.jitter}" if rule.jitter else ""
+    return (f"decision time, {rule.delay}{jitter} ticks before each play runs (own_pending "
+            f"columns, honest hand_exact, no wait row within {rule.wait_window} ticks of a tap)")
+
+
+def tap_seed(tag) -> int:
+    """The jitter seed of a match: its replay tag's sha1, first 16 hex digits, as an int."""
+    return int(hashlib.sha1(str(tag).encode()).hexdigest()[:16], 16)
+
+
+def tap_delays(tag, n: int, rule=None, stream: int = STREAM_PLAYS) -> list:
+    """D_i for `n` actions of match `tag`, in order: rule.delay + an integer uniform in
+    [-jitter, jitter], from np.random.default_rng([tap_seed(tag), stream]).integers(-jitter,
+    jitter + 1, size=n); without jitter every D_i is the delay and no rng is made."""
+    rule = decision_rule(rule)
+    n = int(n)
+    if not rule.jitter or n <= 0:
+        return [rule.delay] * max(0, n)
+    rng = np.random.default_rng([tap_seed(tag), int(stream)])
+    return [rule.delay + int(v) for v in rng.integers(-rule.jitter, rule.jitter + 1, size=n)]
+
+
+def exact_hand(history) -> bool:
+    """tokens-10: whether a side's hand and next card follow from its plays alone, `history`
+    being the card names of its plays that have run, oldest first. The queue is first in, first
+    out, so after four plays it holds the last four played and the hand is the other four
+    cards, whatever the deal. True when at least EXACT_PLAYS have run, the last four are distinct
+    (always, in a true cycle) and no MIRROR is among the last EXACT_MIRROR_WINDOW (Mirror cycles
+    differently; sim/replay_rows.cycle_hand)."""
+    names = list(history)
+    if len(names) < EXACT_PLAYS or len(set(names[-EXACT_PLAYS:])) < EXACT_PLAYS:
+        return False
+    return MIRROR not in names[-EXACT_MIRROR_WINDOW:]
+
+
+def pending_features(pending, slots: int = PENDING_SLOTS) -> tuple:
+    """(own_pending int16 [slots], own_pending_land float16 [slots]) from `pending`, (card
+    token, ticks to land) soonest first: the first `slots` of them, ticks / PENDING_SCALE clipped
+    to [0, 1], zeros after."""
+    cards = np.zeros(slots, dtype=np.int16)
+    land = np.zeros(slots, dtype=np.float16)
+    for k, (card, ticks) in enumerate(list(pending)[:slots]):
+        cards[k] = int(card)
+        land[k] = min(1.0, max(0.0, float(ticks) / PENDING_SCALE))
+    return cards, land
+
+
+class DecisionPlan:
+    """E11: when each recorded action of one match was tapped, and what a row at tick t knows of
+    its own side's taps (module doc, "Decision time").
+
+    queue: rows_for's plays, (exec tick, engine team, card name, x, y) in tick order; tokens:
+    their row tokens (catalogue id + 2); presses: (exec tick, engine team, rs_presses.Press) in
+    tick order; tag: the replay tag; rule: what decision_rule takes. `events` lists the row
+    events, (tap, kind 0 play / 1 press, index into queue / presses), in row order: by tap, a
+    tick's plays before its presses, each in queue order.
+    """
+
+    def __init__(self, queue, tokens, presses, tag, rule=None):
+        self.rule = rule = decision_rule(rule)
+        self.max_delay = rule.delay + rule.jitter
+        delays = tap_delays(tag, len(queue), rule, STREAM_PLAYS)
+        pdelays = tap_delays(tag, len(presses), rule, STREAM_PRESSES)
+        self.play_taps = [max(0, int(q[0]) - d) for q, d in zip(queue, delays)]
+        self.press_taps = [max(0, int(p[0]) - d) for p, d in zip(presses, pdelays)]
+        self.play_clamped = [int(q[0]) - d < 0 for q, d in zip(queue, delays)]
+        self.press_clamped = [int(p[0]) - d < 0 for p, d in zip(presses, pdelays)]
+        self.events = sorted([(t, 0, k) for k, t in enumerate(self.play_taps)]
+                             + [(t, 1, k) for k, t in enumerate(self.press_taps)])
+        self._taps = {0: [], 1: []}               # every tap of a team, sorted
+        self._exec = {0: [], 1: []}               # its plays: exec ticks (sorted), taps, ...
+        self._tap = {0: [], 1: []}
+        self._token = {0: [], 1: []}
+        self._name = {0: [], 1: []}
+        for k, q in enumerate(queue):
+            team = int(q[1])
+            self._taps[team].append(self.play_taps[k])
+            self._exec[team].append(int(q[0]))
+            self._tap[team].append(self.play_taps[k])
+            self._token[team].append(int(tokens[k]))
+            self._name[team].append(q[2])
+        for k, p in enumerate(presses):
+            self._taps[int(p[1])].append(self.press_taps[k])
+        for team in (0, 1):
+            self._taps[team].sort()
+
+    def tapped(self, team: int, lo: int, hi: int) -> bool:
+        """Whether `team` taps anything (a play or a press) at a tick in [lo, hi]."""
+        taps = self._taps[team]
+        k = bisect.bisect_left(taps, lo)
+        return k < len(taps) and taps[k] <= hi
+
+    def pending(self, team: int, tick: int) -> list:
+        """`team`'s plays with tap < tick <= exec, as (card token, exec - tick), soonest first."""
+        execs, taps = self._exec[team], self._tap[team]
+        out = []
+        k = bisect.bisect_left(execs, tick)
+        while k < len(execs) and execs[k] <= tick + self.max_delay:   # later ones tap after tick
+            if taps[k] < tick:
+                out.append((self._token[team][k], execs[k] - tick))
+            k += 1
+        return out
+
+    def exact(self, team: int, tick: int) -> bool:
+        """hand_exact of `team`'s rows at `tick`: exact_hand of its plays that ran before it."""
+        return exact_hand(self._name[team][:bisect.bisect_left(self._exec[team], tick)])
 
 
 class VisibilityError(ValueError):
@@ -522,7 +766,8 @@ def trust_stats(rows, infos, rule=None) -> dict:
     by why `trusted` was cut, CUT_NONE when it was not). Under --trust v2 also trusted_v2,
     hog_trusted_v2, "cuts_v2" and princess_votes ({seat name: {vote: matches}}). When the
     infos carry "presses" (--presses on), also "presses": press_rows (rows with a press label)
-    and the matches' rs_presses.PressLog counts summed."""
+    and the matches' rs_presses.PressLog counts summed. When they carry "decision" (E11,
+    --obs-delay > 0), also "decision": those counts summed."""
     rule = trust_rule(rule)
     hog = [r for r in rows if r["hog"]]
     st = {"rows": len(rows), "play_rows": sum(1 for r in rows if r["action"][0]),
@@ -541,6 +786,11 @@ def trust_stats(rows, infos, rule=None) -> dict:
         for i in infos:
             merge_stats(presses, i.get("presses", {}))
         st["presses"] = presses
+    if any("decision" in i for i in infos):
+        decision: dict = {}
+        for i in infos:
+            merge_stats(decision, i.get("decision", {}))
+        st["decision"] = decision
     return st
 
 
@@ -573,7 +823,7 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
     rows; None with no rows), wait_rows, the skipped matches by reason, the trust rule and the
     shard entries (shard_entry, in shard order). Under --trust v2 also trusted_v2 and its
     rates, cuts_v2 and princess_votes; with press counts in `totals` (--presses on) also
-    "presses"."""
+    "presses"; with decision counts (--obs-delay > 0) also "decision"."""
     rule = trust_rule(rule)
     n, hog, plays = totals.get("rows", 0), totals.get("hog_rows", 0), totals.get("play_rows", 0)
     out = {"rows": n, "play_rows": plays, "wait_rows": n - plays,
@@ -591,6 +841,8 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
                                         .get(v, 0) for v in VOTES} for name in SEAT_NAMES}
     if "presses" in totals:
         out["presses"] = totals["presses"]
+    if "decision" in totals:
+        out["decision"] = totals["decision"]
     out["shards"] = sorted(shards, key=lambda s: s["shard"])
     return out
 
@@ -607,6 +859,11 @@ def describe_manifest(man: dict) -> str:
     if "presses" in man:
         text += (f"; {rs_presses.describe_log(man['presses'])}, "
                  f"{man['presses'].get('press_rows', 0):,} press rows")
+    if "decision" in man:
+        d = man["decision"]
+        text += (f"; decision time: {d.get('not_in_hand', 0):,} of {d.get('play_rows', 0):,} "
+                 f"play rows tap a card not yet in hand, {d.get('clamped', 0):,} taps floored "
+                 f"at tick 0")
     return text
 
 
@@ -654,9 +911,12 @@ def mem_lag_arg(text: str):
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
-def add_mem_lag_arg(ap: argparse.ArgumentParser, help_text: str | None = None) -> None:
-    """--mem-lag TICKS|legacy, default rs_memory.BOARD_LAG; tools/rs_eval.py adds it too."""
-    ap.add_argument("--mem-lag", type=mem_lag_arg, default=rs_memory.BOARD_LAG,
+def add_mem_lag_arg(ap: argparse.ArgumentParser, help_text: str | None = None,
+                    aliases=()) -> None:
+    """--mem-lag TICKS|legacy, default rs_memory.BOARD_LAG; tools/rs_eval.py adds it too.
+    `aliases`: more option strings for it (rs_rows: "--opp-lag", E11's name); dest mem_lag."""
+    ap.add_argument("--mem-lag", *aliases, dest="mem_lag", type=mem_lag_arg,
+                    default=rs_memory.BOARD_LAG,
                     metavar="TICKS|legacy", help=help_text or (
                         "opponent memory: a row at tick t sees the plays that ran by "
                         f"t - max(1, TICKS) (default {rs_memory.BOARD_LAG}: what the board "
@@ -736,7 +996,7 @@ def towers_vec(state, team):
 
 
 def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None, presses=None,
-            buttons=None):
+            buttons=None, pending=None, hand_exact=None):
     """One row of `team`'s view. `mem` is the opponent memory, {"seen", "last"} as
     rs_memory.PublicMemory.view() gives it. `live` / `units` / `visibility` / `presses` default
     to LIVE / UNITS / VISIBILITY / PRESSES; with units "vision" (and not live) the row also has
@@ -746,7 +1006,10 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
     status_flags. With presses "on" (E10) the row also has "ability_card" (BUTTONS int16) and
     "ability_state" (BUTTONS x rs_presses.ABILITY_FEATS float16) from players[team]
     ["abilities"] (rs_presses.ability_features; `buttons`, the side's button cards, names a
-    button the engine's rows do not)."""
+    button the engine's rows do not). With `pending` (E11, decision-time rows: `team`'s own
+    pending plays, (card token, ticks to land) soonest first; [] for none) the row also has
+    "own_pending" and "own_pending_land" (pending_features); None leaves them out. `hand_exact`
+    is the row's flag (None: True, as the rows before E11 say)."""
     live = LIVE if live is None else live
     units = unit_mode(UNITS if units is None else units)
     public = visibility_mode(VISIBILITY if visibility is None else visibility) == VIS_PUBLIC
@@ -806,7 +1069,8 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
     last = mem["last"][opp][-4:]
     t_ms = tick * 50
     row = {
-        "tick": tick, "side": 1 if team == 0 else -1, "hand_exact": True,
+        "tick": tick, "side": 1 if team == 0 else -1,
+        "hand_exact": True if hand_exact is None else bool(hand_exact),
         "unit_ids": ids, "unit_feats": feats, "towers": towers_vec(state, team),
         "scalars": np.asarray([p["elixir_milli"] / 10_000, min(1.0, t_ms / 300_000),
                                1.0 if t_ms >= 120_000 else 0.0,
@@ -827,13 +1091,18 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
         row["ability_card"] = np.asarray(cards, dtype=np.int16)
         row["ability_state"] = np.asarray(states, dtype=np.float16).reshape(
             BUTTONS, len(rs_presses.ABILITY_FEATS))
+    if pending is not None:
+        row["own_pending"], row["own_pending_land"] = pending_features(pending)
     return row
 
 
 def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, presses=None,
-             info=None):
+             info=None, decision=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
-    since the recorded ticks are the ticks the plays executed. `mem_lag` as --mem-lag
+    since the recorded ticks are the ticks the plays executed. `decision` as --obs-delay
+    (decision_rule; None: DECISION): a delay > 0 observes each play and press at its tap,
+    exec - D_i, and gives every row own_pending, own_pending_land and an honest hand_exact
+    (module doc, "Decision time"); 0 keeps the rows at execution, as before. `mem_lag` as --mem-lag
     (None: MEM_LAG): how the opponent memory of a row is dated (module doc). `trust` as
     --trust (trust_rule; None: TRUST): under v2 every row also has "trusted_v2" (module doc,
     "Trust v2"). `presses` as --presses (None: PRESSES): under "on" the recorded ability
@@ -841,9 +1110,14 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
     "ability_state" (module doc, "Presses"). A dict `info` gets, for a match that gives rows,
     info["trust"] = {"cut": the tick `trusted` was cut at or None, "why": its CUT_* reason or
     CUT_NONE} and under v2 also "cut_v2", "why_v2" and "votes" (princess_vote of blue and red
-    at the end of the run); under presses "on" also info["presses"] (rs_presses.PressLog)."""
+    at the end of the run); under presses "on" also info["presses"] (rs_presses.PressLog);
+    with a delay also info["decision"], the counts manifest.json sums (module doc)."""
     lag = mem_lag_value(MEM_LAG if mem_lag is None else mem_lag)
     legacy = lag == MEM_LEGACY
+    drule = decision_rule(DECISION if decision is None else decision)
+    if drule.on and legacy:
+        raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
+                         "--mem-lag legacy is the order before E08")
     rule = trust_rule(trust)
     press_on = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
     royalesim, names, ids, cat = ctx
@@ -927,6 +1201,25 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
     # The last recorded action: the last play, or (presses on) a later press.
     last = max([queue[-1][0] if queue else 0] + [q[0] for q in press_q])
     end = min(last + HORIZON, 6000)
+    # E11 (--obs-delay > 0): each action's tap, the rows taken there, and what a row knows of
+    # its side's own taps. None: the rows at execution, the loop below as before E11.
+    plan, tp, dstat = None, 0, None
+    if drule.on:
+        plan = DecisionPlan(queue, [ids[q[2]] + 2 for q in queue], press_q,
+                            (payload.get("source") or {}).get("replay_tag", ""), drule)
+        dstat = {"play_rows": 0, "press_rows": 0, "not_in_hand": 0, "clamped": 0,
+                 "pending_rows": 0, "exact_rows": 0}
+
+    def drow(state, team, view, tick):
+        """A decision-time row of `team` at `tick`: obs_row with its pending plays and honest
+        hand_exact (the one place E17's noise hook wraps for these rows)."""
+        pending = plan.pending(team, tick)
+        exact = plan.exact(team, tick)
+        dstat["pending_rows"] += int(bool(pending))
+        dstat["exact_rows"] += int(exact)
+        return obs_row(state, team, sub, view, tick, **pkw[team], pending=pending,
+                       hand_exact=exact)
+
     while tick <= end:
         state = json.loads(b.state_json())
         if rule.v2:
@@ -948,9 +1241,38 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                 pkw[t]["buttons"] = btns[t]
         # E08: one view for every row of this tick, taken before this tick's plays are
         # recorded. Legacy reads the memory at each row instead, after the plays handled so
-        # far, which is the dict the rows before E08 read. (Decision-time rows, E11, take
-        # the view at their observation tick.)
+        # far, which is the dict the rows before E08 read. Decision-time rows (E11) read the
+        # same view, at their tap.
         known = None if legacy else mem.view(tick, lag)
+        if plan is not None:
+            # E11: the rows of the plays and presses tapped at this tick, from state(tick);
+            # their commands still go in at the recorded ticks below.
+            while tp < len(plan.events) and plan.events[tp][0] <= tick:
+                _, kind, k = plan.events[tp]
+                tp += 1
+                if kind == 0:
+                    _, team, card, x, y = queue[k]
+                    cid = ids[card]
+                    ex, ey = rs_orient.to_engine(x, y, sub)
+                    ox, oy = own(ex, ey, team, sub)
+                    row = drow(state, team, known, tick)
+                    row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))),
+                                     int(min(31, max(0, oy // 1000))))
+                    rows.append(row)
+                    dstat["play_rows"] += 1
+                    dstat["not_in_hand"] += int(cid + 2 not in row["hand"].tolist())
+                    dstat["clamped"] += int(plan.play_clamped[k])
+                else:
+                    _, team, press = press_q[k]
+                    button, _ = rs_presses.button_of(press.cards, btns[team])
+                    if button is None:              # skipped (and counted) when it is due
+                        continue
+                    row = drow(state, team, known, tick)
+                    row["action"] = (0, 0, 0)
+                    row["press"] = button + 1
+                    rows.append(row)
+                    dstat["press_rows"] += 1
+                    dstat["clamped"] += int(plan.press_clamped[k])
         due = []
         while i < len(queue) and queue[i][0] <= tick:
             due.append(queue[i])
@@ -963,10 +1285,11 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             hand = state["players"][team]["hand"]
             ex, ey = rs_orient.to_engine(x, y, sub)
             ox, oy = own(ex, ey, team, sub)
-            row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                          **pkw[team])
-            row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
-            rows.append(row)
+            if plan is None:                        # E11: decision-time rows were taken above
+                row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
+                              **pkw[team])
+                row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
+                rows.append(row)
             if cid in hand:
                 cmds.append((team, hand.index(cid), ex, ey))
             elif cut > tick:
@@ -986,15 +1309,23 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                 if cut > tick:
                     cut, cut_why = tick, CUT_PRESS
                 continue
-            row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                          **pkw[team])
-            row["action"] = (0, 0, 0)
-            row["press"] = button + 1
-            rows.append(row)
+            if plan is None:                        # E11: its row was taken at its tap
+                row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
+                              **pkw[team])
+                row["action"] = (0, 0, 0)
+                row["press"] = button + 1
+                rows.append(row)
             pcmds.append(rs_presses.command(team, button, hand_n))
             plog.sent += 1
         if tick % WAIT_EVERY == 0:
             for team in (0, 1):
+                if plan is not None:
+                    # E11: a wait only where the side taps nothing in [tick, tick + W].
+                    if tick > 0 and not plan.tapped(team, tick, tick + drule.wait_window):
+                        row = drow(state, team, known, tick)
+                        row["action"] = (0, 0, 0)
+                        rows.append(row)
+                    continue
                 soon = any(tick < t <= tick + 10 for t in soon_ticks[team])
                 if team not in acting and not soon and tick > 0:
                     row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
@@ -1004,6 +1335,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         nxt = queue[i][0] if i < len(queue) else end + 1
         if j < len(press_q):
             nxt = min(nxt, press_q[j][0])
+        if plan is not None and tp < len(plan.events):
+            nxt = min(nxt, plan.events[tp][0])     # E11: the loop stops at every tap too
         step = max(1, min(nxt, (tick // WAIT_EVERY + 1) * WAIT_EVERY) - tick)
         res = b.step(cmds + pcmds if pcmds else cmds, step)
         for k, r in enumerate(res):
@@ -1053,6 +1386,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         info["trust"] = trust_info
         if press_on:
             info["presses"] = plog.to_json()
+        if dstat is not None:
+            info["decision"] = dstat
     return rows, "ok"
 
 
@@ -1067,7 +1402,8 @@ SCHEMA = "rs_rows/legacy"
 
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
-                 opp_memory=None, classes=None, visibility=None, trust=None, presses=None):
+                 opp_memory=None, classes=None, visibility=None, trust=None, presses=None,
+                 decision=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -1077,7 +1413,8 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
       card_table          what the Battle reported (fp["card_table"]; None before 0.1.42)
       schema              the row layout (SCHEMA)
       obs_delay           {"ticks", "jitter", "opp_lag"}: how far before a play's execution
-                          its row is observed (0 here: rows at the tick it executes), and
+                          its row is observed (0: rows at the tick it executes; E11's
+                          --obs-delay D and --obs-delay-jitter J under `decision`), and
                           opp_lag, how long after a play runs a row's memory shows it
                           (memory_vocab: 0 for legacy rows, else at least BOARD_LAG)
       wait_keep_at_build  the share of wait rows the builder kept; None: no thinning at
@@ -1103,6 +1440,11 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           checkpoint's meta carries): that entry (B buttons, slot base, the
                           ability_state columns), and PRESS_COLUMNS last in extra_columns;
                           "off" (or None) adds nothing
+      decision_rows       with `decision` on (E11, --obs-delay > 0; what decision_rule takes):
+                          DecisionRule.to_json(), DECISION_FIELDS last in extra_columns, and
+                          obs_delay ticks / jitter from the rule (an `obs_delay` or
+                          `obs_delay_jitter` given as well must agree, else ValueError); a
+                          delay of 0 (or None) adds nothing
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -1123,6 +1465,15 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         press_entry = None
     else:
         press_entry = rs_presses.vocab_entry(BUTTONS, HAND_SIZE)
+    drule = None if decision is None else decision_rule(decision)
+    if drule is not None and not drule.on:
+        drule = None
+    if drule is not None:
+        for given, want, what in ((obs_delay, drule.delay, "obs_delay"),
+                                  (obs_delay_jitter, drule.jitter, "obs_delay_jitter")):
+            if int(given) not in (0, want):
+                raise ValueError(f"vocab_record: {what} {given} is not the decision rule's {want}")
+        obs_delay, obs_delay_jitter = drule.delay, drule.jitter
     rec = {
         "n_cards": len(cat) + 2,
         "n_units": ((len(cat) + 2) if live else (len(classes) + 2) if vision
@@ -1152,31 +1503,42 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         rec["trust"] = rule.to_json()
     if press_entry is not None:
         rec["presses"] = press_entry
+    if drule is not None:
+        rec["decision_rows"] = drule.to_json()
     extra = ((list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
              + (list(TRUST_FIELDS) if v2 else [])
-             + (list(PRESS_COLUMNS) if press_entry is not None else []))
+             + (list(PRESS_COLUMNS) if press_entry is not None else [])
+             + (list(DECISION_FIELDS) if drule is not None else []))
     if extra:
         rec["extra_columns"] = extra
     return rec
 
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
-          mem_lag=None, visibility=None, trust=None, presses=None, stats=False):
+          mem_lag=None, visibility=None, trust=None, presses=None, stats=False,
+          decision=None):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` / `visibility` / `trust` / `presses` as --units / --mem-lag /
-    --visibility / --trust (trust_rule) / --presses, kept as UNITS / MEM_LAG / VISIBILITY /
-    TRUST / PRESSES for this process (None: keep the module's); main passes all five to every
-    worker, as it passes `live`. Under presses "on" the shard also has act_press (int16, from
-    each row's "press") and PRESS_FIELDS. Returns (batch_id, rows, skipped by reason); with
-    `stats`, also the shard's trust_stats, which main merges into manifest.json."""
-    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES
+    `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` as --units /
+    --mem-lag / --visibility / --trust (trust_rule) / --presses / --obs-delay (decision_rule),
+    kept as UNITS / MEM_LAG / VISIBILITY / TRUST / PRESSES / DECISION for this process (None:
+    keep the module's); main passes all six to every worker, as it passes `live`. Under presses
+    "on" the shard also has act_press (int16, from each row's "press") and PRESS_FIELDS; with a
+    delay (E11) DECISION_FIELDS. A delay with mem_lag "legacy" is refused (ValueError) before
+    any match. Returns (batch_id, rows, skipped by reason); with `stats`, also the shard's
+    trust_stats, which main merges into manifest.json."""
+    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
     vis = visibility_mode(VISIBILITY if visibility is None else visibility)
     rule = trust_rule(trust)
     press = rs_presses.press_mode(PRESSES if presses is None else presses)
+    drule = decision_rule(decision)
+    if drule.on and lag == MEM_LEGACY:
+        raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
+                         "--mem-lag legacy is the order before E08")
     LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES = live, units, lag, vis, rule, press
+    DECISION = drule
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
@@ -1199,7 +1561,8 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         press_on = PRESSES == rs_presses.PRESS_ON
         fields = (FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
                   + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ())
-                  + (TRUST_FIELDS if TRUST.v2 else ()) + (PRESS_FIELDS if press_on else ()))
+                  + (TRUST_FIELDS if TRUST.v2 else ()) + (PRESS_FIELDS if press_on else ())
+                  + (DECISION_FIELDS if DECISION.on else ()))
         data = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in fields}
         act = np.asarray([r["action"] for r in rows], dtype=np.int16)
         data["act_card"], data["act_x"], data["act_y"] = act[:, 0], act[:, 1], act[:, 2]
@@ -1225,7 +1588,18 @@ def main() -> int:
     ap.add_argument("--units", choices=UNIT_MODES, default=UNITS_TYPES,
                     help="unit tokens: RoyaleSim unit types (default, as before) or the vision "
                          "classes of data/vision/classes.json, plus a unit_form column")
-    add_mem_lag_arg(ap)
+    add_mem_lag_arg(ap, aliases=("--opp-lag",))
+    ap.add_argument("--obs-delay", type=int, default=0, metavar="D",
+                    help="0 (default): each play row at the tick the play ran, as before; D > 0: "
+                         "decision-time rows (E11), each play observed D ticks before it ran "
+                         "(about 24 live: the client's 21-22 plus capture, inference and adb), "
+                         "with own_pending columns and an honest hand_exact")
+    ap.add_argument("--obs-delay-jitter", type=int, default=0, metavar="J",
+                    help="--obs-delay: each play's delay is D plus an integer uniform in [-J, J], "
+                         "seeded by the match tag (default 0; J <= D)")
+    ap.add_argument("--wait-window", type=int, default=WAIT_WINDOW, metavar="W",
+                    help="--obs-delay: no wait row where the side taps in [t, t + W] "
+                         f"(default {WAIT_WINDOW})")
     ap.add_argument("--visibility", choices=VISIBILITY_MODES, default=VIS_LEGACY,
                     help="which units a row shows: 'legacy' (default) every living unit, as "
                          "before; 'public' what the acting player's screen shows (no invisible "
@@ -1252,13 +1626,19 @@ def main() -> int:
         cfg = rs_engine.config_from_args(args).undelayed()
         unit_mode(args.units, args.live_compat)
         rule = trust_rule(TrustRule(args.trust, args.trust_sides, args.trust_hp_margin))
+        decision = decision_rule(DecisionRule(args.obs_delay, args.obs_delay_jitter,
+                                              args.wait_window))
+        if decision.on and args.mem_lag == MEM_LEGACY:
+            raise ValueError("--obs-delay needs the memory dated at execution: --mem-lag / "
+                             "--opp-lag TICKS, not legacy")
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
-    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES
+    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION
     LIVE = args.live_compat
     UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
     PRESSES = args.presses
+    DECISION = decision
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
@@ -1273,6 +1653,7 @@ def main() -> int:
     print(f"trust:  {describe_trust(TRUST)}", flush=True)
     print(f"presses: {rs_presses.describe_presses(PRESSES)}"
           + (f", {BUTTONS} buttons a side" if PRESSES == rs_presses.PRESS_ON else ""), flush=True)
+    print(f"observed: {describe_decision(DECISION)}", flush=True)
     if UNITS == UNITS_VISION:
         print(f"units:  vision classes, {VCT.describe()}", flush=True)
         if VC.unknown:
@@ -1314,7 +1695,7 @@ def main() -> int:
         version=getattr(royalesim, "__version__", "?"),
         classes=VCT if UNITS == UNITS_VISION else None,
         **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST),
-        **press_vocab(PRESSES))),
+        **press_vocab(PRESSES), **decision_vocab(DECISION))),
         encoding="utf-8")
     batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
     total, skipped, totals, shards = 0, {}, {}, []
@@ -1322,7 +1703,7 @@ def main() -> int:
                              initargs=(cfg.to_json(),)) as pool:
         futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
                             mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
-                            presses=PRESSES, stats=True)
+                            presses=PRESSES, stats=True, decision=DECISION.to_json())
                 for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
             bid, rows, sk, st = f.result()
