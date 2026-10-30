@@ -761,7 +761,7 @@ def test_tower_hp_filter_matches_the_authors_filter():
 
 
 def test_tower_tracker_max_from_first_frames_then_filter():
-    tr = H.TowerHpTracker()
+    tr = H.TowerHpTracker(confirm_max_reads=2)                   # the default is 5 now
     k = "enemy_left"
     seq = [(0.0, 3052), (0.5, 3052), (1.0, 2500), (1.25, 2500), (1.75, 2480), (2.0, 3052),
            (2.25, 2000), (2.5, 2000), (3.0, 2000), (3.25, None), (4.5, None), (5.75, None), (6.0, 2000)]
@@ -788,7 +788,7 @@ def test_tower_tracker_prior_max_is_raised_not_lowered():
     assert tr.update({}, 0.0, {k: 0.5})[k] == VT.TowerHp(3052, 3052)     # bars only: a fall must hold
     assert tr.update({}, 0.75, {k: 0.5})[k] == VT.TowerHp(1526, 3052)    # 0.5 of the prior max
     assert tr.update({k: 3300}, 1.0)[k].max == 3052                      # one higher reading: not yet
-    assert tr.update({k: 3300}, 1.25)[k] == VT.TowerHp(1650, 3300)       # confirmed twice: raised
+    assert tr.update({k: 3300}, 1.25)[k] == VT.TowerHp(1526, 3052)       # after damage: a misread, never a max
     low = H.TowerHpTracker(prior_max_hp=H.LEVEL11_TOWER_MAX_HP)
     assert [low.update({k: 2500}, t)[k].max for t in (0.0, 0.25)] == [3052, 3052]
 
