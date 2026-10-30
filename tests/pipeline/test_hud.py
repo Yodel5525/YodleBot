@@ -789,6 +789,7 @@ def test_tower_tracker_prior_max_is_raised_not_lowered():
     assert tr.update({}, 0.75, {k: 0.5})[k] == VT.TowerHp(1526, 3052)    # 0.5 of the prior max
     assert tr.update({k: 3300}, 1.0)[k].max == 3052                      # one higher reading: not yet
     assert tr.update({k: 3300}, 1.25)[k] == VT.TowerHp(1526, 3052)       # after damage: a misread, never a max
+    # (a raise, before damage, to a legal value: test_tower_tracker.py)
     low = H.TowerHpTracker(prior_max_hp=H.LEVEL11_TOWER_MAX_HP)
     assert [low.update({k: 2500}, t)[k].max for t in (0.0, 0.25)] == [3052, 3052]
 
@@ -966,7 +967,8 @@ def full_store() -> TP.TemplateStore:
 
 
 def test_hud_reader_end_to_end():
-    reader = H.HudReader(full_store(), CARD_IDS, regions=regions())
+    # towers_clock_reads=1: the towers count from this first clock reading (the default waits for 3)
+    reader = H.HudReader(full_store(), CARD_IDS, regions=regions(), towers_clock_reads=1)
     hud = reader.read(hud_frame(), 0.0)
     assert isinstance(hud, VT.Hud)
     assert (hud.clock_tick, hud.phase) == (30, REG)

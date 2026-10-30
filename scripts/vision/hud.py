@@ -32,14 +32,17 @@ Elixir (vision-10). The count next to the drop (OCR) and the bar. On the
 Tower HP (vision-09). OCR of the hit points by each tower (TOWER_GLYPH_STYLE:
     the opponent's digits are pinkish white, ours light blue), max HP = the
     level-11 prior (LEVEL11_TOWER_MAX_HP; friendly battles), raised only
-    before the tower is damaged, only to a legal full-tower value
-    (TOWER_HP_BY_LEVEL, RoyaleSim's tower ladder) confirmed by 5 confident
-    readings, or learned the same way without a prior; then the author's
-    TowerHpFilter rules (scripts/tower_hp.py:232-338, ported as TowerHpFilter
-    below): never rise, a fall must hold 0.6 s, a zero 2.5 s and only from
-    <= 0.75. No reading counts before the battle clock runs (the intro covers
-    the digits); digits the bar contradicts are not trusted; 5 confident
-    readings that agree on a higher value undo a value misread too low
+    before the tower is damaged, by 5 confident readings, and only to a legal
+    full-tower value (RoyaleSim's tower ladder: TOWER_HP_BY_LEVEL and the
+    tower troops; for a king, which shows a number only once damaged, the
+    smallest legal value at or above the reading), or learned the same way
+    without a prior; then the author's TowerHpFilter rules
+    (scripts/tower_hp.py:232-338, ported as TowerHpFilter below): never rise,
+    a fall must hold 0.6 s, a zero 2.5 s and only from <= 0.75. No reading
+    counts before the battle clock runs (3 accepted clock readings; the intro
+    covers the digits); digits the bar contradicts are not trusted (the
+    higher of the two counts, and only as a fall); 5 confident readings that
+    agree on a higher value, and with the bar, undo a value misread too low
     (TowerHpTracker says why a real tower never does that). Without digit
     templates the princess bars' colour fill (tower_hp.py's masks and measure;
     checked on the owner's frames) gives the fraction. A king shows no number
@@ -106,7 +109,7 @@ from typing import Any, Iterable, Mapping, Sequence  # noqa: E402
 import numpy as np  # noqa: E402
 
 from .geometry import check_frame_size  # noqa: E402
-from .hpbars import ally_mask, enemy_mask, measure_tower_bar  # noqa: E402
+from .hpbars import FULL_SNAP, ally_mask, enemy_mask, measure_tower_bar  # noqa: E402
 from .templates import (KIND_CLOCK_LABEL, KIND_EMPTY, KIND_HAND, KIND_NEXT, LABEL_PATCH,  # noqa: E402
                         MIN_MARGIN, MIN_SCORE, PATCH, VARIANT_FORM, CardMatcher, DigitOCR,
                         DigitRead, GlyphStyle, TemplateStore, crop_std)
@@ -193,10 +196,35 @@ TOWER_HP_BY_LEVEL: dict[int, tuple[int, int]] = {
     11: (3052, 4824), 12: (3346, 5304), 13: (3668, 5832), 14: (4032, 6408), 15: (4424, 7032),
     16: (4858, 7728),
 }
-#: TOWER_KEYS -> the hit points a full tower of that kind has at some level: the only
-#: values TowerHpTracker raises a maximum to (a misread such as 3667 is none of them).
+
+
+def _tower_ladder_pct(level: int, rate: int) -> int:
+    """state.rs tower_multiplier_percent: 100 at level 1, then floor(p * (100 + rate) / 100) a
+    level, `rate` up to cap_level 9 and 10 above (the rule TOWER_HP_BY_LEVEL follows)."""
+    p = 100
+    for lv in range(2, int(level) + 1):
+        p = p * (100 + (rate if lv <= 9 else 10)) // 100
+    return p
+
+
+#: The crown tower troops (RoyaleSim card.rs TOWER_TROOPS) a side may field in place of its
+#: princess towers, and their hitpoints base on the princess's tower ladder (1400 for the
+#: Princess): tests/tower_troops.rs, measured on client 16.402 (48 of 1,084 live tower sides
+#: field one). Their hit points are floor(base * pct / 100), as CardDb::scale scales the
+#: Princess's 1400 (tower_troops.rs checks hp == princess_hp * base / 1400 at level 11).
+TOWER_TROOP_HP_BASE: dict[str, int] = {"DaggerDuchess": 1270, "Cannoneer": 1200, "ChefTower": 1240}
+#: level -> {tower troop: full hit points}; level 11: Duchess 2768, Cannoneer 2616, Chef 2703.
+TOWER_TROOP_HP_BY_LEVEL: dict[int, dict[str, int]] = {
+    lv: {name: base * _tower_ladder_pct(lv, 8) // 100 for name, base in TOWER_TROOP_HP_BASE.items()}
+    for lv in TOWER_HP_BY_LEVEL}
+#: TOWER_KEYS -> the hit points a full tower of that kind has at some level (a princess key: the
+#: Princess or a tower troop; a king key: the King): the only values TowerHpTracker raises a
+#: princess tower's maximum to (a misread such as 3667 is none of them), and the ladder a king's
+#: maximum is inferred from (TowerHpTracker).
 LEGAL_TOWER_MAX_HP: dict[str, frozenset[int]] = {
-    k: frozenset(hp[1] if k.endswith("king") else hp[0] for hp in TOWER_HP_BY_LEVEL.values())
+    k: frozenset(hp[1] for hp in TOWER_HP_BY_LEVEL.values()) if k.endswith("king") else
+    frozenset([hp[0] for hp in TOWER_HP_BY_LEVEL.values()]
+              + [v for row in TOWER_TROOP_HP_BY_LEVEL.values() for v in row.values()])
     for k in TOWER_KEYS}
 TOWER_DIGIT_REGIONS = {k: f"tower_{k}" for k in TOWER_KEYS}
 TOWER_BAR_REGIONS = {k: f"bar_{k}" for k in TOWER_KEYS if not k.endswith("king")}
@@ -912,54 +940,77 @@ class TowerHpTracker:
     update(hp_reads, now, bar_fracs=None, *, hp_conf=None, clock_running=None)
     once per in-battle frame. hp_reads: key -> the HP digits read (None: no
     number); hp_conf: key -> that reading's DigitRead.conf (missing: 1.0);
-    bar_fracs: key -> the princess bar's fraction (measure_tower_bar's 0.0,
-    no bar seen, only ever stands in for missing digits).
+    bar_fracs: key -> the princess bar's fraction from measure_tower_bar (0.0:
+    no bar seen; 1.0: anything from FULL_SNAP 0.95 up, so a bar of 1.0 counts
+    as [0.95, 1.0] below; a missing key or None: the bar is not read).
 
     The battle clock. `clock_running` says whether the battle clock runs on
-    this frame; HudReader passes True from its first confident clock reading in
-    regulation or overtime. It latches: once True, every later frame counts
-    until reset(). Before that no reading counts (the battle intro covers the
-    digits: the owner's 2026-10-29 friendly read a full 3052 as 855 and then
-    577, kept for 2.5 minutes) and every tower is TowerHp(max, max), full at
-    its prior or known max (TowerHp(None, None) without one). None, the
-    default, means the caller does not follow the clock: every reading counts
-    from the first frame, as before.
+    this frame; HudReader passes True once its clock readings are confirmed
+    (HudReader, towers_clock_reads). It latches: once True, every later frame
+    counts until reset(). Before that no reading counts (the battle intro
+    covers the digits: the owner's 2026-10-29 friendly read a full 3052 as 855
+    and then 577, kept for 2.5 minutes) and every tower is TowerHp(max, max),
+    full at its prior or known max (TowerHp(None, None) without one). None,
+    the default, means the caller does not follow the clock: every reading
+    counts from the first frame, as before.
 
     max HP: `max_hp[key]` when given (fixed), else `prior_max_hp[key]` (e.g.
-    LEVEL11_TOWER_MAX_HP) or nothing. A digit reading raises it (never lowers
-    it) only while the tower is undamaged (its filtered fraction is still 1.0,
-    or it was never read), only to a value in `legal_max_hp[key]`
-    (LEGAL_TOWER_MAX_HP: what a full tower has at some level; None or a missing
-    key: any value), and only after `confirm_max_reads` readings of that value
-    with conf >= `min_digit_conf` that the bar does not contradict, with no
-    other such reading between them.
+    LEVEL11_TOWER_MAX_HP) or nothing. Digit readings raise it (never lower it)
+    only while the tower is undamaged (its filtered fraction is still 1.0, or
+    it was never read), after `confirm_max_reads` consecutive readings above
+    the max, with conf >= `min_digit_conf`, that the bar does not contradict
+    and that imply the same new max (any other such reading breaks the run):
+    * a princess tower shows its number from the start, full: the new max is
+      the reading itself, and only when it is in `legal_max_hp[key]`
+      (LEGAL_TOWER_MAX_HP: what a full Princess or tower troop has at some
+      level; None or a missing key: any value);
+    * a king shows its number only once it is damaged, so its readings are
+      below its max: the new max is the smallest legal king value at or above
+      the reading (a level-12 king read at 5040 is 5304, against the 4824
+      prior; without a prior, a king first read at 4500 is 4824, and one hit
+      below the next lower level's value before it is read is taken a level
+      low).
     No card heals a tower, so after damage a reading above the max is a misread,
     never a new max (the owner's friendly read 1667 as 3667 on two frames in a
     row, which made 3667 the max and 1667 a fraction 0.45 instead of 0.55).
     Without a prior the first value read that way sets the max: towers are
-    full at the start.
+    full at the start. The confidence floor 0.8: the tower templates come from
+    harvest clusters joined at NCC >= 0.9 (harvest.DIGIT_MIN_NCC), so a clean
+    reading scores about 0.9 against them; HudReport.summary()'s tower_reads
+    shows the confidences a recording really has.
 
-    Per frame a tower's raw fraction is digits / max when the digits are
-    trusted, else the bar fraction, else nothing when digits were read but not
-    trusted (something is visible, so it is no occlusion), else 0.0 (nothing
-    visible: TowerHpFilter's occlusion case) once the tower has been read at
-    least once. Digits are not trusted on a frame when they are above the max,
-    or when min(1, digits / max) is more than `bar_disagree` from a bar seen on
-    that frame (a misread digit moves the fraction by 1000 / 3052 = 0.33).
+    Per frame a tower's raw fraction for TowerHpFilter is
+    * digits / max when the digits are trusted;
+    * for digits not trusted, which are digits above the max and digits more
+      than `bar_disagree` from a bar seen on that frame (a misread digit moves
+      the fraction by 1000 / 3052 = 0.33), the higher of min(1, digits / max)
+      and the bar, and only when that is a fall below the filtered value (or
+      the tower's first value). So neither source makes a tower lower than the
+      other says: a bar cut short or tinted never fakes a fall over correct
+      digits, and 1667 misread as 667 over a bar at 0.546 counts as 0.546. A
+      frame on which one source says the tower fell and the other says it did
+      not neither confirms a pending fall nor breaks it;
+    * with no digits, the bar fraction (0.0 when no bar was seen);
+    * with nothing at all, 0.0 (TowerHpFilter's occlusion case) once the tower
+      has been read at least once.
 
     A value misread too low is recovered: `recover_reads` consecutive trusted
     digit readings with conf >= `min_digit_conf`, each more than the filter's
     tolerance above the filtered HP and <= max, within `recover_spread` * max
-    of each other, and within `recover_bar_tol` of the bar when one is seen,
-    reset the filtered HP to the lowest of them (TowerHpFilter.force; the run
-    keeps its newest readings that agree). Any other digit reading breaks the
-    run; a frame without digits leaves it. A real tower, read correctly, never
-    triggers it: its HP never rises, and TowerHpFilter accepts a fall only at
-    the (upper) median of readings taken while the fall held, which is at or
-    above the HP the tower has by then; so a correct reading is never above
-    the filtered HP, and readings above it mean the filtered value is the
-    misread (or that `recover_reads` misreads in a row agree with each other,
-    with the bar and with the max: the friendly's worst run was 2). A
+    of each other and, when the tower's bar is read, with the bar seen and
+    within `recover_bar_tol` of it, reset the filtered HP to the lowest of them
+    (TowerHpFilter.force; the run keeps its newest readings that agree). The
+    bar tolerance 0.05 (150 HP) refuses an upward misread of 200 HP over a
+    correct bar; the owner's bars read 0.683 / 0.427 for 0.688 / 0.431. Any
+    other digit reading breaks the run; a frame without digits leaves it. A
+    real tower, read correctly, never triggers it: its HP never rises, and
+    TowerHpFilter accepts a fall only at the (upper) median of readings taken
+    while the fall held, which is at or above the HP the tower has by then; so
+    a correct reading is never above the filtered HP, and readings above it
+    mean the filtered value is the misread (or that `recover_reads` misreads in
+    a row agree with each other, with the bar and with the max: the friendly's
+    worst run was 2; a king has no bar to check them against). Rubble shows no
+    bar, so rubble read as digits never raises a dying princess tower, and a
     destroyed tower (0) stays destroyed. `recoveries` counts the resets since
     reset().
 
@@ -973,7 +1024,7 @@ class TowerHpTracker:
                  kings_full_until_read: bool = True,
                  legal_max_hp: Mapping[str, Iterable[int]] | None = LEGAL_TOWER_MAX_HP,
                  min_digit_conf: float = 0.8, bar_disagree: float = 0.25, recover_reads: int = 5,
-                 recover_spread: float = 0.05, recover_bar_tol: float = 0.1):
+                 recover_spread: float = 0.05, recover_bar_tol: float = 0.05):
         self.known_max = {k: int(v) for k, v in (max_hp or {}).items() if k in TOWER_KEYS and v}
         self.prior_max = {k: int(v) for k, v in (prior_max_hp or {}).items() if k in TOWER_KEYS and v}
         self.confirm_max_reads = max(1, int(confirm_max_reads))
@@ -997,14 +1048,31 @@ class TowerHpTracker:
         self.started = False
         self.recoveries = 0
 
-    def _legal(self, key: str, hp: int) -> bool:
-        if self.legal_max is None or key not in self.legal_max:
-            return True
-        return hp in self.legal_max[key]
+    def _implied_max(self, key: str, hp: int) -> int | None:
+        """The max a confident reading above the current one implies; None: a misread."""
+        legal = None if self.legal_max is None else self.legal_max.get(key)
+        if legal is None:
+            return hp
+        if key.endswith("king"):
+            return min((v for v in legal if v >= hp), default=None)
+        return hp if hp in legal else None
 
     def _undamaged(self, key: str) -> bool:
         acc = self.frac[key]
         return acc is None or acc >= 1.0
+
+    def _tolerance(self) -> float:
+        return float(getattr(self.filter, "tolerance", 0.02))
+
+    @staticmethod
+    def _bar_gap(frac: float, bar: float) -> float:
+        """How far `frac` lies from a bar seen; a bar of 1.0 stands for [FULL_SNAP, 1.0]."""
+        if bar >= 1.0:
+            return max(0.0, FULL_SNAP - frac, frac - 1.0)
+        return abs(frac - bar)
+
+    def _contradicted(self, hp: int, mx: int | None, bar: float | None) -> bool:
+        return bool(mx) and bar is not None and self._bar_gap(min(1.0, hp / float(mx)), bar) > self.bar_disagree
 
     def _learn_max(self, key: str, hp: int) -> None:
         if key in self.known_max:
@@ -1013,23 +1081,33 @@ class TowerHpTracker:
         if mx is not None and hp <= mx:
             self._cand.pop(key, None)
             return
-        if not self._undamaged(key) or not self._legal(key, hp):
+        new = self._implied_max(key, hp) if self._undamaged(key) else None
+        if new is None:
             self._cand.pop(key, None)                  # a misread: it also breaks a run of legal ones
             return
         c = self._cand.get(key)
-        n = c[1] + 1 if c is not None and c[0] == hp else 1
-        self._cand[key] = (hp, n)
+        n = c[1] + 1 if c is not None and c[0] == new else 1
+        self._cand[key] = (new, n)
         if n >= self.confirm_max_reads:
-            self.max[key] = hp
+            self.max[key] = new
             self._cand.pop(key, None)
             self._recover.pop(key, None)
 
-    def _recover_low(self, key: str, hp: int, mx: int, bar: float | None) -> None:
+    def _higher(self, key: str, digits: float, bar: float | None) -> float | None:
+        """Untrusted digits: the higher of the digits and the bar, when that is a fall."""
+        v = digits if bar is None else max(digits, bar)
+        acc = self.frac[key]
+        if acc is None or v < acc - self._tolerance():
+            return v
+        return None
+
+    def _recover_low(self, key: str, hp: int, mx: int, bar_raw: float | None) -> None:
         acc = self.frac[key]
         force = getattr(self.filter, "force", None)
-        tol = float(getattr(self.filter, "tolerance", 0.02)) * mx
-        if (acc is None or acc <= TowerHpFilter.ZERO or force is None or hp <= acc * mx + tol
-                or (bar is not None and abs(hp / mx - bar) > self.recover_bar_tol)):
+        bar_ok = bar_raw is None or (bar_raw > TowerHpFilter.ZERO
+                                     and self._bar_gap(hp / float(mx), bar_raw) <= self.recover_bar_tol)
+        if (acc is None or acc <= TowerHpFilter.ZERO or force is None
+                or hp <= acc * mx + self._tolerance() * mx or not bar_ok):
             self._recover.pop(key, None)
             return
         run = self._recover.setdefault(key, [])
@@ -1065,27 +1143,25 @@ class TowerHpTracker:
         conf = 1.0 if conf is None else float(conf)
         bar_raw = None if bar_raw is None else float(bar_raw)
         bar = bar_raw if bar_raw is not None and bar_raw > TowerHpFilter.ZERO else None   # a bar seen
-        mx = self.max.get(key)
-        disagree = (hp is not None and bool(mx) and bar is not None
-                    and abs(min(1.0, hp / float(mx)) - bar) > self.bar_disagree)
-        if hp is not None and conf >= self.min_digit_conf and not disagree:
+        if hp is not None and conf >= self.min_digit_conf and not self._contradicted(hp, self.max.get(key), bar):
             self._learn_max(key, hp)
-            mx = self.max.get(key)
-        trusted = hp is not None and not disagree and not (mx and hp > mx)
+        mx = self.max.get(key)
+        untrusted = hp is not None and bool(mx) and (hp > mx or self._contradicted(hp, mx, bar))
+        trusted = hp is not None and not untrusted
         if trusted and mx:
-            raw = min(1.0, hp / float(mx))
+            raw = hp / float(mx)
+        elif untrusted:
+            raw = self._higher(key, min(1.0, hp / float(mx)), bar)
         elif bar_raw is not None and (hp is None or bar is not None):
             raw = bar_raw
-        elif hp is not None:
-            raw = None
-        elif self.frac[key] is not None:
+        elif hp is None and self.frac[key] is not None:
             raw = 0.0
         else:
             raw = None
         if raw is not None:
             self.frac[key] = self.filter.update(key, raw, now)
         if trusted and mx and conf >= self.min_digit_conf:
-            self._recover_low(key, hp, mx, bar)
+            self._recover_low(key, hp, mx, bar_raw)
         elif hp is not None:
             self._recover.pop(key, None)
         acc = self.frac[key]
@@ -1449,10 +1525,15 @@ class HudReader:
     battles) is where they start, so the bar fractions give hit points before
     any digit template exists; None learns them from the digits alone.
     towers_wait_for_clock (default True): no tower reading counts before the
-    first confident clock reading (an accepted ClockFilter reading, in
-    regulation or overtime) of the battle; until then the towers are full at
-    their prior maxima (TowerHpTracker, clock_running). Without clock templates
-    the towers cannot wait and count from the first frame.
+    battle clock runs, which is `towers_clock_reads` (3) accepted clock
+    readings in regulation or overtime with no rejected one between them
+    (ClockFilter accepts the first reading of a battle whatever it shows, so a
+    single stray parse on an intro frame does not count; the next ones must
+    fit it); until then the towers are full at their prior maxima
+    (TowerHpTracker, clock_running; report.towers_live says which frames count,
+    and tower readings that do not count still show in report.tower_digits).
+    Without clock templates the towers cannot wait and count from the first
+    frame.
     """
 
     def __init__(self, store: TemplateStore | None = None, card_ids: Mapping[str, int] | None = None, *,
@@ -1460,7 +1541,7 @@ class HudReader:
                  tower_max_hp: Mapping[str, int] | None = None, clock_offset_ticks: int = 0,
                  glyph_styles: Mapping[str, GlyphStyle] | None = None, use_tower_bars: bool = True,
                  tower_prior_max_hp: Mapping[str, int] | None = LEVEL11_TOWER_MAX_HP,
-                 towers_wait_for_clock: bool = True):
+                 towers_wait_for_clock: bool = True, towers_clock_reads: int = 3):
         self.store = store if store is not None else TemplateStore()
         self.regions = regions if regions is not None else load_regions()
         ids = {str(k): int(v) for k, v in (card_ids or {}).items()}
@@ -1475,20 +1556,37 @@ class HudReader:
         self.elixir = ElixirFilter()
         self.towers = TowerHpTracker(tower_max_hp, prior_max_hp=tower_prior_max_hp)
         self.towers_wait_for_clock = bool(towers_wait_for_clock)
+        self.towers_clock_reads = max(1, int(towers_clock_reads))
+        self._clock_reads = 0
         self.hand = HandTracker(deck)
         self.report = HudReport()
 
     def clock_running(self, state: ClockState | None) -> bool | None:
-        """TowerHpTracker's clock_running for this frame's clock state: True on an
-        accepted reading (ClockState source read / resync, conf 0.8 or 1.0) in
-        regulation or overtime, else False; None when the towers do not wait
-        (towers_wait_for_clock off, or no clock templates)."""
+        """Whether this frame's clock state is an accepted reading (ClockState source
+        read / resync, conf 0.8 or 1.0) in regulation or overtime; None when the
+        towers do not wait (towers_wait_for_clock off, or no clock templates).
+        One frame only: towers_clock_running confirms it over frames."""
         if not self.towers_wait_for_clock or not self.clock_reader.ready:
             return None
         return bool(state is not None and state.tick is not None and state.source in ("read", "resync")
                     and state.phase in (PHASE_REGULATION, PHASE_OVERTIME))
 
+    def towers_clock_running(self, state: ClockState | None) -> bool | None:
+        """TowerHpTracker's clock_running for this frame (call once a frame): True
+        from the `towers_clock_reads`-th accepted clock reading (clock_running)
+        since the battle's last rejected one (a frame without a reading neither
+        counts nor resets), else False; None when the towers do not wait."""
+        ok = self.clock_running(state)
+        if ok is None:
+            return None
+        if state is not None and state.source == "rejected":
+            self._clock_reads = 0
+        elif ok:
+            self._clock_reads += 1
+        return self._clock_reads >= self.towers_clock_reads
+
     def reset(self) -> None:
+        self._clock_reads = 0
         self.clock.reset()
         self.elixir.reset()
         self.towers.reset()
@@ -1533,7 +1631,7 @@ class HudReader:
         def towers():
             rep.tower_digits = self.tower_reader.read_digits(img)
             rep.tower_bars = self.tower_reader.read_bars(img)
-            running = self.clock_running(rep.clock)
+            running = self.towers_clock_running(rep.clock)
             hud.towers = self.towers.update({k: r.hp for k, r in rep.tower_digits.items()}, t, rep.tower_bars,
                                             hp_conf={k: r.conf for k, r in rep.tower_digits.items()},
                                             clock_running=running)
@@ -1558,7 +1656,8 @@ __all__ = [
     "BUILTIN_REGIONS_PX", "ClockFilter", "ClockRead", "ClockReader", "ClockState", "ElixirFilter",
     "ElixirRead", "ElixirReader", "ElixirState", "HandReader", "HandReading", "HandState", "HandTracker",
     "HudReader", "HudRegions", "HudReport", "LEGAL_TOWER_MAX_HP", "LEVEL11_TOWER_MAX_HP", "Rect", "SlotRead",
-    "TOWER_HP_BY_LEVEL", "TowerHpFilter", "TowerHpTracker", "TowerRead", "TowerReader", "bar_fraction",
+    "TOWER_HP_BY_LEVEL", "TOWER_TROOP_HP_BASE", "TOWER_TROOP_HP_BY_LEVEL", "TowerHpFilter", "TowerHpTracker",
+    "TowerRead", "TowerReader", "bar_fraction",
     "clock_tick", "elixir_charge_mask", "elixir_fill_mask", "elixir_lit_mask", "elixir_track_mask",
     "load_regions", "parse_clock_text", "regen_ms",
 ]
