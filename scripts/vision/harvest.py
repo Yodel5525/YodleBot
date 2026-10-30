@@ -17,15 +17,21 @@ clock-sweep
     pixels at the best shift of up to 1 px (glyph_change). Runs of images that
     show one value are segments. A run that interrupts one value (the same
     value before and after it, within MAX_INTERRUPT_S) is dropped, and one value
-    on both sides of a gap of unreadable images is one segment.
+    on both sides of a gap of unreadable images is one segment. A run shorter
+    than TRANSIENT_S between two other values, with no gap on either side, is
+    a glitch at the change (an image caught mid-update), not a second of its
+    own: it is dropped and that change is counted from the times.
     From the anchor image, whose clock you read, segments are labelled by
-    counting: a change between two consecutive images is one second; across a
-    gap, the count is the one whole number of seconds the frames.jsonl
-    timestamps allow (+-PERIOD_TOL), else the count is lost there and the sweep
-    stops on that side. A count check catches a skipped or doubled second: the
-    last digit of a segment must look more like the segment 10 s away than
-    like those 9 and 11 s away; at the first failure on a side, that segment,
-    the unchecked ones before it and everything after it are dropped.
+    counting: a change between two consecutive images less than a second
+    apart is one second; across a gap (unreadable images, or a capture stall:
+    the recorder writes only new frames, so a frozen or covered window leaves
+    a gap in the frames.jsonl times), the count is the one whole number of
+    seconds the timestamps allow (+-PERIOD_TOL), else the count is lost there
+    and the sweep stops on that side. A count check catches a skipped or doubled
+    second: the last digit of a segment must look more like the segment 10 s
+    away than like those 9 and 11 s away, and be the same glyph (glyph_change
+    under SAME_MAX); at the first failure on a side, that segment, the
+    unchecked ones before it and everything after it are dropped.
     Regulation runs from 3:00 down to 0:00 and the sweep stops at its end,
     unless --until-overtime is given with a second anchor on an overtime frame
     (overtime runs from 2:00 down to 0:00). Several regulation anchors may be
@@ -89,12 +95,20 @@ Box = tuple[int, int, int, int]
 
 DEFAULT_FPS = 57.0                 # the owner's capture rate (frames.jsonl times are used when present)
 #: glyph_change at or above which two images show different values. A digit
-#: that changes moves >= 0.7 on the owner's clock and >= 0.125 for
+#: that changes moves >= 0.6 on the owner's clock and >= 0.125 for
 #: seven-segment digits (8 vs 9); an unchanged glyph moves 0.0 between
-#: images (static UI) and <= 0.1 when a neighbour's width shifts the text.
+#: images of one value (static UI) and up to 0.12 when a neighbour's width
+#: shifts the text, which happens only when that neighbour changes too.
 CHANGE_FRAC = 0.1
 MAX_INTERRUPT_S = 3.0              # a run shorter than this between two runs of one value is dropped
+#: A run spanning less than this between two other values (no gap either
+#: side) is a glitch at the change, not a value: a real one spans ~11 images.
+TRANSIENT_S = 0.3
 PERIOD_TOL = 0.1                   # one shown value lasts 1 s +- 10 % (counting across a gap)
+#: The count check's "same glyph" bound for the last digit 10 s away. Owner's
+#: clock: the same glyph after the text re-centres differs <= 0.12, two
+#: different digits >= 0.6.
+SAME_MAX = 0.25
 MIN_FRAMES = 3                     # images a segment needs to give a template
 #: Median R - G of the clock box's pixels outside the glyphs: the overtime box
 #: is red (background +99 on the owner's frames), the regulation one dark (-33).
@@ -428,10 +442,11 @@ class ClockSegment:
 
 
 def clock_segments(times: Sequence[float], obs: Sequence[ClockObs | None], *, change: float = CHANGE_FRAC,
-                   max_interrupt_s: float = MAX_INTERRUPT_S) -> tuple[list[ClockSegment], int]:
+                   max_interrupt_s: float = MAX_INTERRUPT_S,
+                   transient_s: float = TRANSIENT_S) -> tuple[list[ClockSegment], int]:
     """Images -> segments of one value (see the module doc). `obs[k]` is image
     k's ClockObs or None (unreadable, no glyphs). Returns the segments and the
-    number of images dropped as interruptions."""
+    number of images dropped as interruptions or glitches at a change."""
     segs: list[ClockSegment] = []
     cur: ClockSegment | None = None
     for k, ob in enumerate(obs):
@@ -468,6 +483,19 @@ def clock_segments(times: Sequence[float], obs: Sequence[ClockObs | None], *, ch
                     merged = True
                     continue
             j += 1
+    # Glitches at a change: short runs right after one value and right before
+    # another (no gap). Counting them would add a second per glitch; without
+    # them the change is counted from the times (the next run is not linked).
+    j = 1
+    while j < len(segs):
+        e = j
+        while e < len(segs) and segs[e].linked and segs[e].t1 - segs[e].t0 < transient_s:
+            e += 1
+        if e > j and e < len(segs) and segs[e].linked:
+            dropped += sum(len(s.frames) for s in segs[j:e])
+            segs[e].linked = False
+            del segs[j:e]
+        j += 1
     return segs, dropped
 
 
@@ -486,12 +514,14 @@ def clock_text(seconds: int, n_glyphs: int) -> str | None:
 
 
 def _start_bounds(seg: ClockSegment, before: ClockSegment | None, period: float, tol: float) -> tuple[float, float]:
-    """(earliest, latest) time the value `seg` shows can have appeared."""
+    """(earliest, latest) time the value `seg` shows can have appeared: after
+    the image before it (or the previous segment's last image), and at most
+    one value's length before its own last image."""
     hi = seg.t0
+    lo = seg.t1 - period * (1.0 + tol)
     if seg.linked and seg.t_prev is not None:
-        return min(seg.t_prev, hi), hi
-    lo = min(hi, seg.t1 - period * (1.0 + tol))
-    if before is not None:
+        lo = max(lo, seg.t_prev)
+    elif before is not None:
         lo = max(lo, before.t1)
     return min(lo, hi), hi
 
@@ -499,10 +529,12 @@ def _start_bounds(seg: ClockSegment, before: ClockSegment | None, period: float,
 def seconds_between(segs: Sequence[ClockSegment], j: int, period: float = 1.0,
                     tol: float = PERIOD_TOL) -> int | None:
     """Seconds from segment j-1's value to segment j's: 1 for a change between
-    two consecutive images; across a gap, the one whole number the start
-    times allow at 1 s +- tol per value; None when none or several fit."""
+    two consecutive images less than a value's length apart (two changes
+    cannot fit between them); across a gap or a capture stall, the one whole
+    number the start times allow at 1 s +- tol per value; None when none or
+    several fit."""
     a, b = segs[j - 1], segs[j]
-    if b.linked:
+    if b.linked and b.t_prev is not None and b.t0 - b.t_prev < period * (1.0 - tol):
         return 1
     a_lo, a_hi = _start_bounds(a, segs[j - 2] if j >= 2 else None, period, tol)
     b_lo, b_hi = _start_bounds(b, a, period, tol)
@@ -528,7 +560,12 @@ class AnchorRun:
     dropped: list[tuple[int, str]] = field(default_factory=list)
 
 
-def _walk(segs: Sequence[ClockSegment], run: AnchorRun, top: int, direction: int) -> None:
+def _image_name(names: Sequence[str] | None, k: int) -> str:
+    return names[k] if names is not None and 0 <= k < len(names) else f"image #{k}"
+
+
+def _walk(segs: Sequence[ClockSegment], run: AnchorRun, top: int, direction: int,
+          names: Sequence[str] | None = None) -> None:
     red = segs[run.a].ref.red
     sec, j = run.seconds, run.a
     while True:
@@ -543,7 +580,8 @@ def _walk(segs: Sequence[ClockSegment], run: AnchorRun, top: int, direction: int
         if n is None:
             lo, hi = segs[min(j, k)], segs[max(j, k)]
             run.stops[direction] = (f"lost the count across {hi.t0 - lo.t1:.2f} s without a readable clock "
-                                    f"(after the image at {lo.t1:.2f} s); add an --anchor beyond it")
+                                    f"(between {_image_name(names, lo.frames[-1])} and "
+                                    f"{_image_name(names, hi.frames[0])}); add an --anchor beyond it")
             return
         sec = sec - n if direction > 0 else sec + n
         if sec < 0:
@@ -557,8 +595,10 @@ def _walk(segs: Sequence[ClockSegment], run: AnchorRun, top: int, direction: int
 
 
 def _ones_check(segs: Sequence[ClockSegment], labels: Mapping[int, int], k: int, direction: int) -> bool | None:
-    """Does segment k's last digit look most like the segment 10 s nearer the
-    anchor (vs 9 and 11 s)? None when one of the three is not labelled."""
+    """Is segment k's last digit the same glyph (glyph_change under SAME_MAX)
+    as the last digit of the segment 10 s nearer the anchor, and more like it
+    than like those of the segments 9 and 11 s away? None when one of the
+    three is not labelled."""
     by_label = {v: kk for kk, v in labels.items()}
     sec = labels[k]
     refs = []
@@ -569,10 +609,10 @@ def _ones_check(segs: Sequence[ClockSegment], labels: Mapping[int, int], k: int,
         refs.append(segs[kk].ref.glyphs[-1])
     g = segs[k].ref.glyphs[-1]
     r10, r9, r11 = (glyph_change(g, r) for r in refs)
-    return r10 <= min(r9, r11)
+    return r10 <= min(r9, r11) and r10 < SAME_MAX
 
 
-def _verify(segs: Sequence[ClockSegment], run: AnchorRun) -> None:
+def _verify(segs: Sequence[ClockSegment], run: AnchorRun, names: Sequence[str] | None = None) -> None:
     """The count check, outward from the anchor on both sides in turn."""
     seqs = {+1: sorted(k for k in run.labels if k > run.a),
             -1: sorted((k for k in run.labels if k < run.a), reverse=True)}
@@ -593,8 +633,8 @@ def _verify(segs: Sequence[ClockSegment], run: AnchorRun) -> None:
                 run.checked.add(k)
             else:
                 shown = clock_text(run.labels[k], segs[k].n_glyphs) or _mmss(run.labels[k])
-                why = (f"count check failed at {shown}: its last digit is unlike the one 10 s "
-                       f"{'earlier' if d > 0 else 'later'}")
+                why = (f"count check failed at {shown} ({_image_name(names, segs[k].frames[0])}): its last "
+                       f"digit is unlike the one 10 s {'earlier' if d > 0 else 'later'}")
                 for kk in pending[d] + seqs[d][pos[d] - 1:]:
                     run.dropped.append((kk, why))
                     run.labels.pop(kk, None)
@@ -639,6 +679,7 @@ def clock_sweep(rec: Recording, regions: HudRegions, store: TemplateStore,
     unreadable: set[int] = set()
     obs: list[ClockObs | None] = []
     times = [img.t for img in rec.images]
+    names = [img.path.name for img in rec.images]
     for n, img in enumerate(rec.images):
         if n and n % 1000 == 0:
             log(f"   {n}/{len(rec.images)} images")
@@ -658,7 +699,8 @@ def clock_sweep(rec: Recording, regions: HudRegions, store: TemplateStore,
     log(f"clock-sweep {rec.name}: {len(rec.images)} images, {len(rec.images) - problems.count - res.no_clock} "
         f"with a clock, {res.no_clock} without; {len(segs)} segments of one value"
         + (f" (median {float(np.median(durs)):.2f} s)" if durs else "")
-        + (f"; {res.interruptions} images dropped as passing interruptions" if res.interruptions else ""))
+        + (f"; {res.interruptions} images dropped as passing interruptions or glitches at a change"
+           if res.interruptions else ""))
     if problems.count:
         log("   " + problems.line())
 
@@ -686,7 +728,8 @@ def clock_sweep(rec: Recording, regions: HudRegions, store: TemplateStore,
         a = seg_of.get(k)
         if a is None:
             why = ("it is unreadable or not 9:16" if k in unreadable else
-                   "its clock box shows no digits" if obs[k] is None else "it shows a passing interruption")
+                   "its clock box shows no digits" if obs[k] is None else
+                   "it shows a passing interruption or a glitch at a change")
             log(f"ERROR: anchor {name} cannot be used: {why}; pick another frame")
             return res
         seg = segs[a]
@@ -707,9 +750,9 @@ def clock_sweep(rec: Recording, regions: HudRegions, store: TemplateStore,
                 log(f"note: anchor {name} is not an overtime frame (no red clock box); skipped")
             continue
         run = AnchorRun(str(ref), k, a, sec, phase, {a: sec})
-        _walk(segs, run, top, +1)
-        _walk(segs, run, top, -1)
-        _verify(segs, run)
+        _walk(segs, run, top, +1, names)
+        _walk(segs, run, top, -1, names)
+        _verify(segs, run, names)
         res.runs.append(run)
     if not res.runs:
         log("ERROR: no usable anchor")
@@ -762,7 +805,6 @@ def _combine(segs: Sequence[ClockSegment], runs: Sequence[AnchorRun]) -> list[tu
     final: dict[int, tuple[int, str]] = {}
     conflicts: set[int] = set()
     for run in runs:
-        skipped += run.dropped
         for j, sec in run.labels.items():
             if j in final and final[j] != (sec, run.phase):
                 conflicts.add(j)
@@ -770,6 +812,10 @@ def _combine(segs: Sequence[ClockSegment], runs: Sequence[AnchorRun]) -> list[tu
     for j in sorted(conflicts):
         del final[j]
         skipped.append((j, "the anchors disagree on it"))
+    for run in runs:                    # dropped by one anchor's count check, and labelled by no other
+        for j, why in run.dropped:
+            if j not in final and all(j != s for s, _ in skipped):
+                skipped.append((j, why))
     for j, (sec, phase) in final.items():
         seg = segs[j]
         seg.label, seg.phase = sec, phase

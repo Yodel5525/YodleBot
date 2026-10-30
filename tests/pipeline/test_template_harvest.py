@@ -241,6 +241,25 @@ def test_seconds_between_counts_changes_and_gaps():
     assert HV.seconds_between([a, _seg(3.2, 3.3, 3.9, False)], 1) == 3
     # a short segment after a gap: 1.85..3.0 s fits both 2 and 3 -> the count is lost
     assert HV.seconds_between([a, _seg(2.9, 3.0, 3.05, False)], 1) is None
+    # consecutive images 2.15 s apart (a capture stall): not one change but the times' count,
+    # the value appeared in [3.9 - 1.1, 3.05] -> 2.7..3.05 s after a's -> 3
+    assert HV.seconds_between([a, _seg(0.9, 3.05, 3.9, True)], 1) == 3
+
+
+def _ones_seg(ch: str) -> HV.ClockSegment:
+    g = tight(seg_glyph(ch))
+    return HV.ClockSegment([0], HV.ClockObs(((0, 0, g.shape[1], g.shape[0]),), (g,)), True, 0.0, 0.0, 0.0)
+
+
+def test_count_check_needs_the_same_last_digit_ten_seconds_away():
+    # segment 0 is labelled 0:38; the ones digits 10, 9 and 11 s nearer the anchor
+    segs = [_ones_seg("8"), _ones_seg("2"), _ones_seg("1"), _ones_seg("7"), _ones_seg("8")]
+    labels = {0: 38, 1: 48, 2: 47, 3: 49}
+    # '2' is the closest of the three (0.29 vs 2.0 and 1.08) but not the same glyph: a 2 s slip
+    assert HV.glyph_change(segs[0].ref.glyphs[-1], segs[1].ref.glyphs[-1]) == pytest.approx(24 / 84)
+    assert HV._ones_check(segs, labels, 0, +1) is False
+    assert HV._ones_check(segs, {0: 38, 4: 48, 2: 47, 3: 49}, 0, +1) is True       # an '8' 10 s away
+    assert HV._ones_check(segs, {0: 38, 1: 48, 2: 47}, 0, +1) is None               # 0:49 not labelled
 
 
 def test_open_recording_reads_times_and_skips_bad_lines(tmp_path):
@@ -327,6 +346,28 @@ def test_clock_sweep_survives_interruptions_gaps_and_bad_frames():
     ocr = TP.DigitOCR(store, "clock")
     for text in ("1:16", "0:57", "1:43", "0:20"):
         assert ocr.read(compose(text)).text == text
+
+
+def test_clock_sweep_counts_through_a_capture_stall_and_a_glitch_at_a_change():
+    def shown(v, t):
+        if 10.65 <= t < 10.75:
+            return v, True              # image 610, the first of 1:05, caught mid-update
+        return v
+    sim = Sim(20.0, countdown(76, shown))
+    rec = sim.recording()
+    # the capture stalls 2.2 s: images 265-380 never written, 1:11 and 1:10 unseen,
+    # 1:12 (image 260) is followed directly by 1:09 (image 385)
+    rec.images = [im for im in rec.images if not 4.6 < im.t < 6.7]
+    store = TP.TemplateStore.memory()
+    lines: list[str] = []
+    res = HV.clock_sweep(rec, regions(), store, [("00000120.npy", "1:14")], load=sim.load, log=lines.append)
+    assert res.ok and res.interruptions == 1 and res.skipped == []      # the glitch image, dropped
+    assert len(res.segments) == 19                                       # 1:16 .. 0:56 without 1:11, 1:10
+    for seg in res.segments:
+        assert seg.label == truth(sim, rec, seg, 76, shown)              # 1:09 after 1:12, 1:05 after 1:06
+    assert res.runs[0].stops == {+1: "the recording ends", -1: "the recording starts"}
+    for e in store.entries(TP.digit_kind("clock")):
+        assert which_char(e.image) == e.label
 
 
 def test_clock_sweep_stops_at_a_skipped_second_and_stores_nothing_wrong():

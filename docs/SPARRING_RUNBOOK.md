@@ -498,7 +498,7 @@ The readers use `hud_regions_pc.json` automatically when it exists. Do not edit 
 ```
 
 - It prints the range it labelled (for example `labelled 3:00 down to 0:00`), every stretch it skipped as ambiguous, and each glyph it stored. It stores only the characters `templates list` reports missing; add `--all` to store every character.
-- `lost the count` or `count check failed` means it could not count through a stretch, and stopped on that side. Read the clock on a frame after that point (set `$J` to it, like `$I`) and add it as a second anchor: `--anchor $I --text 1:48 --anchor $J --text 0:31` (one `--text` per `--anchor`, in the same order).
+- `lost the count` or `count check failed` means it could not count through a stretch (a capture stall, a long stretch without a readable clock, or a second the game skipped), and stopped on that side. The message names the image where it stopped. Read the clock on a frame after that point (set `$J` to it, like `$I`) and add it as a second anchor: `--anchor $I --text 1:48 --anchor $J --text 0:31` (one `--text` per `--anchor`, in the same order).
 - It stops at the end of regulation. If the friendly went to overtime, add an overtime frame (`$K`) as the last anchor, plus `--until-overtime`: `--anchor $I --text 1:48 --anchor $K --text 1:47 --until-overtime`.
 
 *b) Elixir, towers, hand and next card.* `harvest` crops every image and groups crops that look alike. It writes a contact sheet with one tile per group: `#id n=size` (a `g` marks greyed cards), then the group's most typical crop, a middle one and its least typical one. Open the sheet, then give each group you can read its value:
