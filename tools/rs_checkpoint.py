@@ -30,9 +30,10 @@ rs_engine.active(), a Battle, or an EngineVocab):
 Otherwise it raises VocabMismatch, naming the first difference. allow_drift=True loads anyway
 with a VocabDriftWarning listing them; allow_drift=None (the default) reads
 HASTYCR_ALLOW_VOCAB_DRIFT=1, which rs_eval --allow-vocab-drift sets for its workers. When every
-card (and unit type) the checkpoint knows is still in the engine and only new ones were added,
-the refusal names tools/rs_vocab.py grow, which carries it across by copying its embedding rows
-by name (docs/SEASON_UPDATES.md 6.1).
+card (and unit type) the checkpoint knows is still in the engine, which added new ones or put
+some at other ids, the refusal names tools/rs_vocab.py grow, which carries it across by copying
+its embedding rows by name (docs/SEASON_UPDATES.md 6.1); cards at other ids also get a warning,
+since RoyaleSim only appends cards.
 
 NOTES (VocabDriftWarning, never a refusal; vocab_differences' second list):
   * a --live-compat checkpoint's unit tokens are card ids, so a different unit list is a note;
@@ -115,14 +116,20 @@ def _arm(table: Any) -> str | None:
         return None
 
 
+_HEX = frozenset("0123456789abcdef")
+
+
 def _fnv(value: Any) -> str | None:
-    """An FNV-1a 64 as 16 lowercase hex digits (an int, or the text recorded); None if unknown."""
+    """An FNV-1a 64 as 16 lowercase hex digits (an int, or the text recorded, zero-padded when
+    it is hex of at most 16 digits; other text as it is); None if unknown."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return f"{value & 0xFFFF_FFFF_FFFF_FFFF:016x}"
     text = str(value).strip().lower().removeprefix("0x")
-    return text or None
+    if not text:
+        return None
+    return text.zfill(16) if len(text) <= 16 and set(text) <= _HEX else text
 
 
 def _version(value: Any) -> str | None:
@@ -281,7 +288,8 @@ class NameChanges:
         return not (self.added or self.removed or self.moved)
 
     def describe(self, kind: str) -> str:
-        """'1 card appended (Witch)', '2 unit types added (A, B), 5 moved', 'the same'."""
+        """'1 card appended (Witch)', '2 unit types added (A, B), 5 moved', '2 cards moved',
+        'the same'."""
         def some(names: Sequence[str]) -> str:
             shown = ", ".join(names[:3])
             return shown + (f", ... {len(names) - 3} more" if len(names) > 3 else "")
@@ -292,7 +300,8 @@ class NameChanges:
                 parts.append(f"{len(names)} {kind}{'s' if len(names) != 1 else ''} {verb} "
                              f"({some(names)})")
         if self.moved:
-            parts.append(f"{len(self.moved)} moved")
+            n = len(self.moved)
+            parts.append(f"{n} moved" if parts else f"{n} {kind}{'s' if n != 1 else ''} moved")
         return ", ".join(parts) or "the same"
 
 
@@ -315,7 +324,8 @@ def grow_blockers(meta: Mapping[str, Any], vocab: EngineVocab) -> list[str]:
     out: list[str] = []
     live = bool(meta.get("live_compat", False))
     keys = ("cards",) if live else ("cards", "units")
-    if not live and meta.get("units_mode", "types") != "types":
+    # an unset units_mode reads as "types", as scripts/vision_play.py reads it
+    if not live and (meta.get("units_mode") or "types") != "types":
         out.append(f"a --units {meta.get('units_mode')} checkpoint: its unit tokens are not the "
                    "engine's unit types, so they cannot be carried by name")
         keys = ("cards",)
@@ -333,20 +343,27 @@ def grow_blockers(meta: Mapping[str, Any], vocab: EngineVocab) -> list[str]:
 
 
 def grow_hint(meta: Mapping[str, Any], vocab: EngineVocab, source: str = "CKPT") -> str | None:
-    """The sentence a refusal adds when the engine only added cards (or unit types) after the
-    checkpoint's: tools/rs_vocab.py grow carries it across. None otherwise."""
+    """The sentence a refusal adds when every card (and unit type) the checkpoint knows is still
+    in the engine, which added or moved some (grow_blockers is empty and a name list differs):
+    tools/rs_vocab.py grow carries it across by name. It is exactly when `rs_vocab.py diff`
+    says GROW. None otherwise. Cards that moved without being appended get a second sentence:
+    RoyaleSim only appends cards (py.rs:241-246), so a moved one is unexpected."""
     if grow_blockers(meta, vocab):
         return None
     live = bool(meta.get("live_compat", False))
     cards = name_changes(names_of(meta, "cards")[0] or (), vocab.cards)
     units = NameChanges() if live else name_changes(names_of(meta, "units")[0] or (), vocab.units)
-    if not (cards.added or units.added):
+    if cards.same and units.same:
         return None
-    what = [c for c in (cards.describe("card") if cards.added else "",
-                        units.describe("unit type") if units.added else "") if c]
+    what = [c.describe(kind) for c, kind in ((cards, "card"), (units, "unit type"))
+            if not c.same]
+    odd = ("" if not cards.moved else
+           " RoyaleSim only appends cards and never renumbers one, so find out why these moved "
+           "before carrying it.")
     return (f"Every card{'' if live else ' and unit type'} it knows is still in the engine, "
             f"which has {'; '.join(what)}: tools/rs_vocab.py grow {source} --out DIR carries it "
-            "across, copying its embedding rows by name (a new one starts as the unknown row).")
+            "across, copying its embedding rows by name (a new one starts as the unknown row)."
+            + odd)
 
 
 def _first_difference(kind: str, mine: Sequence[str], theirs: Sequence[str]) -> str | None:

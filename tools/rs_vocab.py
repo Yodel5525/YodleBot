@@ -44,21 +44,27 @@ notes the drift (rs_checkpoint, U01); "vocab_carry" lists every grow and reset-c
 "cold_cards" the cards whose rows were never trained (the added ones). Before anything is
 written: the source loads strictly, every other tensor keeps its shape, the largest |change|
 of gate, tile, value (and value2) over PROBE_ROWS synthetic rows of old tokens is below
-TOLERANCE (1e-4), and the result passes a strict rs_checkpoint.load_policy into the engine.
-It writes DIR/best.pt and DIR/args.json: the source's args.json (when it has one) with
-"wait_keep", which rs_decide.wait_keep_for reads, as the source's (its default when it had
-none), and the carry record.
+TOLERANCE (1e-4), every row is the old row of its name read through the two metas alone
+(rows_by_name: the probe reads the old tokens through the same map the rows were copied by,
+so it cannot see a wrong map), and the result passes a strict rs_checkpoint.load_policy into
+the engine. It writes DIR/best.pt and DIR/args.json: the source's args.json (when it has one)
+with "wait_keep", which rs_decide.wait_keep_for reads, as the source's (its default when it
+had none), and the carry record; args.json lands first, so a best.pt there always has one, and
+an existing best.pt or args.json in DIR needs --force.
 
 RESET-COLD: the named cards' card_emb rows (and, --live-compat, their unit_emb rows; --units
 for named unit tokens otherwise) become the unknown row; every other row is unchanged, which
 the same probe checks on rows without them. It fixes a card no row ever trained, such as
-Minion Giant (no IL_Replay key reaches it), whose row is its random N(0, 1) start (6.2).
+Minion Giant (no IL_Replay key reaches it), whose row is its random N(0, 1) start (6.2). Hog
+2.6 cards, which every row trains, are refused unless --allow-deck; the record says what each
+reset row was (the unknown row, marked cold, or its own row), and the command line names the
+cards that had their own row and no cold mark.
 
-CHECK: REFUSED when rs_checkpoint refuses it (the fix: grow when the engine only added names,
-else rebuild and retrain); COLD when a cold card is in the pool that matters (Hog 2.6 and
---pool); ENGINE_DRIFT when it loads with another card table, table FNV or royalesim version
-than its rows'; else OK. Cold cards: meta "cold_cards", rows equal to the unknown row, and
---cold.
+CHECK: REFUSED when rs_checkpoint refuses it (the fix: grow when every name it knows is still
+in the engine, which added or moved some, as rs_checkpoint's refusal says; else rebuild and
+retrain); COLD when a cold card is in the pool that matters (Hog 2.6 and --pool);
+ENGINE_DRIFT when it loads with another card table, table FNV or royalesim version than its
+rows'; else OK. Cold cards: meta "cold_cards", rows equal to the unknown row, and --cold.
 
 Exit codes: 0 ok (diff: SAME); 1 refused, BREAKING or an error; 2 bad arguments; 3 diff LOADS or
 check ENGINE_DRIFT; 4 check COLD; 5 diff GROW. check returns the worst over its checkpoints.
@@ -227,9 +233,9 @@ def probe_batch(spec: Any, card_tokens: Sequence[int], unit_tokens: Sequence[int
                 rows: int = PROBE_ROWS, buttons: int = PROBE_BUTTONS, seed: int = 0) -> dict:
     """A synthetic batch of `rows` rows of the schema `spec` (its model_inputs): card-token
     columns drawn from `card_tokens`, unit_ids from `unit_tokens` (each token at least once
-    when the column has room; a quarter padding, except the hand), features uniform in [0, 1).
-    An integer input that is neither is refused: it might hold tokens this tool does not
-    remap."""
+    when the column has room: one place per token is never padded; about a quarter of the
+    others is padding, except in the hand), features uniform in [0, 1). An integer input that
+    is neither is refused: it might hold tokens this tool does not remap."""
     import torch
     g = torch.Generator().manual_seed(int(seed))
     out = {}
@@ -240,10 +246,12 @@ def probe_batch(spec: Any, card_tokens: Sequence[int], unit_tokens: Sequence[int
             pool = list(card_tokens if name in CARD_TOKEN_COLUMNS else unit_tokens) or [PAD]
             pool_t = torch.tensor(pool, dtype=torch.long)
             n = math.prod(shape)
-            values = pool_t[torch.arange(n) % len(pool)][torch.randperm(n, generator=g)]
-            values = values.reshape(shape)
+            perm = torch.randperm(n, generator=g)
+            values = pool_t[perm % len(pool)].reshape(shape)    # place k: pool[perm[k] % len]
             if name != "hand":
-                values = values.masked_fill(torch.rand(shape, generator=g) < 0.25, PAD)
+                first = (perm < len(pool)).reshape(shape)       # each token's one sure place
+                pad = (torch.rand(shape, generator=g) < 0.25) & ~first
+                values = values.masked_fill(pad, PAD)
             out[name] = values
         elif col.dtype.startswith(("int", "bool")):
             raise VocabError(f"model input {name!r} ({col.dtype}) is neither a card nor a unit "
@@ -351,6 +359,33 @@ def _check_shapes(meta: Mapping[str, Any], state: Mapping[str, Any]) -> None:
                          + f" ({TOOL} grows only {CARD_EMB} and {UNIT_EMB})")
 
 
+def rows_by_name(old_state: Mapping[str, Any], new_state: Mapping[str, Any],
+                 old_meta: Mapping[str, Any], new_meta: Mapping[str, Any]) -> list[str]:
+    """What is wrong with the carried embedding rows, read through the two metas' name maps
+    only (not through token_map, which made them): the pad and unknown rows are the old ones,
+    each old name's row is its old row at its new token, and a new name's row is the unknown
+    row; card_emb by card name, unit_emb by unit type name (by card for --live-compat). The
+    probe cannot see a wrong map, since it reads the old tokens through the same map; this
+    can. [] when every row is right."""
+    import torch
+    live = bool(new_meta.get("live_compat", False))
+    wrong: list[str] = []
+    for key, names in ((CARD_EMB, "cards"), (UNIT_EMB, "cards" if live else "units")):
+        a, b = old_state[key], new_state[key]
+        old_at = {n: i + 2 for i, n in enumerate(RC.names_of(old_meta, names)[0] or ())}
+        new_at = {n: i + 2 for i, n in enumerate(RC.names_of(new_meta, names)[0] or ())}
+        if int(b.shape[0]) != len(new_at) + 2:
+            wrong.append(f"{key} has {int(b.shape[0])} rows, the new meta {len(new_at) + 2}")
+            continue
+        wrong += [f"{key} row {t}" for t in (PAD, UNKNOWN) if not torch.equal(a[t], b[t])]
+        for name, t in new_at.items():
+            want = a[old_at[name]] if name in old_at else a[UNKNOWN]
+            if not torch.equal(b[t], want):
+                wrong.append(f"{key} {name!r}")
+        wrong += [f"{key} {name!r} is gone" for name in old_at if name not in new_at]
+    return wrong
+
+
 def _source_sha(source: Any) -> str | None:
     if isinstance(source, (str, os.PathLike)) and Path(source).is_file():
         h = hashlib.sha256()
@@ -433,15 +468,30 @@ def grow(blob: Mapping[str, Any], engine: Any, *, source: Any = "checkpoint",
     if not delta < tolerance:
         raise VocabError(f"{shown}: the carried model's outputs on the old tokens moved by "
                          f"{delta:.3g} (at most {tolerance:g}); nothing written")
+    wrong = rows_by_name(state, new_state, meta, new_meta)
+    if wrong:
+        raise VocabError(f"{shown}: the carried rows are not the old rows by name ("
+                         + ", ".join(wrong[:5]) + (", ..." if len(wrong) > 5 else "")
+                         + "); nothing written")
     record["max_delta"] = delta
     return Carried(out, record, delta, notes, diff)
 
 
+def deck_cards() -> frozenset[str]:
+    """Hog 2.6, the sparring deck, as the rows mark it (tools/rs_rows.py HOG26)."""
+    import rs_rows
+    return frozenset(rs_rows.HOG26)
+
+
 def reset_cold(blob: Mapping[str, Any], cards: Iterable[str], *, units: Iterable[str] = (),
                source: Any = "checkpoint", tolerance: float = TOLERANCE,
-               rows: int = PROBE_ROWS, seed: int = 0) -> Carried:
+               rows: int = PROBE_ROWS, seed: int = 0, protected: Iterable[str] | None = None,
+               allow_protected: bool = False) -> Carried:
     """The checkpoint `blob` with the named cards' rows set to the unknown row (module doc,
-    RESET-COLD). VocabError for a name the checkpoint does not know."""
+    RESET-COLD). VocabError for a name the checkpoint does not know, and for a `protected`
+    card (default Hog 2.6, deck_cards(): every row trains them) unless allow_protected. The
+    record's "was" says what each card's row was before: "the unknown row", "marked cold" (the
+    meta's cold_cards) or "its own row" (trained, or a random start no row reached)."""
     meta, state = dict(blob["meta"]), blob["model"]
     shown = str(source)
     live = bool(meta.get("live_compat", False))
@@ -454,6 +504,15 @@ def reset_cold(blob: Mapping[str, Any], cards: Iterable[str], *, units: Iterable
     if unknown or not cards:
         raise VocabError(f"{shown}: not in its card vocabulary: {unknown}" if unknown
                          else "reset-cold: name at least one card")
+    guard = deck_cards() if protected is None else frozenset(str(n) for n in protected)
+    deck = [n for n in names if n in set(cards) & guard]
+    if deck and not allow_protected:
+        it = "it" if len(deck) == 1 else "them"
+        where = ("Hog 2.6, which every row trains," if protected is None
+                 else "the protected cards,")
+        raise VocabError(f"{shown}: {', '.join(deck)} {'is' if len(deck) == 1 else 'are'} in "
+                         f"{where} so the model would forget {it} (--allow-deck resets {it} "
+                         "anyway)")
     card_tokens = sorted({at[c] for c in cards})
     unit_tokens: list[int] = []
     if live:
@@ -471,6 +530,10 @@ def reset_cold(blob: Mapping[str, Any], cards: Iterable[str], *, units: Iterable
             raise VocabError(f"{shown}: not in its unit vocabulary: {missing}")
         unit_tokens = sorted({at_u[u] for u in units})
     old_model = _strict_model(meta, state, shown)
+    marked = {str(n) for n in (meta.get(COLD_KEY) or ())}
+    already = unknown_rows(state, names)
+    was = {n: ("the unknown row" if n in already else "marked cold" if n in marked
+               else "its own row") for n in names if n in set(cards)}
     new_state = dict(state)
     for key, tokens in ((CARD_EMB, card_tokens), (UNIT_EMB, unit_tokens)):
         if tokens:
@@ -478,7 +541,7 @@ def reset_cold(blob: Mapping[str, Any], cards: Iterable[str], *, units: Iterable
             table[tokens] = table[UNKNOWN]
             new_state[key] = table
     record = {"op": "reset-cold", "tool": TOOL, "from": shown, "from_sha256": _source_sha(source),
-              "cards": [n for n in names if n in set(cards)],
+              "cards": [n for n in names if n in set(cards)], "was": was,
               "unit_tokens": unit_tokens, "rows": "the unknown row (token 1)"}
     new_meta = dict(meta)
     new_meta[CARRY_KEY] = [*list(meta.get(CARRY_KEY) or ()), record]
@@ -534,22 +597,29 @@ def carried_args(source: Any, record: Mapping[str, Any]) -> dict:
 def write_carried(carried: Carried, out_dir: Any, source: Any = None, *,
                   force: bool = False) -> tuple[Path, Path]:
     """DIR/best.pt and DIR/args.json (carried_args). Refuses the source's own folder, and an
-    existing best.pt unless `force`."""
+    existing best.pt or args.json unless `force`. Both are written to temporary files first;
+    args.json replaces its file before best.pt does, so a best.pt there always has its
+    args.json (without it rs_decide.wait_keep_for would fall back to the default wait bias)."""
     import torch
     out = Path(out_dir)
     best, args_json = out / "best.pt", out / "args.json"
     if isinstance(source, (str, os.PathLike)) and out.resolve() == Path(source).resolve().parent:
         raise VocabError(f"--out {out} is the source's own folder; name another")
-    if best.exists() and not force:
-        raise VocabError(f"{best} exists (--force replaces it)")
+    for path in (best, args_json):
+        if path.exists() and not force:
+            raise VocabError(f"{path} exists (--force replaces it)")
     doc = carried_args(source, carried.record)
     out.mkdir(parents=True, exist_ok=True)
-    tmp = best.with_name(best.name + ".tmp")
-    torch.save(carried.blob, tmp)
-    os.replace(tmp, best)
-    tmp = args_json.with_name(args_json.name + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    os.replace(tmp, args_json)
+    tmp_best = best.with_name(best.name + ".tmp")
+    tmp_args = args_json.with_name(args_json.name + ".tmp")
+    try:
+        torch.save(carried.blob, tmp_best)
+        tmp_args.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+        os.replace(tmp_args, args_json)
+        os.replace(tmp_best, best)
+    finally:
+        for tmp in (tmp_best, tmp_args):
+            tmp.unlink(missing_ok=True)
     return best, args_json
 
 
@@ -612,10 +682,16 @@ def check(blob: Mapping[str, Any], engine: Any, *, source: str = "checkpoint",
     fix = None
     if errors:
         verdict = REFUSED
-        fix = (f"python {TOOL} grow {source} --out DIR (the engine only added names; their rows "
-               "start as the unknown row)" if diff.verdict == GROW else
-               "rebuild the rows (tools/rs_rows.py) and retrain under this engine, or run the "
-               "engine it was made for (--card-table / --engine-config)")
+        if diff.verdict == GROW:
+            fix = (f"python {TOOL} grow {source} --out DIR (every name it knows is still in the "
+                   "engine: grow copies its rows by name, a new name's row starts as the "
+                   "unknown row)")
+            if diff.cards.moved:
+                fix += ("; cards at other ids are unexpected (RoyaleSim only appends cards), "
+                        "so find out why first")
+        else:
+            fix = ("rebuild the rows (tools/rs_rows.py) and retrain under this engine, or run "
+                   "the engine it was made for (--card-table / --engine-config)")
     elif in_pool:
         verdict = COLD
         fix = (f"the model never learned {', '.join(in_pool)}: {TOOL} reset-cold makes an "
@@ -653,8 +729,7 @@ def _engine(args: argparse.Namespace) -> RC.EngineVocab:
 
 
 def _pool_names(extra: Iterable[str]) -> set[str]:
-    import rs_rows                       # Hog 2.6, as the rows mark it (tools/rs_rows.py HOG26)
-    return set(rs_rows.HOG26) | {str(n) for n in extra}
+    return set(deck_cards()) | {str(n) for n in extra}
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
@@ -696,8 +771,12 @@ def cmd_grow(args: argparse.Namespace) -> int:
 def cmd_reset_cold(args: argparse.Namespace) -> int:
     blob = RC._load_blob(args.ckpt)
     carried = reset_cold(blob, args.cards, units=args.units, source=args.ckpt,
-                         tolerance=args.tolerance)
+                         tolerance=args.tolerance, allow_protected=args.allow_deck)
     print(f"{args.ckpt}: {', '.join(carried.record['cards'])} reset to the unknown row")
+    own = [n for n, was in carried.record["was"].items() if was == "its own row"]
+    if own:
+        print(f"  note: {', '.join(own)} had {'its' if len(own) == 1 else 'their'} own row and "
+              "no cold mark: what the model learned of them is gone in the reset copy")
     return _write(carried, args)
 
 
@@ -747,6 +826,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="unit names to reset too (not --live-compat: its cards' are)")
     r.add_argument("--out", required=True)
     r.add_argument("--force", action="store_true")
+    r.add_argument("--allow-deck", action="store_true",
+                   help="reset Hog 2.6 cards too (refused by default: every row trains them)")
     r.add_argument("--tolerance", type=float, default=TOLERANCE)
     c = sub.add_parser("check", help="OK, REFUSED, ENGINE_DRIFT or COLD per checkpoint")
     c.add_argument("ckpt", nargs="+")

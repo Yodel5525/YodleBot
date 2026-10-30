@@ -121,6 +121,16 @@ def test_check_verdicts(rv):
     assert grow.fix.startswith("python tools/rs_vocab.py grow best.pt --out DIR")
     gone = rv.check({"meta": meta_for()}, engine(rv, cards=NAMES[:-1]))
     assert gone.verdict == "REFUSED" and gone.fix.startswith("rebuild the rows")
+    assert "unexpected" not in grow.fix
+    # cards at other ids: grow carries them by name, as rs_checkpoint's refusal says, with a
+    # warning (RoyaleSim only appends cards)
+    moved = list(NAMES)
+    moved[3], moved[4] = moved[4], moved[3]
+    swap = rv.check({"meta": meta_for()}, engine(rv, cards=moved), source="best.pt")
+    assert swap.verdict == "REFUSED" and swap.diff.verdict == "GROW"
+    assert swap.fix.startswith("python tools/rs_vocab.py grow best.pt --out DIR")
+    assert "cards at other ids are unexpected" in swap.fix
+    assert "tools/rs_vocab.py grow" in rv.RC.grow_hint(meta_for(), engine(rv, cards=moved))
 
 
 def test_check_cold_cards_in_the_pool(rv):
@@ -266,6 +276,34 @@ def test_grow_refuses_a_carried_model_that_is_not_the_same_function(rv, torch, m
         rv.grow(blob, engine(rv, cards=NAMES + ("Witch",)))
 
 
+def test_grow_refuses_rows_that_are_not_the_old_rows_by_name(rv, torch, monkeypatch):
+    """A wrong token map moves the rows and the probe's tokens alike, so the outputs do not
+    change; the by-name check reads the two metas and sees it."""
+    blob = make_blob(torch, meta_for())
+    vocab = engine(rv, cards=NAMES + ("Witch",))
+    good = rv.grow(blob, vocab)
+    assert rv.rows_by_name(blob["model"], good.blob["model"], blob["meta"],
+                           good.blob["meta"]) == []
+    token_map = rv.token_map
+
+    def crossed(old, new):
+        out = token_map(old, new)
+        out[2], out[3] = out[3], out[2]                    # Cannon and Fireball crossed
+        return out
+
+    monkeypatch.setattr(rv, "token_map", crossed)
+    with pytest.raises(rv.VocabError, match=r"not the old rows by name \(card_emb.weight "
+                                            r"'Cannon', card_emb.weight 'Fireball', "
+                                            r"unit_emb.weight '[A-Za-z]+', "):
+        rv.grow(blob, vocab)
+    # the probe alone passes it: the same function on crossed tokens
+    old = rv._strict_model(blob["meta"], blob["model"], "old")
+    card_map = crossed(NAMES, vocab.cards)
+    state = dict(blob["model"], **{CARD_EMB: rv.take_rows(blob["model"][CARD_EMB], card_map)})
+    new = rv._strict_model(meta_for(cards=NAMES + ("Witch",)), state, "new")
+    assert rv.preservation_delta(old, new, card_map, list(range(16))) < 1e-6
+
+
 def test_preservation_delta_sees_one_changed_row(rv, torch):
     import copy
     from sim.model_tokens import policy_from_meta
@@ -291,6 +329,10 @@ def test_probe_batch_covers_every_token(rv, torch):
     assert set(range(1, 16)) <= set(batch["unit_ids"].flatten().tolist())
     assert batch["ability_card"].shape == (8, 2) and batch["ability_state"].shape == (8, 2, 5)
     assert batch["unit_feats"].dtype == torch.float32 and batch["next"].shape == (8,)
+    # one place per token is never padded: a pool as large as the column fills it exactly
+    n = batch["unit_ids"][0].numel()
+    one = rv.probe_batch(spec, [2], list(range(1, n + 1)), rows=1)
+    assert sorted(one["unit_ids"].flatten().tolist()) == list(range(1, n + 1))
 
 
 def test_reset_cold(rv, torch):
@@ -316,6 +358,32 @@ def test_reset_cold(rv, torch):
     live = make_blob(torch, meta_for(live=True))
     lived = rv.reset_cold(live, ["MiniPekka"])
     assert torch.equal(lived.blob["model"][UNIT_EMB][t], live["model"][UNIT_EMB][1])
+    # what each row was: its own, marked cold, or already the unknown row
+    assert carried.record["was"] == {"MiniPekka": "its own row"}
+    marked = make_blob(torch, meta_for(cold_cards=["Zap"]))
+    assert rv.reset_cold(marked, ["Zap", "Knight"]).record["was"] == {
+        "Knight": "its own row", "Zap": "marked cold"}
+    assert rv.reset_cold(carried.blob, ["MiniPekka"]).record["was"] == {
+        "MiniPekka": "the unknown row"}
+
+
+def test_reset_cold_refuses_the_deck_unless_allowed(rv, torch):
+    pytest.importorskip("numpy")                      # Hog 2.6 from tools/rs_rows.py
+    blob = make_blob(torch, meta_for())
+    assert rv.deck_cards() == frozenset({"Cannon", "Fireball", "HogRider", "IceGolemite",
+                                         "IceSpirits", "Musketeer", "Skeletons", "Log"})
+    with pytest.raises(rv.VocabError, match=r"HogRider is in Hog 2\.6, which every row trains.*"
+                                            r"--allow-deck"):
+        rv.reset_cold(blob, ["Zap", "HogRider"])
+    with pytest.raises(rv.VocabError, match="Cannon, HogRider are in Hog 2.6"):
+        rv.reset_cold(blob, ["HogRider", "Cannon"])
+    hog = NAMES.index("HogRider") + 2
+    allowed = rv.reset_cold(blob, ["HogRider"], allow_protected=True)
+    assert torch.equal(allowed.blob["model"][CARD_EMB][hog], blob["model"][CARD_EMB][1])
+    # another protected set
+    with pytest.raises(rv.VocabError, match="Zap is in the protected cards, so the model"):
+        rv.reset_cold(blob, ["Zap"], protected={"Zap"})
+    assert rv.reset_cold(blob, ["HogRider"], protected=()).record["cards"] == ["HogRider"]
 
 
 def test_reset_cold_refusals(rv, torch):
@@ -362,6 +430,35 @@ def test_write_carries_args_json_and_loads_strictly(rv, torch, tmp_path):
     assert json.loads(args2.read_text(encoding="utf-8"))["wait_keep"] == \
         str(rs_decide.DEFAULT_WAIT_KEEP)
     assert rs_decide.wait_keep_for(str(best2)) == rs_decide.wait_keep_for(str(bare))
+    # another run's args.json alone in --out is not replaced unless forced
+    lone = tmp_path / "lone"
+    lone.mkdir()
+    (lone / "args.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(rv.VocabError, match=r"args\.json exists \(--force"):
+        rv.write_carried(carried, lone, src)
+    assert not (lone / "best.pt").exists()
+    rv.write_carried(carried, lone, src, force=True)
+    assert json.loads((lone / "args.json").read_text(encoding="utf-8"))["wait_keep"] == "0.25"
+
+
+def test_write_puts_args_json_down_before_best_pt(rv, torch, tmp_path, monkeypatch):
+    """A failure between the two leaves no best.pt without its args.json, and no temp file."""
+    vocab = engine(rv, cards=NAMES + ("Witch",))
+    carried = rv.grow(make_blob(torch, meta_for()), vocab)
+    real = rv.os.replace
+    done = []
+
+    def replace(src, dst):
+        if Path(dst).name == "best.pt":
+            raise OSError("disk full")
+        done.append(Path(dst).name)
+        return real(src, dst)
+
+    monkeypatch.setattr(rv.os, "replace", replace)
+    out = tmp_path / "out"
+    with pytest.raises(OSError, match="disk full"):
+        rv.write_carried(carried, out)
+    assert done == ["args.json"] and sorted(p.name for p in out.iterdir()) == ["args.json"]
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +505,15 @@ def test_cli(rv, torch, fake_royalesim, tmp_path, capsys):
     assert rv.main(["reset-cold", grown, "--cards", "Nope", "--out", str(tmp_path / "r")]) == \
         rv.EXIT_FAILED
     assert "not in its card vocabulary" in capsys.readouterr().err
+    assert rv.main(["reset-cold", grown, "--cards", "HogRider", "--out", str(tmp_path / "r")]) \
+        == rv.EXIT_FAILED
+    assert "--allow-deck" in capsys.readouterr().err and not (tmp_path / "r").exists()
     assert rv.main(["reset-cold", grown, "--cards", "Zap", "--out", str(tmp_path / "r")]) == \
         rv.EXIT_OK
+    assert "  note: Zap had its own row and no cold mark" in capsys.readouterr().out
     assert rv.main(["check", str(tmp_path / "r" / "best.pt"), "--pool", "Zap"]) == rv.EXIT_COLD
+    assert rv.main(["reset-cold", grown, "--cards", "HogRider", "--allow-deck", "--out",
+                    str(tmp_path / "r2")]) == rv.EXIT_OK
     assert rv.main(["diff", str(tmp_path / "missing.json")]) == rv.EXIT_ARGS
 
 

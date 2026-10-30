@@ -253,15 +253,34 @@ def test_an_appended_card_still_refuses_and_names_grow(rc):
         rc.check_meta(meta_for(), engine(rc, cards=NAMES + ("Witch",)))
 
 
-def test_a_removed_or_moved_card_gets_no_grow_hint(rc):
-    for meta, vocab in ((meta_for(cards=NAMES + ("Zap2",)), engine(rc, table=OTHER)),
-                        (meta_for(), engine(rc, cards=swapped(NAMES, 3, 4), table=OTHER))):
-        with pytest.raises(rc.VocabMismatch) as exc:
-            rc.check_meta(meta, vocab)
-        assert "rs_vocab" not in str(exc.value)
-        assert exc.value.differences[-1].startswith("card table: ")      # still an error
+def test_a_removed_card_gets_no_grow_hint(rc):
+    with pytest.raises(rc.VocabMismatch) as exc:
+        rc.check_meta(meta_for(cards=NAMES + ("Zap2",)), engine(rc, table=OTHER))
+    assert "rs_vocab" not in str(exc.value)
+    assert exc.value.differences[-1].startswith("card table: ")          # still an error
     assert rc.grow_blockers(meta_for(cards=NAMES + ("Zap2",)), engine(rc)) == [
         "1 card(s) it knows are not in the engine: 'Zap2'"]
+    # an unset units_mode is a types checkpoint (as vision_play reads it); vision is blocked
+    assert rc.grow_blockers(meta_for(units_mode=None), engine(rc)) == []
+    assert rc.grow_blockers(meta_for(units_mode="vision"), engine(rc))[0].startswith(
+        "a --units vision checkpoint")
+
+
+def test_a_moved_card_is_refused_and_names_grow_with_a_warning(rc):
+    """grow carries cards at other ids by name (rs_vocab diff says GROW), so the refusal names
+    it, as for an appended card, and warns: RoyaleSim only appends cards."""
+    with pytest.raises(rc.VocabMismatch) as exc:
+        rc.check_meta(meta_for(), engine(rc, cards=swapped(NAMES, 3, 4), table=OTHER))
+    text = str(exc.value)
+    assert ("Every card and unit type it knows is still in the engine, which has 2 cards moved: "
+            "tools/rs_vocab.py grow CKPT --out DIR carries it across") in text
+    assert "only appends cards and never renumbers one" in text
+    assert exc.value.differences[-1].startswith("card table: ")          # still an error
+    # an appended card gets no such warning; a pure unit move is named but not warned about
+    assert "never renumbers" not in rc.grow_hint(meta_for(), engine(rc, cards=NAMES + ("W",)))
+    hint = rc.grow_hint(meta_for(), engine(rc, units=swapped(UNITS, 5, 6)))
+    assert "which has 2 unit types moved:" in hint and "never renumbers" not in hint
+    assert rc.grow_hint(meta_for(), engine(rc, table=OTHER)) is None    # nothing to grow
 
 
 def test_a_types_checkpoint_with_changed_units_refuses_on_another_table(rc):
