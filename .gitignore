@@ -104,3 +104,6 @@ runs/
 /STOP
 /MANUAL
 data/vision/detector_pin.json
+
+# HUD templates are crops of the game UI captured from the owner's client: local only.
+data/vision/templates/
