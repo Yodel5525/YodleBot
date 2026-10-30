@@ -78,16 +78,42 @@ STATUS_BITS, its first three names must be underground, invisible, hidden (check
 sim/train_tokens.py does not read unit_burrow yet (E14 moves it into unit_feats). vocab.json
 then adds "visibility": "public", "visibility_rule" and "unit_burrow" in "extra_columns"
 (visibility_vocab); tools/rs_eval.py reads "visibility" back from a checkpoint's meta.
+
+Trust v2 (E09): `--trust legacy` (the default) writes `trusted` only, so the rows and
+vocab.json are byte-identical to the rows before E09. `--trust v2` keeps `trusted` as it is
+and adds a `trusted_v2` column. A row is trusted_v2 when its tick + HORIZON is at or before the
+match's first divergence and its tick is at most WAIT_TAIL (20) ticks after the match's last
+recorded play (IL_Replay records no end tick, so the wait rows the engine adds after the
+recording stopped are not trusted; tokens-16). The first divergence is the earliest of:
+the legacy cut (more crowns than the recording, a card not in hand, a refused step); the first
+sampled tick where an engine tower has left the recording's final_tower_hitpoints
+(sim/replay_corpus._towers): destroyed while the recording ends with it standing
+("tower_lost"), or damaged more than the recording by more than --trust-hp-margin (0.10) of its
+max hp ("tower_hp"; towers never heal, so the final hp bounds every tick, and the recorded
+damage is scaled to a recorded tower level above the engine's, level_scale); and the tick the
+engine ended the game while a recorded play was still to come ("game_over"). Which engine
+princess a recorded princess_left is has not been verified, so `--trust-sides unordered` (the
+default) pairs a side's two princesses in the way most favourable to the engine; `world`
+(princess_left is the world-left tower, slot 1, of both seats) and `own` (the owner's own left:
+slot 2 for blue, slot 1 for red) pair them by side. main writes <out>/manifest.json: rows,
+trusted (and under v2 trusted_v2) counts and rates for all rows and the Hog 2.6 rows, per
+match why trust was cut, one entry per shard and, under v2, princess_votes: per seat, the
+matches where one princess fell both in the engine and in the recording, "slot1" when it is
+the same tower if princess_left is slot 1, else "slot2" (world: slot1 for both seats; own:
+blue slot2, red slot1). vocab.json under v2 adds "trust" (TrustRule.to_json) and "trusted_v2"
+in "extra_columns" (trust_vocab). sim/train_tokens.py still filters on `trusted`.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import operator
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mode
 
@@ -235,6 +261,297 @@ def seen_by(e, team, fields=None) -> bool:
 def burrowing(e, fields=None) -> bool:
     """Whether entity row `e` is tunnelling now (STATUS_UNDERGROUND): unit_burrow."""
     return bool(unit_status(e, fields) & STATUS_UNDERGROUND)
+
+
+#: --trust (module doc, "Trust v2"): TRUST_LEGACY, `trusted` only (the rows before E09);
+#: TRUST_V2, also `trusted_v2`.
+TRUST_LEGACY, TRUST_V2 = "legacy", "v2"
+TRUST_MODES = (TRUST_LEGACY, TRUST_V2)
+#: --trust-sides: which engine princess a recorded princess_left is. players[t]["tower_hp"] is
+#: (king, world-left, world-right) for both seats (tools/rs_decide.py TOWER_CENTRE).
+SIDES_UNORDERED, SIDES_WORLD, SIDES_OWN = "unordered", "world", "own"
+TRUST_SIDES = (SIDES_UNORDERED, SIDES_WORLD, SIDES_OWN)
+#: The engine slot of a recorded princess_left per engine seat (blue, red). "world": the world-left
+#: (native low x) tower of both. "own": the owner's own left, taking native x to grow to the
+#: right of the player at native high y (red, as on the live screen), so blue's left is world right.
+LEFT_SLOT = {SIDES_WORLD: (1, 1), SIDES_OWN: (2, 1)}
+#: --trust-hp-margin: the damage beyond the recording's (a share of the engine tower's max hp)
+#: a tower may take before trusted_v2 is cut.
+TRUST_HP_MARGIN = 0.10
+#: tokens-16: under v2 a row more than WAIT_TAIL ticks after the last recorded play is not trusted.
+WAIT_TAIL = 20
+#: The columns --trust v2 adds to FIELDS.
+TRUST_FIELDS = ("trusted_v2",)
+#: final_tower_hitpoints keys (sim/replay_corpus._towers).
+TOWER_KEYS = ("king", "princess_left", "princess_right")
+#: Why a match's trust was cut: the legacy cuts, then the ones only v2 makes; CUT_NONE: no cut.
+CUT_CROWNS, CUT_HAND, CUT_REFUSED = "crowns", "hand", "refused"
+CUT_TOWER_LOST, CUT_TOWER_HP, CUT_GAME_OVER = "tower_lost", "tower_hp", "game_over"
+CUT_NONE = "none"
+#: princess_vote's answers, and the seat names manifest.json counts them under.
+VOTES = ("slot1", "slot2")
+SEAT_NAMES = ("blue", "red")
+
+
+@dataclass(frozen=True)
+class TrustRule:
+    """--trust, --trust-sides and --trust-hp-margin; trust_rule() gives a checked one."""
+    mode: str = TRUST_LEGACY
+    sides: str = SIDES_UNORDERED
+    hp_margin: float = TRUST_HP_MARGIN
+
+    @property
+    def v2(self) -> bool:
+        return self.mode == TRUST_V2
+
+    def to_json(self) -> dict:
+        """What vocab.json "trust" and manifest.json "trust" record; trust_rule() reads it back."""
+        return {"mode": self.mode, "sides": self.sides, "hp_margin": self.hp_margin,
+                "wait_tail": WAIT_TAIL, "horizon": HORIZON}
+
+
+TRUST = TrustRule()
+_RULE_KEYS = ("mode", "sides", "hp_margin")
+
+
+def trust_rule(value=None) -> TrustRule:
+    """--trust as rows_for, build and vocab_record take it: None (the module's TRUST), a mode
+    ("legacy" / "v2", the other settings at their defaults), a TrustRule or its to_json().
+    ValueError for an unknown mode or sides, or a margin outside [0, 1]."""
+    if value is None:
+        value = TRUST
+    if isinstance(value, str):
+        value = TrustRule(mode=value)
+    elif isinstance(value, dict):
+        unknown = sorted(set(value) - set(_RULE_KEYS) - {"wait_tail", "horizon"})
+        if unknown:
+            raise ValueError(f"--trust: unknown setting(s) {unknown}")
+        value = TrustRule(**{k: value[k] for k in _RULE_KEYS if k in value})
+    if not isinstance(value, TrustRule):
+        raise ValueError(f"--trust: one of {', '.join(TRUST_MODES)}, got {value!r}")
+    if not isinstance(value.mode, str) or value.mode not in TRUST_MODES:
+        raise ValueError(f"--trust: one of {', '.join(TRUST_MODES)}, got {value.mode!r}")
+    if not isinstance(value.sides, str) or value.sides not in TRUST_SIDES:
+        raise ValueError(f"--trust-sides: one of {', '.join(TRUST_SIDES)}, got {value.sides!r}")
+    margin = value.hp_margin
+    if (isinstance(margin, bool) or not isinstance(margin, (int, float))
+            or not math.isfinite(margin) or not 0 <= margin <= 1):
+        raise ValueError(f"--trust-hp-margin: a share of a tower's max hp in [0, 1], "
+                         f"got {margin!r}")
+    return TrustRule(value.mode, value.sides, float(margin))
+
+
+def trust_vocab(rule=None) -> dict:
+    """vocab_record keywords for --trust: none for legacy (the vocab.json of the rows before
+    E09), else {"trust": the rule}."""
+    rule = trust_rule(rule)
+    return {"trust": rule} if rule.v2 else {}
+
+
+def describe_trust(rule=None) -> str:
+    """One line for the console."""
+    rule = trust_rule(rule)
+    if not rule.v2:
+        return "legacy (`trusted` only: crowns, hand and refused-step cuts)"
+    return (f"v2 (`trusted` and `trusted_v2`: also tower divergence from the recorded final "
+            f"hp, margin {rule.hp_margin:g} of max hp, princesses {rule.sides}; engine game over "
+            f"before the last play; waits more than {WAIT_TAIL} ticks after the last play)")
+
+
+def _hp(value):
+    """A final_tower_hitpoints value as an int; None when absent or not a number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def recorded_towers(battle: dict, rs: dict) -> dict:
+    """{engine seat: {TOWER_KEYS key: final hp}} from each side's final_tower_hitpoints
+    (sim/replay_corpus._towers); `rs` maps the IL_Replay side (0 team, 1 opponent) to its
+    engine seat. A missing or non-numeric value is left out, and that tower is not checked."""
+    out = {}
+    for k, side in enumerate(("team", "opponent")):
+        players = (battle.get(side) or {}).get("players") or []
+        hp = (players[0].get("final_tower_hitpoints") or {}) if players else {}
+        hp = hp if isinstance(hp, dict) else {}
+        out[rs[k]] = {key: v for key in TOWER_KEYS if (v := _hp(hp.get(key))) is not None}
+    return out
+
+
+def level_scale(recorded, max_hp) -> float:
+    """How much stronger the recorded towers of one kind (the king, or the princesses) were than
+    the engine's: the largest recorded final hp over the engine's max hp, at least 1. Towers do
+    not heal, so a recorded hp above the engine's max is a higher tower level (or a sturdier
+    tower troop); an untouched tower gives the ratio exactly. 1 when nothing is recorded."""
+    known = [r for r in recorded if r is not None]
+    if not known or max_hp <= 0:
+        return 1.0
+    return max(1.0, max(known) / max_hp)
+
+
+def tower_breach(hp, rec, max_hp, scale=1.0, margin=TRUST_HP_MARGIN):
+    """Why an engine tower at `hp` (of `max_hp`) has left a recording that ends with it at `rec`,
+    or None: CUT_TOWER_LOST when the engine destroyed it and the recording ends with it
+    standing; CUT_TOWER_HP when the engine's damage, max_hp - hp, exceeds the recorded damage,
+    scale x max_hp - rec, by more than margin x max_hp. `rec` None: not recorded, no check."""
+    if rec is None:
+        return None
+    if hp <= 0 < rec:
+        return CUT_TOWER_LOST
+    if max_hp > 0 and (max_hp - hp) > (scale * max_hp - rec) + margin * max_hp:
+        return CUT_TOWER_HP
+    return None
+
+
+def seat_breach(hp, max_hp, rec, seat, rule=None):
+    """Why one engine seat's towers have left the recording of that seat, or None. `hp` /
+    `max_hp`: its tower_hp / tower_max_hp (king, world-left, world-right); `rec`: its
+    recorded_towers entry. The princesses pair as rule.sides says: SIDES_UNORDERED pairs the
+    sorted engine hp with the sorted recorded hp (a value not recorded lowest), which is the
+    pairing most favourable to the engine; world / own pair them by LEFT_SLOT. CUT_TOWER_LOST
+    wins over CUT_TOWER_HP."""
+    rule = trust_rule(rule)
+    king = rec.get("king")
+    why = [tower_breach(hp[0], king, max_hp[0], level_scale([king], max_hp[0]), rule.hp_margin)]
+    left, right = rec.get("princess_left"), rec.get("princess_right")
+    pmax = max(max_hp[1], max_hp[2])
+    scale = level_scale([left, right], pmax)
+    if rule.sides == SIDES_UNORDERED:
+        recs = sorted([left, right], key=lambda r: -math.inf if r is None else r)
+        pairs = [(h, r, pmax) for h, r in zip(sorted(hp[1:3]), recs)]
+    else:
+        ls = LEFT_SLOT[rule.sides][seat]
+        pairs = [(hp[ls], left, max_hp[ls]), (hp[3 - ls], right, max_hp[3 - ls])]
+    why += [tower_breach(h, r, m, scale, rule.hp_margin) for h, r, m in pairs]
+    if CUT_TOWER_LOST in why:
+        return CUT_TOWER_LOST
+    return CUT_TOWER_HP if CUT_TOWER_HP in why else None
+
+
+def divergence(hp_track, max_hp, recorded, rule=None) -> tuple:
+    """(tick, why) of the first entry of `hp_track`, [(tick, (blue tower_hp, red tower_hp))] in
+    tick order, where a seat's towers have left the recording (seat_breach); (None, None) when
+    none has. `max_hp`: (blue, red) tower_max_hp; `recorded`: recorded_towers. A seat with
+    nothing recorded is not checked."""
+    rule = trust_rule(rule)
+    for tick, hps in hp_track:
+        whys = [seat_breach(hps[s], max_hp[s], recorded[s], s, rule)
+                for s in (0, 1) if recorded.get(s)]
+        if CUT_TOWER_LOST in whys:
+            return tick, CUT_TOWER_LOST
+        if CUT_TOWER_HP in whys:
+            return tick, CUT_TOWER_HP
+    return None, None
+
+
+def princess_vote(hp, rec):
+    """manifest.json princess_votes for one seat: when exactly one princess fell both in the
+    engine (`hp`, its tower_hp at the end) and in the recording (`rec`, its recorded_towers
+    entry, both princesses recorded), "slot1" if that is the same tower when princess_left is
+    engine slot 1, else "slot2"; None otherwise (no evidence either way)."""
+    left, right = rec.get("princess_left"), rec.get("princess_right")
+    if left is None or right is None:
+        return None
+    rec_dead, rs_dead = (left <= 0, right <= 0), (hp[1] <= 0, hp[2] <= 0)
+    if sum(rec_dead) != 1 or sum(rs_dead) != 1:
+        return None
+    return VOTES[0] if rec_dead == rs_dead else VOTES[1]
+
+
+def _tower_hp(state, key="tower_hp") -> tuple:
+    """(blue, red) players[t][key][:3] as int tuples: king, world-left, world-right."""
+    return tuple(tuple(int(v) for v in state["players"][t][key][:3]) for t in (0, 1))
+
+
+def _count(values) -> dict:
+    out: dict = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out
+
+
+def trust_stats(rows, infos, rule=None) -> dict:
+    """One shard's counts for manifest.json, from its rows and the rows_for `info` of each of
+    its matches: rows, play_rows, trusted, hog_rows, hog_trusted, matches, and "cuts" (matches
+    by why `trusted` was cut, CUT_NONE when it was not). Under --trust v2 also trusted_v2,
+    hog_trusted_v2, "cuts_v2" and princess_votes ({seat name: {vote: matches}})."""
+    rule = trust_rule(rule)
+    hog = [r for r in rows if r["hog"]]
+    st = {"rows": len(rows), "play_rows": sum(1 for r in rows if r["action"][0]),
+          "trusted": sum(1 for r in rows if r["trusted"]), "hog_rows": len(hog),
+          "hog_trusted": sum(1 for r in hog if r["trusted"]), "matches": len(infos),
+          "cuts": _count(i["trust"]["why"] for i in infos)}
+    if rule.v2:
+        st["trusted_v2"] = sum(1 for r in rows if r["trusted_v2"])
+        st["hog_trusted_v2"] = sum(1 for r in hog if r["trusted_v2"])
+        st["cuts_v2"] = _count(i["trust"]["why_v2"] for i in infos)
+        st["princess_votes"] = {
+            name: {v: sum(1 for i in infos if i["trust"]["votes"][s] == v) for v in VOTES}
+            for s, name in enumerate(SEAT_NAMES)}
+    return st
+
+
+def merge_stats(total: dict, part: dict) -> dict:
+    """Adds trust_stats `part` into `total` (in place, nested counts too) and returns it."""
+    for key, value in part.items():
+        if isinstance(value, dict):
+            merge_stats(total.setdefault(key, {}), value)
+        else:
+            total[key] = total.get(key, 0) + value
+    return total
+
+
+#: The trust_stats counts a manifest.json shard entry repeats.
+SHARD_KEYS = ("rows", "play_rows", "trusted", "trusted_v2", "hog_rows", "hog_trusted",
+              "hog_trusted_v2", "matches")
+
+
+def shard_entry(batch_id: int, st: dict) -> dict:
+    """manifest.json's entry for the shard build(batch_id) wrote, from its trust_stats."""
+    return {"shard": f"shard-{batch_id:04d}.npz", **{k: st[k] for k in SHARD_KEYS if k in st}}
+
+
+def _rate(k, n):
+    return k / n if n else None
+
+
+def manifest(totals: dict, shards, skipped, rule=None) -> dict:
+    """manifest.json: the run's merged trust_stats `totals` as counts and rates (a share of the
+    rows; None with no rows), wait_rows, the skipped matches by reason, the trust rule and the
+    shard entries (shard_entry, in shard order). Under --trust v2 also trusted_v2 and its
+    rates, cuts_v2 and princess_votes."""
+    rule = trust_rule(rule)
+    n, hog, plays = totals.get("rows", 0), totals.get("hog_rows", 0), totals.get("play_rows", 0)
+    out = {"rows": n, "play_rows": plays, "wait_rows": n - plays,
+           "matches": totals.get("matches", 0), "skipped": dict(skipped),
+           "trust": rule.to_json()}
+    for col in ("trusted",) + (TRUST_FIELDS if rule.v2 else ()):
+        k, h = totals.get(col, 0), totals.get(f"hog_{col}", 0)
+        out.update({col: k, f"{col}_rate": _rate(k, n), f"hog_{col}": h,
+                    f"hog_{col}_rate": _rate(h, hog)})
+    out["hog_rows"] = hog
+    out["cuts"] = dict(totals.get("cuts", {}))
+    if rule.v2:
+        out["cuts_v2"] = dict(totals.get("cuts_v2", {}))
+        out["princess_votes"] = {name: {v: totals.get("princess_votes", {}).get(name, {})
+                                        .get(v, 0) for v in VOTES} for name in SEAT_NAMES}
+    out["shards"] = sorted(shards, key=lambda s: s["shard"])
+    return out
+
+
+def describe_manifest(man: dict) -> str:
+    """One line for the console: the trust rates of a manifest()."""
+    def pct(rate):
+        return "-" if rate is None else f"{100 * rate:.1f}%"
+    text = (f"trusted {man['trusted']:,} of {man['rows']:,} rows ({pct(man['trusted_rate'])}; "
+            f"Hog 2.6 {pct(man['hog_trusted_rate'])})")
+    if "trusted_v2" in man:
+        text += (f", trusted_v2 {man['trusted_v2']:,} ({pct(man['trusted_v2_rate'])}; "
+                 f"Hog 2.6 {pct(man['hog_trusted_v2_rate'])})")
+    return text
 
 
 def unit_mode(value, live=False) -> str:
@@ -444,12 +761,17 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None)
     return row
 
 
-def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None):
+def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, info=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
     since the recorded ticks are the ticks the plays executed. `mem_lag` as --mem-lag
-    (None: MEM_LAG): how the opponent memory of a row is dated (module doc)."""
+    (None: MEM_LAG): how the opponent memory of a row is dated (module doc). `trust` as
+    --trust (trust_rule; None: TRUST): under v2 every row also has "trusted_v2" (module doc,
+    "Trust v2"). A dict `info` gets, for a match that gives rows, info["trust"] = {"cut": the
+    tick `trusted` was cut at or None, "why": its CUT_* reason or CUT_NONE} and under v2 also
+    "cut_v2", "why_v2" and "votes" (princess_vote of blue and red at the end of the run)."""
     lag = mem_lag_value(MEM_LAG if mem_lag is None else mem_lag)
     legacy = lag == MEM_LEGACY
+    rule = trust_rule(trust)
     royalesim, names, ids, cat = ctx
     sub = royalesim.SUBTILE_PER_MILLITILE
     battle = payload["battle"]
@@ -508,18 +830,23 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None):
     play_ticks = {0: [q[0] for q in queue if q[1] == 0], 1: [q[0] for q in queue if q[1] == 1]}
     mem = rs_memory.PublicMemory()
     rows, track = [], []
-    cut = 10 ** 9
+    cut, cut_why = 10 ** 9, None
+    hp_track, max_hp, over = [], None, None     # trust v2: engine tower hp by tick, game over
     tick, i = 0, 0
     end = min((queue[-1][0] if queue else 0) + HORIZON, 6000)
     while tick <= end:
         state = json.loads(b.state_json())
+        if rule.v2:
+            hp_track.append((tick, _tower_hp(state)))
+            max_hp = max_hp or _tower_hp(state, "tower_max_hp")
         if state["game_over"]:
             track.append((tick, towers_vec(state, 0)))
+            over = tick
             break
         track.append((tick, towers_vec(state, 0)))
         for t in (0, 1):
             if state["players"][t]["crowns"] > rec_crowns[t] and cut > tick:
-                cut = tick
+                cut, cut_why = tick, CUT_CROWNS
         # E08: one view for every row of this tick, taken before this tick's plays are
         # recorded. Legacy reads the memory at each row instead, after the plays handled so
         # far, which is the dict the rows before E08 read. (Decision-time rows, E11, take
@@ -543,7 +870,7 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None):
             if cid in hand:
                 cmds.append((team, hand.index(cid), ex, ey))
             elif cut > tick:
-                cut = tick
+                cut, cut_why = tick, CUT_HAND
             mem.record(team, cid + 2, tick)        # the recorded tick is the tick it ran
         if tick % WAIT_EVERY == 0:
             for team in (0, 1):
@@ -557,8 +884,21 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None):
         res = b.step(cmds, step)
         for r in res:
             if royalesim.DEPLOY_REASONS[r[1]] != "OK" and cut > tick:
-                cut = tick
+                cut, cut_why = tick, CUT_REFUSED
         tick += step
+    if rule.v2:
+        # E09: the first divergence is the earliest of the legacy cut, the first tick an engine
+        # tower leaves the recorded final hp, and a game over with a recorded play still to come;
+        # on a tie the reason listed first.
+        last = queue[-1][0] if queue else 0
+        recorded = recorded_towers(battle, rs)
+        cuts = [(cut, cut_why)] if cut_why else []
+        d_tick, d_why = divergence(hp_track, max_hp, recorded, rule)
+        if d_why:
+            cuts.append((d_tick, d_why))
+        if over is not None and over <= last:
+            cuts.append((over, CUT_GAME_OVER))
+        cut_v2, why_v2 = min(cuts, key=lambda c: c[0]) if cuts else (10 ** 9, None)
     ticks = np.asarray([t for t, _ in track])
     tv = np.stack([v for _, v in track])            # blue-frame [own L,R,K, enemy L,R,K]
     blue_total, red_total = tv[:, :3].sum(1), tv[:, 3:].sum(1)
@@ -573,6 +913,15 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None):
         row["trusted"] = row["tick"] + HORIZON <= cut
         row["won"] = won[team]
         row["hog"] = frozenset(decks[seat_of[team]]) == HOG26
+        if rule.v2:
+            row["trusted_v2"] = row["tick"] + HORIZON <= cut_v2 and row["tick"] <= last + WAIT_TAIL
+    if info is not None:
+        trust_info = {"cut": None if cut_why is None else cut, "why": cut_why or CUT_NONE}
+        if rule.v2:
+            trust_info.update(cut_v2=None if why_v2 is None else cut_v2, why_v2=why_v2 or CUT_NONE,
+                              votes=[princess_vote(hp_track[-1][1][s], recorded.get(s, {}))
+                                     for s in (0, 1)])
+        info["trust"] = trust_info
     return rows, "ok"
 
 
@@ -587,7 +936,7 @@ SCHEMA = "rs_rows/legacy"
 
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
-                 opp_memory=None, classes=None, visibility=None):
+                 opp_memory=None, classes=None, visibility=None, trust=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -616,6 +965,9 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           with `visibility` "public" (E12): "public" and visibility_rule(),
                           and VISIBILITY_FIELDS in extra_columns (after VISION_FIELDS);
                           "legacy" (or None) adds nothing
+      trust               with `trust` v2 (E09; a mode, TrustRule or its to_json): the rule's
+                          to_json(), and TRUST_FIELDS last in extra_columns; legacy (or None)
+                          adds nothing
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -625,6 +977,8 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     if vision:
         unit_mode(UNITS_VISION, live)
     public = visibility is not None and visibility_mode(visibility) == VIS_PUBLIC
+    rule = None if trust is None else trust_rule(trust)
+    v2 = rule is not None and rule.v2
     rec = {
         "n_cards": len(cat) + 2,
         "n_units": ((len(cat) + 2) if live else (len(classes) + 2) if vision
@@ -650,33 +1004,40 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     if public:
         rec["visibility"] = VIS_PUBLIC
         rec["visibility_rule"] = visibility_rule()
-    extra = (list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
+    if v2:
+        rec["trust"] = rule.to_json()
+    extra = ((list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
+             + (list(TRUST_FIELDS) if v2 else []))
     if extra:
         rec["extra_columns"] = extra
     return rec
 
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
-          mem_lag=None, visibility=None):
+          mem_lag=None, visibility=None, trust=None, stats=False):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` / `visibility` as --units / --mem-lag / --visibility, kept as UNITS /
-    MEM_LAG / VISIBILITY for this process (None: keep the module's); main passes all three to
-    every worker, as it passes `live`."""
-    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY
+    `units` / `mem_lag` / `visibility` / `trust` as --units / --mem-lag / --visibility /
+    --trust (trust_rule), kept as UNITS / MEM_LAG / VISIBILITY / TRUST for this process (None:
+    keep the module's); main passes all four to every worker, as it passes `live`.
+    Returns (batch_id, rows, skipped by reason); with `stats`, also the shard's trust_stats,
+    which main merges into manifest.json."""
+    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
     vis = visibility_mode(VISIBILITY if visibility is None else visibility)
-    LIVE, UNITS, MEM_LAG, VISIBILITY = live, units, lag, vis
+    rule = trust_rule(trust)
+    LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST = live, units, lag, vis, rule
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
-    rows, tags, skipped = [], [], {}
+    rows, tags, skipped, infos = [], [], {}, []
     for text in payload_texts:
         p = json.loads(text)
         tag = p["source"]["replay_tag"]
+        info = {}
         try:
-            r, why = rows_for(p, ctx, engine)
+            r, why = rows_for(p, ctx, engine, info=info)
         except Exception as exc:
             r, why = None, f"error {type(exc).__name__}"
         if r is None:
@@ -684,9 +1045,11 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
             continue
         rows += r
         tags += [tag] * len(r)
+        infos.append(info)
     if rows:
         fields = (FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
-                  + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ()))
+                  + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ())
+                  + (TRUST_FIELDS if TRUST.v2 else ()))
         data = {k: np.stack([np.asarray(r[k]) for r in rows]) for k in fields}
         act = np.asarray([r["action"] for r in rows], dtype=np.int16)
         data["act_card"], data["act_x"], data["act_y"] = act[:, 0], act[:, 1], act[:, 2]
@@ -694,6 +1057,8 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         data["split"] = np.asarray([split_of(t) for t in tags])
         OUT.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(OUT / f"shard-{batch_id:04d}.npz", **data)
+    if stats:
+        return batch_id, len(rows), skipped, trust_stats(rows, infos, TRUST)
     return batch_id, len(rows), skipped
 
 
@@ -713,18 +1078,29 @@ def main() -> int:
                     help="which units a row shows: 'legacy' (default) every living unit, as "
                          "before; 'public' what the acting player's screen shows (no invisible "
                          "or hidden enemy; a tunnelling unit kept, with a unit_burrow column)")
+    ap.add_argument("--trust", choices=TRUST_MODES, default=TRUST_LEGACY,
+                    help="'legacy' (default): the `trusted` column only, as before; 'v2': also "
+                         "`trusted_v2`, cut where the engine's towers or game end leave the "
+                         "recording, and no trust for waits after the last recorded play")
+    ap.add_argument("--trust-sides", choices=TRUST_SIDES, default=SIDES_UNORDERED,
+                    help="--trust v2: which engine princess a recorded princess_left is "
+                         "(default 'unordered': either; see princess_votes in manifest.json)")
+    ap.add_argument("--trust-hp-margin", type=float, default=TRUST_HP_MARGIN,
+                    help="--trust v2: damage beyond the recording's a tower may take, as a share "
+                         f"of its max hp (default {TRUST_HP_MARGIN})")
     ap.add_argument("--out", type=Path, default=None)
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     try:
         cfg = rs_engine.config_from_args(args).undelayed()
         unit_mode(args.units, args.live_compat)
+        rule = trust_rule(TrustRule(args.trust, args.trust_sides, args.trust_hp_margin))
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
-    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY
+    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST
     LIVE = args.live_compat
-    UNITS, MEM_LAG, VISIBILITY = args.units, args.mem_lag, args.visibility
+    UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
@@ -736,6 +1112,7 @@ def main() -> int:
     print(f"cards:  {rs_cards.summary(names)}", flush=True)
     print(f"memory: {describe_memory(MEM_LAG)}", flush=True)
     print(f"seen:   {describe_visibility(VISIBILITY)}", flush=True)
+    print(f"trust:  {describe_trust(TRUST)}", flush=True)
     if UNITS == UNITS_VISION:
         print(f"units:  vision classes, {VCT.describe()}", flush=True)
         if VC.unknown:
@@ -776,23 +1153,30 @@ def main() -> int:
         cat, unit_types, cfg, fp, card_map, LIVE,
         version=getattr(royalesim, "__version__", "?"),
         classes=VCT if UNITS == UNITS_VISION else None,
-        **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY))), encoding="utf-8")
+        **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST))),
+        encoding="utf-8")
     batches = [picked[i:i + args.batch] for i in range(0, len(picked), args.batch)]
-    total, skipped = 0, {}
+    total, skipped, totals, shards = 0, {}, {}, []
     with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
         futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
-                            mem_lag=MEM_LAG, visibility=VISIBILITY)
+                            mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
+                            stats=True)
                 for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
-            bid, rows, sk = f.result()
+            bid, rows, sk, st = f.result()
             total += rows
             for k, v in sk.items():
                 skipped[k] = skipped.get(k, 0) + v
+            merge_stats(totals, st)
+            if rows:                                  # build writes no shard without rows
+                shards.append(shard_entry(bid, st))
             if n % 10 == 0 or n == len(batches):
                 print(f"  {n}/{len(batches)} shards, {total:,} rows, skipped {skipped} "
                       f"({time.time() - t0:.0f}s)", flush=True)
-    print(f"done: {total:,} rows -> {OUT}")
+    man = manifest(totals, shards, skipped, TRUST)
+    (OUT / "manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
+    print(f"done: {total:,} rows -> {OUT}\n      {describe_manifest(man)}")
     return 0
 
 
