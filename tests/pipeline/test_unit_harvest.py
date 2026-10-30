@@ -102,7 +102,10 @@ def test_find_blobs_on_cells_with_closing_and_the_area_filter():
     assert [(b.box, b.area_px) for b in apart] == [
         ((6.0, 4.0, 16.0, 14.0), 100), ((20.0, 30.0, 26.0, 40.0), 60), ((28.0, 30.0, 34.0, 40.0), 60),
         ((30.0, 50.0, 32.0, 52.0), 4)]
-    assert UH.find_blobs(m, cell=2, min_frac=0.35, max_area_px=110) == [closed[0]]
+    banded = UH.find_blobs(m, cell=2, min_frac=0.35, min_area_px=10, max_area_px=110)
+    assert banded == [closed[0]]                        # the joined 120 px unit is over the cap
+    capped = UH.find_blobs(m, cell=2, min_frac=0.35, max_area_px=110)
+    assert capped == [closed[0], apart[3]]              # no floor by default (as in `apart`): the speck stays
     assert UH.find_blobs(np.zeros((8, 8), bool)) == []
 
 
