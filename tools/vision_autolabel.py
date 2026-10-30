@@ -33,18 +33,24 @@ Owner commands (PowerShell, from the repo root; $BB = .venvs\buildabot\Scripts\p
     $SID = '20261101_A_1'      # date, deck letter, friendly number
     & $BB tools\vision_autolabel.py ingest reports\vision\harvest\$SID --deck "goblinstein,rune-giant,goblin-demolisher,suspicious-bush,vines,goblin-curse,elite-barbarians-ev1,baby-dragon-ev1" --role auto --client 16.635.1
 
-    # Round 0 (the 2026-10-29 friendly, copied out of reports\vision\recordings first)
-    & $BB tools\vision_autolabel.py ingest reports\vision\round0\<its folder> --sid 20261029_R0_1 --role gold --capture natural --deck "<its 8 cards>" --client 16.635.1
+    # Round 0: the 2026-10-29 friendly, copied to reports\vision\gold (gold: no auto-accept)
+    $R0 = 'reports\vision\gold'                       # its session folder, or a folder holding only it
+    $R0DECK = 'card-1,card-2,card-3,card-4,card-5,card-6,card-7,card-8'   # the main account's 8 cards
+    & $BB tools\vision_autolabel.py ingest $R0 --sid 20261029_R0_1 --role gold --capture natural --deck $R0DECK --client 16.635.1
 
     # what is ingested, and what to record next
     & $BB tools\vision_autolabel.py status
 
-    # then, per session (MuMu and the browser closed for the scan: a few minutes on the GPU)
+    # then, per session (MuMu and the browser closed for the scan: budget 10-20 min on the GPU)
     & $BB tools\vision_autolabel.py scan $SID
-    & $BB tools\vision_autolabel.py sheet $SID          # open the sheet PNG it names; the legend is printed
-    & $BB tools\vision_autolabel.py label $SID --map "0=3,1=3,2=x,5=s"
+    & $BB tools\vision_autolabel.py sheet $SID          # open the sheet PNG(s) it names; the legend is printed
+    & $BB tools\vision_autolabel.py label $SID --sheet 1 --map "0=3,1=3,2=x,5=s"
     & $BB tools\vision_autolabel.py sheet $SID          # again while clusters are left or were split (s)
-    & $BB tools\vision_autolabel.py label $SID --map "0=goblinstein,1=?"
+    & $BB tools\vision_autolabel.py label $SID --sheet 2 --map "0=goblinstein,1=?"
+
+    --sheet is the number printed on the sheet the map was typed from: cluster ids are new on
+    every sheet, so a map typed from an older sheet is refused instead of labelling other
+    tracks. Track keys (t17=5, t40.1=x) stay the same across sheets.
 
 The registry (N07)
   Each entry appends one label: YOLO classes 2 * (len(base) + k) + side. The base is the real
@@ -70,6 +76,7 @@ Ingest (N08)
   on another drive, and reported), and frames.jsonl is copied next to them, so the store is
   itself a record.py session that harvest.open_recording and VisionLogReader read. The store
   (default reports\vision\autolabel, gitignored) is never committed: frames show account names.
+  Warnings stored in session.json have machine paths cut (scrub_paths).
   The store keeps the recording one level down (<sid>/recording), so a recorder pointed at the
   store root by mistake would not see sessions there to prune.
   The deck: 8 cards, each a RoyaleAPI key as in data/ladder/battles_2p6.csv (hog-rider,
@@ -89,6 +96,11 @@ Ingest (N08)
   written relative to the repo, or not at all, never as machine paths.
   Ingesting again with the same deck and role is safe: images not linked yet are linked (a
   recording still being written, an interrupted ingest), frames.jsonl is refreshed.
+  Disk: the store's images are hard links of the recording's, so deleting the recording root
+  (reports\vision\harvest\$SID) frees nothing while <store>/<sid>/recording/images holds the
+  same files; delete both to get the space back (training raws only, after N11 emit; keep
+  gold raws, plan 4.7). status counts the store's images. The scan adds 150-300 MB per battle
+  in <store>/<sid>/scan (unit_harvest module doc).
 
 Scan, sheet and label (N09, N10)
   scan runs scripts/vision/unit_harvest.scan_session on <store>/<sid>/recording into
@@ -98,25 +110,49 @@ Scan, sheet and label (N09, N10)
   crops.npz, keyed by the scan's SHA-1s, the deck and the settings; --rebuild redoes it):
   the enemy and side-unknown harvest tracks, split where the look changes (S7), flagged S1-S7
   (unit_harvest module doc, N10), and auto-accepted when unflagged, on the enemy side, long,
-  well covered by one confident live read that is on the legend (--no-auto: none). The other
-  tracks are clustered by look; each tile of the sheet is one cluster: up to 4 member tracks
-  (birth, +1 s, mid-life), its flags ('weak' when none: not confident enough), what tonight's
-  model read (live class/how, best harvest class and score) and a suggested legend number.
+  well covered by one confident live read that is on the legend and none of the no-auto
+  reasons holds (form: an evolution or hero slot's class read in another form, ours, units,
+  side, half; unit_harvest.flag_part). A gold session (role gold, capture natural or field)
+  never auto-accepts: every track goes on its sheet (plan 5, 6); --no-auto does the same for
+  any session. The other tracks are clustered by look (two confident reads of different
+  labels never share a cluster); each tile of the sheet is one cluster: up to 4 member tracks
+  (birth, +1 s, mid-life; one of each suggested label first), its flags ('weak' when none:
+  not confident enough), what tonight's model read (live class/how, best harvest class and
+  score), a suggested legend number ('12|13 which form?' when the read cannot tell the form:
+  type the form you see), and a last line 'mix 3x6 2x8' when members suggest different
+  labels (type s to see them one per tile) or 'no auto: ...' with the reasons. Up to
+  --page-tiles clusters per image: sheet_<k>.png, or sheet_<k>_p1.png, _p2, ... .
   The legend lists only the declared deck's labels (build_legend), numbered, '*' where the
   label set has none yet, and the codes x (an effect), o (ours), ? (unsure: masked in
   training), s (split: those tracks come back one per tile on the next sheet). Sheet k
   replaces sheet k-1 in <store>/<sid>/sheet/sheet.json; tracks labelled before are left off.
-  label reads the latest sheet.json. Map keys: a cluster id, a range (4-7), or a track key
-  (t17, t40.1 for a part of a split track); values: a legend number, a name classes.json
-  reads that is on the legend (goblinstein, Vines, BerserkerHero; --off-deck for a name off
-  it), or a code. Every entry is checked first (parse_map, resolve_value): an unknown or
-  off-legend name, a cluster or track not on the sheet, a track labelled before (without
-  --force), a sheet of another scan: all are listed and NOTHING is stored (exit 2). Then the
-  auto-accepted tracks of the sheet are stored too (source "auto").
+  label reads the latest sheet.json. Map keys: a cluster id (then --sheet N, the sheet's
+  number, is needed), a range (4-7), or a track key (t17, t40.1 for a part of a split
+  track); values: a legend number, a name classes.json reads that is on the legend
+  (goblinstein, Vines, BerserkerHero; --off-deck for a name off it), or a code. Every entry is
+  checked first (parse_map, resolve_value): an unknown or off-legend name, a cluster or track
+  not on the sheet, a track labelled before (without --force), a sheet of another scan or not
+  the latest: all are listed and NOTHING is stored (exit 2). Then the auto-accepted tracks of
+  the sheet are stored too (source "auto"; none in a gold session).
   tracks.json (committed, small): {"tracks": [{"key", "h", "part", "first_n", "last_n", "n",
-  "label" (a detector label) or "code" (x, o, ?), "source", "sheet", "cluster", "flags",
-  "read", ...}], "split": [keys], "scan": the scan's identity, "history"}; status counts the
-  "label"s of training sessions.
+  "label" (a detector label) or "code" (x, o, ?), "side", "side_read", "source", "sheet",
+  "cluster", "flags", "read", ...}], "split": [keys], "scan": the scan's identity, "client",
+  "history"}. The contract for N11 (emit) and N13 (mix):
+    - "side" is what a label trains as: "enemy" for every label (the legend is the declared
+      opponent's deck), "ally" for o, the scan's read side for x and ?; "side_read" is the
+      scan's (enemy, ally or unknown).
+    - A part's images are its harvest track h's (the scan's tracks.json) with n in
+      [first_n, last_n]. read.held lists every live track the part held, [key, team, class,
+      form, images, first n, last n], so the images of another unit can be left out.
+    - session.json is the only source of a session's role (gold is never trained on);
+      tracks.json does not copy it, so an `ingest --force` role change cannot go stale here.
+    - A label not in the registry yet (a '*' legend entry) trains as its class's base form
+      (Registry.train_label with the table) until it is appended and has thin_tracks tracks;
+      class indices are written only with Registry.extend(base, require_pin=True).
+    - Auto-accepted tracks (source "auto") are on no cluster: N12's review samples them as a
+      group of their own.
+  status counts the labelled units of training sessions (labelled_tracks: one per harvest or
+  live track, not per part).
 
 Exit codes: 0 ok; 1 a check failed or a change was refused; 2 bad input.
 
@@ -243,6 +279,32 @@ def shown_path(path: str | os.PathLike | None) -> str | None:
         return Path(path).resolve().relative_to(ROOT).as_posix()
     except ValueError:
         return None
+
+
+_PATH_END = r"[^\s'\"<>|,;()]"
+#: An absolute path in a message: a drive (C:\\... or C:/...), a UNC share, or a POSIX path of
+#: two parts or more, not inside a word ("train/dev" stays).
+_ABS_PATH_RE = re.compile(r"(?<![\w.])(?:[A-Za-z]:[\\/]" + _PATH_END + r"*|\\\\" + _PATH_END + r"+"
+                          r"|/(?:[^\s/'\"<>|,;()]+/)+" + _PATH_END + r"*)")
+
+
+def scrub_paths(text: Any) -> str:
+    """A message as committed JSON may hold it: paths under the repo made relative, any other
+    absolute path cut to '<path>/' and its last part. Error texts (a card map or
+    registry that did not load) carry the machine's paths; session.json is committed."""
+    out = str(text)
+    for root in sorted({str(ROOT), ROOT.as_posix()}, key=len, reverse=True):
+        for sep in ("\\", "/"):
+            out = out.replace(root + sep, "")
+        out = out.replace(root, ".")
+
+    def short(m: re.Match) -> str:
+        whole = m.group(0)
+        path = whole.rstrip(".:")
+        name = re.split(r"[\\/]", path.rstrip("\\/"))[-1]
+        return f"<path>/{name}{whole[len(path):]}"
+
+    return _ABS_PATH_RE.sub(short, out)
 
 
 def _inside(child: Path, parent: Path) -> bool:
@@ -538,15 +600,22 @@ class Registry:
         """Entries the base label set already has: they add no class."""
         return [e.label for e in self.entries if e.label in base]
 
-    def extend(self, base: L.LabelSet) -> L.LabelSet:
+    def extend(self, base: L.LabelSet, *, require_pin: bool = False) -> L.LabelSet:
         """The base label set with every entry appended, in registry order. The base's
         yolo_names() stays a prefix (checked). RegistryError for a KataCR-mode base, a base the
-        registry was not pinned to, or a base / train_as target that is no label of the result."""
+        registry was not pinned to, or a base / train_as target that is no label of the result.
+        require_pin: also refuse while base.digest is not pinned in the registry; whatever
+        writes class indices (N11 emit, N13 mix) passes it, so a base from another
+        prepare_yolo_dataset run cannot move the appended indices unnoticed."""
         problems = []
         if base.mode != L.MODE_VISION:
             problems.append(f"the base label set is in {base.mode!r} mode; the registry extends a "
                             f"{L.MODE_VISION!r} label set (prepare_yolo_dataset --labels vision)")
         pin = self.base_pin.get("digest")
+        if require_pin and not pin:
+            problems.append(f"the registry's base.digest is not pinned yet: run `labels --base "
+                            f"tmp\\yolo\\detector_labels.json` and pin the digest it prints ({base.digest} for "
+                            "this base) in data/vision/detector_extra_labels.json before writing class indices")
         if pin and base.digest != pin:
             problems.append(f"the base label set has digest {base.digest}, the registry is pinned to "
                             f"{pin}: appending to another base would move every new index")
@@ -567,11 +636,20 @@ class Registry:
         return out
 
     # ------------------------------------------------------------ training
-    def train_label(self, label: str, tracks: int) -> str:
+    def train_label(self, label: str, tracks: int, table: Any = None) -> str:
         """The label a box of `label` is written as, given its number of labelled training
         tracks: a form entry trains as its base while it has fewer than thin_tracks, unless
-        train_as pins it; every other label trains as itself."""
+        train_as pins it; every other label trains as itself. With the class table, a hero or
+        evolution form that is not in the registry yet (labelled from a '*' legend entry)
+        trains as its class's base form, as a thin form does."""
         e = self._by_label.get(str(label))
+        if e is None and table is not None:
+            lab = L.resolve_label(table, str(label))
+            if lab.type == L.TYPE_UNIT and lab.class_id is not None:
+                vc = table.classes[lab.class_id]
+                if lab.form != vc.base_form and table.detector_key(lab.class_id, lab.form) == str(label):
+                    return table.detector_key(lab.class_id, vc.base_form) or str(label)
+            return str(label)
         if e is None or e.train_as == TRAIN_SELF:
             return str(label)
         if e.train_as is not None:
@@ -580,9 +658,9 @@ class Registry:
             return e.base
         return e.label
 
-    def train_index(self, labels: L.LabelSet, label: str, side: int | None, tracks: int) -> int:
+    def train_index(self, labels: L.LabelSet, label: str, side: int | None, tracks: int, table: Any = None) -> int:
         """The YOLO class index a box of `label` on `side` is written with."""
-        return labels.yolo_index(self.train_label(label, tracks), side)
+        return labels.yolo_index(self.train_label(label, tracks, table), side)
 
     def valid_from(self, label: str) -> tuple[int, ...] | None:
         """The first client version whose look `label` learns (entry or rework), or None."""
@@ -856,8 +934,11 @@ def deck_label_gaps(deck: Sequence[DeckCard], table: Any, labels: Iterable[str])
     be named until the registry has it. Units a card only spawns (MusketeerTurret, BalloonBomb)
     are left out: the summoned unit decides the card, and classes.json does not say which form
     spawns them. A spell's units (HealSpirit, the Spirit Empress forms) count as its look.
-    A missing evo or hero label whose base form is labelled is only a form gap: such tracks can
-    be labelled as the base, which still names the card (plan 1.8, 2.3)."""
+    A missing evo or hero label whose base form is labelled is only a form gap: label such
+    tracks in their true form all the same (the legend offers it, marked '*'), and append the
+    form to the registry before training; it trains as its base until it has thin_tracks
+    labelled tracks (Registry.train_label), which still names the card (plan 1.8, 2.3). A
+    form labelled as its base never gets those tracks."""
     have = set(labels)
     out = []
     for c in deck:
@@ -885,8 +966,9 @@ def deck_label_gaps(deck: Sequence[DeckCard], table: Any, labels: Iterable[str])
             continue
         names = ", ".join(missing)
         if set(missing) <= form_only:
-            out.append(f"{c.given}: no label for {names} yet; until it is appended to "
-                       "data/vision/detector_extra_labels.json, label those tracks as the base form")
+            out.append(f"{c.given}: no detector label for {names} yet: label those tracks as {names} all the "
+                       "same (the legend marks it '*'), and append it to data/vision/detector_extra_labels.json "
+                       "before training; it trains as its base until it has enough tracks")
         else:
             out.append(f"{c.given}: no detector label for {names}; append it to "
                        "data/vision/detector_extra_labels.json before labelling, or those tracks can "
@@ -1266,8 +1348,8 @@ def ingest(recording: str | os.PathLike, deck: str | Sequence[str], *, client: s
     if not stored:
         warnings.append("the recording has no images: record with --image-every")
     warnings += slot_warnings(cards)
-    known = set(crosswalk_base(table).labels) | set(registry.labels if registry else ())
-    warnings += deck_label_gaps(cards, table, known)
+    warnings += deck_label_gaps(cards, table, known_labels(table, registry))
+    warnings = [scrub_paths(w) for w in warnings]          # session.json is committed: no machine paths
 
     now = datetime.fromtimestamp(clock()).isoformat(timespec="seconds")
     header = info.header or {}
@@ -1315,7 +1397,10 @@ def stages_done(paths: SessionPaths) -> list[str]:
 
 
 def labelled_tracks(sids: Iterable[str], labels_root: str | os.PathLike | None = None) -> Counter:
-    """Labelled tracks per label over the sessions' tracks.json files (see TRACKS_FILE)."""
+    """Labelled tracks per label over the sessions' tracks.json files (see TRACKS_FILE): one
+    per unit, not per entry. The parts of one harvest track with one label count once, and so
+    do harvest tracks of one live track (read.uid: a harvest track broken in two); an entry
+    with neither counts alone."""
     out: Counter = Counter()
     for sid in sids:
         p = session_paths(sid, labels_root).tracks_file
@@ -1323,8 +1408,14 @@ def labelled_tracks(sids: Iterable[str], labels_root: str | os.PathLike | None =
             doc = _read_json(p)
         except (OSError, ValueError):
             continue
-        for t in (doc.get("tracks") if isinstance(doc, Mapping) else None) or ():
-            if isinstance(t, Mapping) and isinstance(t.get("label"), str):
+        seen: set[tuple[str, str]] = set()
+        for i, t in enumerate((doc.get("tracks") if isinstance(doc, Mapping) else None) or ()):
+            if not (isinstance(t, Mapping) and isinstance(t.get("label"), str)):
+                continue
+            read = t.get("read") if isinstance(t.get("read"), Mapping) else {}
+            unit = (f"u{read['uid']}" if read.get("uid") else f"h{t['h']}" if t.get("h") is not None else f"#{i}")
+            if (t["label"], unit) not in seen:
+                seen.add((t["label"], unit))
                 out[t["label"]] += 1
     return out
 
@@ -1375,6 +1466,16 @@ def status(labels_root: str | os.PathLike | None = None, store: str | os.PathLik
             notes.append(f"{had - now} gold raw image(s) deleted: keep gold raws (plan 4.7)")
         elif now < had:
             notes.append(f"{had - now} raw image(s) deleted (fine once emitted)")
+        if doc.get("role") == ROLE_GOLD or doc.get("capture") in GOLD_ONLY_CAPTURES:
+            try:
+                tdoc = _read_json(paths.tracks_file) if paths.tracks_file.is_file() else {}
+            except (OSError, ValueError):
+                tdoc = {}
+            autos = [t for t in (tdoc.get("tracks") if isinstance(tdoc, Mapping) else None) or ()
+                     if isinstance(t, Mapping) and t.get("source") == SOURCE_AUTO]
+            if autos:
+                notes.append(f"{len(autos)} auto-accepted label(s) in a gold session (stored while it was train "
+                             f"or dev): check each, e.g. label {sid} --map \"t{autos[0].get('key')}=...\" --force")
         rows.append({"sid": sid, "role": doc.get("role"), "capture": doc.get("capture"),
                      "client": doc.get("client"), "images": now, "images_ingested": had,
                      "seconds": (doc.get("recording") or {}).get("seconds"),
@@ -1432,10 +1533,23 @@ def scan_identity(scan_dir: str | os.PathLike) -> dict[str, Any]:
     return {"created": created, "scan_sha1": sha(out / SCAN_JSON), "tracks_sha1": sha(out / SCAN_TRACKS)}
 
 
-def known_labels(table: Any, registry: Registry | None = None) -> set[str]:
-    """Detector labels a training run can write: the base label set (the preview from
-    classes.json's KataCR names) and the registry's appended labels."""
-    return set(crosswalk_base(table).labels) | set(registry.labels if registry is not None else ())
+def base_labels(table: Any, base: str | os.PathLike | None = BASE_LABELS) -> L.LabelSet:
+    """Tonight's label set: the real one prepare_yolo_dataset wrote (`base`, by default
+    tmp/yolo/detector_labels.json) when it is there and reads, else the preview built from
+    classes.json's KataCR names (crosswalk_base; plan 8: the real one may hold more)."""
+    if base is not None and Path(base).is_file():
+        try:
+            return load_label_set(base)
+        except (RegistryError, OSError, ValueError):
+            pass
+    return crosswalk_base(table)
+
+
+def known_labels(table: Any, registry: Registry | None = None,
+                 base: str | os.PathLike | None = BASE_LABELS) -> set[str]:
+    """Detector labels a training run can write: the base label set (base_labels: the real
+    one when it is there; base=None: the preview) and the registry's appended labels."""
+    return set(base_labels(table, base).labels) | set(registry.labels if registry is not None else ())
 
 
 def spell_label(table: Any, card: str, known: Iterable[str] = ()) -> str:
@@ -1523,7 +1637,8 @@ def legend_lines(legend: Sequence[LegendEntry]) -> list[str]:
     lines = [e.line() for e in legend]
     lines += [f" {k} {text}" for k, text in CODES.items()]
     if any(not e.known for e in legend):
-        lines.append(" * no detector label yet: append it to the registry (a form trains as its base until then)")
+        lines.append(" * no detector label yet: label it all the same, and append it to the registry before "
+                     "training (a form trains as its base until it has enough tracks)")
     return lines
 
 
@@ -1698,9 +1813,13 @@ def read_sheet(paths: SessionPaths) -> dict[str, Any]:
 
 def suggest(part: Mapping[str, Any], legend: Sequence[LegendEntry], table: Any, known: Iterable[str] = ()) -> int | None:
     """The legend number to suggest for a part: its live read (class and form), else its
-    harvest candidates by score, the first that is on the legend."""
+    harvest candidates by score, the first that is on the legend. None when the read cannot
+    tell the form (read["form_open"]: an evolution or hero slot's class read in another form):
+    the owner picks the form from the look (form_choice shows both numbers)."""
     by_label = {e.label: e.n for e in legend}
     read = part.get("read") or {}
+    if read.get("form_open"):
+        return None
     tries: list[tuple[str, int | None]] = []
     if read.get("live"):
         tries.append((str(read["live"]), int(read.get("form") or FORM_BASE)))
@@ -1714,6 +1833,23 @@ def suggest(part: Mapping[str, Any], legend: Sequence[LegendEntry], table: Any, 
         if label in by_label:
             return by_label[label]
     return None
+
+
+def form_choice(part: Mapping[str, Any], legend: Sequence[LegendEntry], table: Any) -> list[int]:
+    """The legend numbers of a form-open read's class (unit_harvest.DeckContext.form_open):
+    its base form first, then the forms the deck's slot shows."""
+    read = part.get("read") or {}
+    if not read.get("form_open") or not read.get("live"):
+        return []
+    lab = L.resolve_label(table, str(read["live"]))
+    if lab.type != L.TYPE_UNIT or lab.class_id is None:
+        return []
+    keys = set()
+    for f in table.classes[lab.class_id].forms:
+        key = table.detector_key(lab.class_id, f)
+        if key:
+            keys.add(key)
+    return sorted((e.n for e in legend if e.label in keys), key=lambda n: (legend[n].form, n))
 
 
 def _read_text(part: Mapping[str, Any]) -> tuple[str, str]:
@@ -1731,24 +1867,78 @@ class SheetResult:
     sid: str
     sheet: int
     doc: dict[str, Any]
-    image: Path | None
+    image: Path | None                   # the first page (None: no cluster to show)
     legend_file: Path
     clusters: int
     pending: int
     auto: int
+    images: list[Path] = field(default_factory=list)      # every page
+
+
+SHEET_PAGE_TILES = 30                    # tiles per sheet page (6 a row at 1400 px: about 2,100 px tall)
+
+
+def is_gold(session: Mapping[str, Any]) -> bool:
+    """Gold sessions (held-out friendlies, Round 0, field) are reviewed track by track and never
+    auto-accepted (plan 5, 6): their labels must not be tonight's model's reads."""
+    return session.get("role") == ROLE_GOLD or session.get("capture") in GOLD_ONLY_CAPTURES
+
+
+def _sure(part: Any, cfg: Any) -> bool:
+    """A confident live read (cluster_parts keeps two such parts apart when they name two
+    labels): the auto-accept thresholds on cover, score and agreement."""
+    r = part.read or {}
+    return ((r.get("cover") or 0.0) >= cfg.accept_cover and (r.get("conf") or 0.0) >= cfg.accept_conf
+            and (r.get("agree") or 0.0) >= cfg.accept_agree)
+
+
+def _mix_text(members: Sequence[Mapping[str, Any]], legend: Sequence[LegendEntry]) -> tuple[str, str]:
+    """(tile text, console text) when a cluster's members suggest more than one label."""
+    sugs = Counter(m["suggest"] for m in members if m.get("suggest") is not None)
+    if len(sugs) < 2:
+        return "", ""
+    order = sorted(sugs, key=lambda n: (-sugs[n], n))
+    return ("mix " + " ".join(f"{sugs[n]}x{n}" for n in order),
+            "mixed: " + ", ".join(f"{sugs[n]}x {legend[n].label}" for n in order))
+
+
+def _shown(keys: Sequence[str], parts_doc: Mapping[str, Mapping[str, Any]], k: int = 4) -> list[str]:
+    """The members a tile shows: one of each suggested label first (most common first, its
+    most typical member), then spread over the rest (unit_harvest.spread_members)."""
+    by_sug: dict[Any, str] = {}
+    counts = Counter(parts_doc[key].get("suggest") for key in keys)
+    for key in keys:
+        by_sug.setdefault(parts_doc[key].get("suggest"), key)
+    first = [by_sug[n] for n in sorted(by_sug, key=lambda n: (-counts[n], -1 if n is None else n))]
+    if len(first) <= 1:
+        return []
+    first = first[:k]
+    rest = [key for key in keys if key not in first]
+    if len(first) < k and rest:
+        step = max(1, len(rest) // (k - len(first)))
+        first += rest[::step][:k - len(first)]
+    return sorted(first, key=list(keys).index)
 
 
 def make_sheet(sid: str, *, labels_root: str | os.PathLike | None = None, store: str | os.PathLike | None = None,
                table: Any = None, registry: Registry | None = None, geometry: Any = None, config: Any = None,
-               rebuild: bool = False, auto: bool = True, width: int = 1400,
-               load: Any = None, log: Any = print, clock: Any = time.time) -> SheetResult:
-    """The contact sheet of one scanned session (module doc, sheet). SheetError otherwise."""
+               rebuild: bool = False, auto: bool | None = None, width: int = 1400,
+               page_tiles: int = SHEET_PAGE_TILES, load: Any = None, log: Any = print,
+               clock: Any = time.time) -> SheetResult:
+    """The contact sheet of one scanned session (module doc, sheet). SheetError otherwise.
+    auto: None follows the session (no auto-accept in a gold session, else on); True for a
+    gold session is refused."""
     UH = _unit_harvest()
     paths = session_paths(sid, labels_root, store)
     try:
         session = load_session(sid, labels_root)
     except (OSError, ValueError) as exc:
         raise SheetError(f"no ingested session {sid} ({exc}); run ingest first") from None
+    gold = is_gold(session)
+    if auto and gold:
+        raise SheetError(f"{sid} is a gold session (role {session.get('role')}, capture {session.get('capture')}): "
+                         "every track is reviewed by hand and nothing is auto-accepted (plan 5, 6)")
+    auto = (not gold) if auto is None else bool(auto)
     deck = session_deck(session)
     try:
         scan = UH.load_scan(paths.scan_dir)
@@ -1778,18 +1968,28 @@ def make_sheet(sid: str, *, labels_root: str | os.PathLike | None = None, store:
         log(f"  analysis: reused {paths.sheet_dir / UH.ANALYSIS_JSON} ({len(an.parts)} parts)")
     legend = build_legend(deck, table, known)
     on_legend = {e.label: e for e in legend}
-    decided = {str(t.get("key")) for t in (old or {}).get("tracks") or () if isinstance(t, Mapping)}
+    entries = [t for t in (old or {}).get("tracks") or () if isinstance(t, Mapping)]
+    decided = {str(t.get("key")) for t in entries}
     split = {str(k) for k in (old or {}).get("split") or ()}
-    stale = sorted((decided | split) - {p.key for p in an.parts})
-    if stale:
-        raise SheetError(f"{paths.tracks_file} names track(s) {', '.join(stale[:6])} that this analysis does not "
-                         "have (other split settings?): make the sheet with the settings it was labelled with, "
-                         "or move tracks.json away", EXIT_CHECK)
+    by_key = an.by_key()
+    stale = sorted((decided | split) - set(by_key))
+    moved = sorted(str(t.get("key")) for t in entries if str(t.get("key")) in by_key
+                   and (t.get("first_n"), t.get("last_n")) != (by_key[str(t.get("key"))].first_n,
+                                                               by_key[str(t.get("key"))].last_n))
+    if stale or moved:
+        what = []
+        if stale:
+            what.append(f"names track(s) {', '.join(stale[:6])} that this analysis does not have")
+        if moved:
+            what.append(f"labelled track(s) {', '.join(moved[:6])} on other images than this analysis cuts them")
+        raise SheetError(f"{paths.tracks_file} {' and '.join(what)} (other split settings?): make the sheet with "
+                         "the settings it was labelled with, or move tracks.json away", EXIT_CHECK)
     parts_doc: dict[str, dict[str, Any]] = {}
     auto_list: list[dict[str, Any]] = []
     for p in an.parts:
         d = p.to_dict(with_sig=False)
         d["suggest"] = suggest(d, legend, table, known)
+        d["choice"] = form_choice(d, legend, table)
         parts_doc[p.key] = d
         if not auto or p.auto is None or p.key in decided or p.key in split:
             continue
@@ -1799,8 +1999,10 @@ def make_sheet(sid: str, *, labels_root: str | os.PathLike | None = None, store:
     auto_keys = {a["key"] for a in auto_list}
     pending = [p for p in an.parts if p.key not in decided and p.key not in auto_keys]
     singles = [p for p in pending if p.key in split]
+    keys = {p.key: parts_doc[p.key]["suggest"] for p in pending
+            if p.key not in split and parts_doc[p.key]["suggest"] is not None and _sure(p, cfg)}
     clusters = UH.cluster_parts([p for p in pending if p.key not in split], max_dist=cfg.cluster_dist,
-                                size_weight=cfg.size_weight)
+                                size_weight=cfg.size_weight, keys=keys)
     for p in sorted(singles, key=lambda q: (q.h, q.part)):
         clusters.append(UH.TrackCluster(len(clusters), [p.key], [0.0], None, p.n))
 
@@ -1816,38 +2018,62 @@ def make_sheet(sid: str, *, labels_root: str | os.PathLike | None = None, store:
         flags = Counter(f for m in members for f in (m.get("flags") or {}))
         sugs = Counter(m["suggest"] for m in members if m.get("suggest") is not None)
         sug = min(sugs, key=lambda n: (-sugs[n], n)) if sugs else None
+        choices = Counter(tuple(m.get("choice") or ()) for m in members if m.get("choice"))
+        choice = list(min(choices, key=lambda ch: (-choices[ch], ch))) if choices else []
         reads = Counter(_read_text(m) for m in members)
         live, harvest = min(reads, key=lambda r: (-reads[r], r))
         flag_txt = " ".join(f for f in UH.FLAGS if f in flags) or "weak"
-        sug_txt = "-" if sug is None else f"{sug} {legend[sug].label}"
+        if sug is not None:
+            sug_txt = f"{sug} {legend[sug].label}"
+        elif choice:
+            sug_txt = "|".join(str(n) for n in choice) + " which form?"
+        else:
+            sug_txt = "-"
+        mix_tile, mix_line = _mix_text(members, legend)
+        why = Counter(str(w).split(":")[0] for m in members for w in (m.get("read") or {}).get("no_auto") or ())
+        why_txt = " ".join(f"{w}x{k}" if k > 1 else w for w, k in sorted(why.items(), key=lambda kv: (-kv[1], kv[0])))
+        note = mix_tile or ("" if flags or not why_txt else "no auto: " + why_txt)
+        shown = _shown(c.keys, parts_doc) or UH.spread_members(c.keys, 4)
         cluster_docs.append({"id": c.id, "tracks": list(c.keys), "dists": list(c.dists), "images": c.images,
                              "flags": {f: flags[f] for f in UH.FLAGS if f in flags}, "suggest": sug,
-                             "read": live, "harvest": harvest})
+                             "choice": choice, "mixed": dict(sugs) if len(sugs) > 1 else {}, "read": live,
+                             "harvest": harvest, "shown": shown})
         tiles.append(UH.SheetTile(f"#{c.id} n={len(c.keys)} {flag_txt}",
-                                  [f"read {live}", f"hv {harvest}", f"sug {sug_txt}"],
-                                  [an.crops.get(k, []) for k in UH.spread_members(c.keys, 4)]))
-        lines.append(f"#{c.id:<3} n={len(c.keys):<3} {flag_txt:18s} read {live:24s} hv {harvest:24s} sug {sug_txt}")
-    label_with = (f'tools\\vision_autolabel.py label {sid} --map "ID=VALUE,..."  '
+                                  [f"read {live}", f"hv {harvest}", f"sug {sug_txt}"] + ([note] if note else []),
+                                  [an.crops.get(k, []) for k in shown]))
+        extra = "  ".join(t for t in (mix_line, ("no auto: " + why_txt) if why_txt else "") if t)
+        lines.append(f"#{c.id:<3} n={len(c.keys):<3} {flag_txt:18s} read {live:24s} hv {harvest:24s} sug {sug_txt}"
+                     + (f"  {extra}" if extra else ""))
+    label_with = (f'tools\\vision_autolabel.py label {sid} --sheet {number} --map "ID=VALUE,..."  '
                   "(VALUE: a legend number, a name, or x o ? s)")
     header = [f"{sid} sheet {number}: {len(clusters)} clusters, {len(pending)} tracks to label, "
-              f"{len(auto_list)} auto-accepted, {len(decided)} labelled before",
+              f"{len(auto_list)} auto-accepted, {len(decided)} labelled before"
+              + ("" if auto else (" (gold: no auto-accept)" if gold else " (no auto-accept)")),
               f"label with: {label_with}"]
     legend_text = legend_lines(legend)
-    image = None
-    if clusters:
-        img = UH.render_sheet(tiles, cell=cfg.cell, width=width, header=header, legend=legend_text)
-        image = UH.write_sheet_image(paths.sheet_dir / f"sheet_{number}", img)
+    images: list[Path] = []
+    per = max(1, int(page_tiles))
+    pages = [tiles[i:i + per] for i in range(0, len(tiles), per)]
+    for j, page in enumerate(pages):
+        head = list(header)
+        if len(pages) > 1:
+            head[0] += f"; page {j + 1} of {len(pages)}: clusters {j * per}-{j * per + len(page) - 1}"
+        img = UH.render_sheet(page, cell=cfg.cell, width=width, header=head, legend=legend_text)
+        name = f"sheet_{number}" if len(pages) == 1 else f"sheet_{number}_p{j + 1}"
+        images.append(UH.write_sheet_image(paths.sheet_dir / name, img))
     legend_file = paths.sheet_dir / f"legend_{number}.txt"
     legend_file.parent.mkdir(parents=True, exist_ok=True)
     legend_file.write_text("\n".join(header + [""] + legend_text + [""] + lines) + "\n", encoding="utf-8")
     now = datetime.fromtimestamp(clock()).isoformat(timespec="seconds")
     doc = {"schema": SHEET_SCHEMA, "sid": sid, "sheet": number, "created": now, "scan": identity,
            "deck": [c.given for c in deck], "legend": [e.to_dict() for e in legend], "codes": dict(CODES),
-           "clusters": cluster_docs, "auto": auto_list, "tracks": parts_doc,
-           "image": None if image is None else image.name, "legend_file": legend_file.name,
-           "stats": an.stats, "markers": an.markers, "tool": "tools/vision_autolabel.py sheet"}
+           "clusters": cluster_docs, "auto": auto_list, "auto_on": auto, "tracks": parts_doc,
+           "image": images[0].name if images else None, "images": [im.name for im in images],
+           "legend_file": legend_file.name, "stats": an.stats, "markers": an.markers,
+           "tool": "tools/vision_autolabel.py sheet"}
     write_json(paths.sheet_file, doc)
-    return SheetResult(sid, number, doc, image, legend_file, len(clusters), len(pending), len(auto_list))
+    return SheetResult(sid, number, doc, images[0] if images else None, legend_file, len(clusters), len(pending),
+                       len(auto_list), images)
 
 
 @dataclass
@@ -1863,16 +2089,31 @@ class LabelResult:
     written: bool
 
 
+SIDE_ENEMY, SIDE_ALLY = "enemy", "ally"
+
+
+def entry_side(dec: Decision, part: Mapping[str, Any]) -> str | None:
+    """The side a stored decision trains on: every label is the enemy's (the legend is the
+    declared opponent's deck: the owner types o for one of ours), o is ours, x and ? keep the
+    side the scan read (they train no box)."""
+    if dec.label:
+        return SIDE_ENEMY
+    if dec.code == CODE_OURS:
+        return SIDE_ALLY
+    return part.get("side")
+
+
 def _track_entry(part: Mapping[str, Any], dec: Decision, source: str, sheet: int, cluster: int | None,
                  at: str) -> dict[str, Any]:
     read = part.get("read") or {}
     return {"key": str(part["key"]), "h": int(part["h"]), "part": int(part.get("part", 0)),
             "parts": int(part.get("parts", 1)), "hk": part.get("hk"), "first_n": part["first_n"],
             "last_n": part["last_n"], "n": part["n"], "first_t": part["first_t"], "last_t": part["last_t"],
-            "side": part.get("side"), "label": dec.label, "code": dec.code, "source": source, "sheet": sheet,
-            "cluster": cluster, "flags": [f for f in (part.get("flags") or {})],
+            "side": entry_side(dec, part), "side_read": part.get("side"), "label": dec.label, "code": dec.code,
+            "source": source, "sheet": sheet, "cluster": cluster, "flags": [f for f in (part.get("flags") or {})],
             "read": {"live": read.get("live"), "form": read.get("form"), "card": read.get("card"),
-                     "how": read.get("how")}, "at": at}
+                     "how": read.get("how"), "uid": read.get("uid"), "held": read.get("held") or [],
+                     "no_auto": read.get("no_auto") or []}, "at": at}
 
 
 def label_session(sid: str, mapping: str | None = None, *, labels_root: str | os.PathLike | None = None,
@@ -1890,7 +2131,8 @@ def label_session(sid: str, mapping: str | None = None, *, labels_root: str | os
     number = int(doc.get("sheet") or 0)
     problems: list[str] = []
     if sheet is not None and int(sheet) != number:
-        problems.append(f"--sheet {sheet}: the latest sheet of {sid} is {number}; label from that one")
+        problems.append(f"--sheet {sheet}: the latest sheet of {sid} is {number}; label from that one "
+                        f"(sheet_{number}*.png, legend_{number}.txt)")
     now_scan = scan_identity(paths.scan_dir)
     if doc.get("scan") != now_scan:
         problems.append(f"sheet {number} was made from another scan of {sid} (scanned again since?): run sheet again")
@@ -1911,6 +2153,9 @@ def label_session(sid: str, mapping: str | None = None, *, labels_root: str | os
     split = {str(k) for k in (old or {}).get("split") or ()}
     entries, bad = parse_map(mapping) if mapping else ([], [])
     problems += bad
+    if sheet is None and any(kind == KIND_CLUSTER for kind, _i, _v in entries):
+        problems.append(f"cluster ids are renumbered on every sheet: pass --sheet with the number of the sheet the "
+                        f"map was typed from (the latest is {number}); track keys (t17) need none")
     events = load_event_cards() if event_cards is None else event_cards
     key_map = load_key_map()[0] if entries else {}
     by_cluster: dict[str, tuple[Decision, int]] = {}
@@ -1976,28 +2221,35 @@ def label_session(sid: str, mapping: str | None = None, *, labels_root: str | os
         out[key] = _track_entry(parts[key], dec, SOURCE_OWNER, number, cid, now)
         stored[dec.label or dec.code] += 1
     n_auto = 0
-    for a in doc.get("auto") or ():
+    warnings = []
+    autos = [a for a in doc.get("auto") or () if a.get("label") is not None]
+    if autos and is_gold(session):
+        warnings.append(f"sheet {number} auto-accepted {len(autos)} track(s), but {sid} is a gold session now: "
+                        "none stored; run sheet again (gold puts every track on the sheet)")
+        autos = []
+    for a in autos:
         key = str(a.get("key"))
-        if key in out or key in final or key in new_split or a.get("label") is None:
+        if key in out or key in final or key in new_split:
             continue
         out[key] = _track_entry(parts[key], Decision(label=str(a["label"])), SOURCE_AUTO, number, None, now)
         n_auto += 1
     open_clusters = [int(cid) for cid, c in sorted(clusters.items())
                      if any(str(k) not in out and str(k) not in new_split for k in c.get("tracks") or ())]
-    warnings = []
     client = session.get("client")
     for label in sorted({e["label"] for e in out.values() if e.get("label")}):
         if label not in known:
+            base = registry.train_label(label, 0, table) if registry is not None else label
+            then = (f"until it is there and has {registry.thin_tracks} tracks it trains as {base}"
+                    if registry is not None and base != label else "until then its boxes cannot be written")
             warnings.append(f"{label} is not a detector label yet: append it to data/vision/detector_extra_labels.json "
-                            "before training (a form trains as its base until then)")
+                            f"before training ({then})")
         elif registry is not None and not registry.valid_for(label, client):
             warnings.append(f"{label}: a session of client {client} does not teach it (valid_from_client / reworks)")
     history = list((old or {}).get("history") or [])
     history.append({"at": now, "sheet": number, "map": mapping or "", "stored": sum(v for k, v in stored.items()
                                                                                    if k != CODE_SPLIT),
                     "auto": n_auto, "split": stored[CODE_SPLIT], "force": bool(force)})
-    tdoc = {"schema": TRACKS_SCHEMA, "sid": sid, "role": session.get("role"), "client": client,
-            "scan": doc.get("scan"), "deck": [c.get("given") for c in session.get("deck") or ()],
+    tdoc = {"schema": TRACKS_SCHEMA, "sid": sid, "client": client, "scan": doc.get("scan"), "deck": [c.get("given") for c in session.get("deck") or ()],
             "updated": now, "tracks": sorted(out.values(), key=lambda t: (int(t["h"]), int(t.get("part", 0)))),
             "split": sorted(new_split, key=lambda k: (int(k.split(".")[0]), k)), "history": history,
             "tool": "tools/vision_autolabel.py label"}
@@ -2206,7 +2458,8 @@ def _cmd_sheet(args) -> int:
         return EXIT_INPUT
     try:
         res = make_sheet(args.sid, labels_root=args.labels_root, store=args.store, table=table, registry=registry,
-                         rebuild=args.rebuild, auto=not args.no_auto, width=args.width)
+                         rebuild=args.rebuild, auto=False if args.no_auto else None, width=args.width,
+                         page_tiles=args.page_tiles)
     except LabelError as exc:
         _print_problems("sheet refused:", exc.problems)
         return exc.code
@@ -2216,11 +2469,17 @@ def _cmd_sheet(args) -> int:
     doc = res.doc
     for line in (res.legend_file.read_text(encoding="utf-8").splitlines()):
         print(line)
-    print(f"sheet {res.sheet} -> {res.image if res.image is not None else '(no cluster to show)'}")
+    if not res.images:
+        print(f"sheet {res.sheet} -> (no cluster to show)")
+    for j, im in enumerate(res.images):
+        page = f" page {j + 1} of {len(res.images)}" if len(res.images) > 1 else ""
+        print(f"sheet {res.sheet}{page} -> {im}")
     print(f"legend -> {res.legend_file}")
     print(f"session file -> {session_paths(args.sid, args.labels_root, args.store).sheet_file}")
     if not res.clusters:
         print(f"nothing left to label: `label {args.sid}` stores the {res.auto} auto-accepted track(s)")
+    else:
+        print(f'next: & $BB tools\\vision_autolabel.py label {args.sid} --sheet {res.sheet} --map "0=...,1=..."')
     st = doc.get("stats") or {}
     print(f"  {st.get('parts', 0)} part(s): {st.get('auto', 0)} auto, {st.get('flagged', 0)} flagged, "
           f"{st.get('weak', 0)} weak; stopwatches {st.get('markers', 0)} ({st.get('markers_matched', 0)} matched)")
@@ -2339,8 +2598,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sid", help="the session id")
     p.add_argument("--rebuild", action="store_true", help="analyse the scan again (default: reuse the cached analysis)")
     p.add_argument("--no-auto", action="store_true",
-                   help="auto-accept nothing: every enemy track goes on the sheet (gold, Round 0)")
+                   help="auto-accept nothing: every enemy track goes on the sheet (always so for a gold session: "
+                        "role gold, or capture natural or field)")
     p.add_argument("--width", type=int, default=1400, help="sheet width in pixels")
+    p.add_argument("--page-tiles", type=int, default=SHEET_PAGE_TILES,
+                   help=f"clusters per sheet image (default {SHEET_PAGE_TILES}; more go on further pages)")
     p.set_defaults(func=_cmd_sheet)
 
     p = sub.add_parser("label", help="label the latest sheet's clusters with one map string; a bad entry stores nothing")
@@ -2351,7 +2613,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help='"ID=VALUE,...": ID a cluster (3), a range (4-7) or a track (t17, t40.1); VALUE a legend '
                         "number, a name classes.json reads, or x (effect), o (ours), ? (unsure), s (split). "
                         "Without --map only the auto-accepted tracks are stored")
-    p.add_argument("--sheet", type=int, default=None, help="refuse unless the latest sheet has this number")
+    p.add_argument("--sheet", type=int, default=None,
+                   help="the number of the sheet the map was typed from (printed on it): needed when the map "
+                        "names clusters, which every sheet numbers anew; refused unless it is the latest")
     p.add_argument("--force", action="store_true", help="change tracks labelled before")
     p.add_argument("--off-deck", action="store_true",
                    help="accept names that are not on the declared deck's legend (the deck was declared wrong)")

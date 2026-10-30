@@ -350,8 +350,8 @@ class TinyLive:
     def new_battle(self):
         self.calls.append("new")
 
-    def end_battle(self):
-        self.calls.append("end")
+    def end_battle(self, *, keep_towers=False):
+        self.calls.append("end kept" if keep_towers else "end")
 
     def start_clock(self, t):
         self.calls.append(("clock", t))
@@ -371,8 +371,9 @@ def test_scan_perception_passes_replays_calls_through():
     sp.note_own_tap(2, 30, slot=1, aim_x_mt=None, aim_y_mt=None, t=None)
     sp.new_battle()
     sp.end_battle()
-    assert sp.tap_tick(None, 2.0) == 7 and sp.segment == 2
-    assert live.calls == [("clock", 1.5), ("tap", 2, 30, 1), "new", "end"]
+    sp.end_battle(keep_towers=True)                  # vision_replay._frame: an end without its end screen
+    assert sp.tap_tick(None, 2.0) == 7 and sp.segment == 3
+    assert live.calls == [("clock", 1.5), ("tap", 2, 30, 1), "new", "end", "end kept"]
     with pytest.raises(AttributeError):
         sp.no_such_thing
 
@@ -597,7 +598,7 @@ class Scene:
         self.live = {}
 
     def track(self, h, frames, x, y, *, cands=(), live=None, src="det", dy=0.0, ys=None):
-        """live: {cls (or one class per image), team, how, card_name, conf, uid}."""
+        """live: {cls (or one class per image), team, how, card_name, conf, uid, form}."""
         lk = None
         if live is not None:
             uid = live.get("uid", h)
@@ -614,7 +615,8 @@ class Scene:
             if live is not None:
                 cls = live["cls"][j] if isinstance(live["cls"], list) else live["cls"]
                 p["live"], p["live_cls"] = [1, live.get("uid", h)], cls
-                self.recs[n]["live"].append([live.get("uid", h), cls, "unit", live.get("conf", 0.8), 0.9, 0, *box])
+                self.recs[n]["live"].append([live.get("uid", h), cls, "unit", live.get("conf", 0.8), 0.9,
+                                             live.get("form", 0), *box])
                 self.live[lk]["cls"][cls] = self.live[lk]["cls"].get(cls, 0) + 1
             self.recs[n]["props"].append(p)
 
@@ -710,6 +712,89 @@ def test_flags_on_hand_made_tracks(tmp_path):
                           frames=s.recs, load=lambda p: grey, log=lines.append)
     assert "S6" not in an2.by_key()["9"].flags and an2.markers[0]["why"] == "play Knight at 0.1 s"
     assert an2.by_key()["4"].flags == {} and an2.by_key()["4"].auto["cls"] == "Giant"
+
+
+def hand_over(s, h, frames, uid, cls, team, *, how="play", card_name=None):
+    """Images `frames` of harvest track h held by another live track (uid, cls, team) instead."""
+    lk = f"1:{uid}"
+    s.live[lk] = {"first_t": 0.0, "last_t": 1.0, "frames": len(frames), "cls": {cls: len(frames)}, "team": team,
+                  "how": how, "card": 1, "card_name": card_name or cls, "forms": {"0": len(frames)}}
+    for n in frames:
+        p = next(p for p in s.recs[n]["props"] if p["h"] == h)
+        p["live"], p["live_cls"] = [1, uid], cls
+        s.recs[n]["live"].append([uid, cls, "unit", 0.8, 0.9 if team == E_TEAM else 0.2, 0, *p["box"]])
+
+
+def test_auto_accept_refuses_form_open_mixed_ours_side_and_our_half(tmp_path):
+    s = Scene(40)
+    enemy_knight = dict(cls="Knight", team=E_TEAM, how="play", card_name="Knight")
+    s.track(1, range(0, 20), 1500, 4000, cands=[("BabyDragon", 1, 0.8)],
+            live=dict(cls="BabyDragon", team=E_TEAM, how="play", card_name="BabyDragon"))   # evo slot, base read
+    s.track(2, range(0, 20), 4000, 4000, cands=[("BabyDragon_EV1", 1, 0.8)],
+            live=dict(cls="BabyDragon", form=1, team=E_TEAM, how="play", card_name="BabyDragon"))   # evo read
+    s.track(3, range(0, 30), 6500, 4000, cands=[("Knight", 1, 0.5)], live=enemy_knight)
+    hand_over(s, 3, range(0, 5), 103, "HogRider", O_TEAM, how="landing")                   # our Hog first
+    s.track(4, range(0, 30), 9000, 4000, cands=[("Knight", 1, 0.5)], live=enemy_knight)
+    hand_over(s, 4, range(25, 30), 104, "Valkyrie", E_TEAM)                                # another enemy unit
+    s.track(5, range(0, 12), 11500, 4000, cands=[("Knight", 0, 0.8)], live=enemy_knight)  # the side head: ours
+    s.track(6, range(0, 12), 14000, 20000, cands=[("Knight", 1, 0.8)], live=enemy_knight)  # born on our half
+    s.track(7, range(0, 12), 16500, 4000, cands=[("Knight", 1, 0.8)], live=enemy_knight)   # clean: accepted
+    grey = np.full((SIZE[1], SIZE[0], 3), 100, np.uint8)
+    an = UH.analyze_scan(s.scan(tmp_path), deck=DECK10, table=TABLE, geometry=GEOM, frames=s.recs,
+                         load=lambda p: grey, log=lambda m: None)
+    by = an.by_key()
+    assert all(by[k].flags == {} for k in by) and sorted(by) == [str(h) for h in range(1, 8)]
+    assert {k: (None if p.auto is None else (p.auto["cls"], p.auto["form"])) for k, p in by.items()} == {
+        "1": None, "2": ("BabyDragon", 1), "3": None, "4": None, "5": None, "6": None, "7": ("Knight", 0)}
+    one = by["1"].read
+    assert one["form_open"].startswith("base or evo?") and one["no_auto"] == ["form: " + one["form_open"]]
+    assert by["2"].read["form_open"] is None and by["2"].read["no_auto"] == []
+    assert by["3"].read["no_auto"] == ["ours: 5 image(s) held by our live track(s)"]
+    assert by["3"].read["held"] == [["1:103", O_TEAM, "HogRider", 0, 5, 0, 4], ["1:3", E_TEAM, "Knight", 0, 25, 5, 29]]
+    assert by["3"].read["cover"] == pytest.approx(25 / 30, abs=1e-3)
+    assert by["4"].read["no_auto"] == ["units: another enemy live track read Valkyrie"]
+    assert by["5"].read["no_auto"] == ["side: the detector's side scores are 0% enemy"]
+    assert by["5"].read["side_det"] == [0.0, pytest.approx(9.6)]
+    assert by["6"].read["no_auto"] == ["half: born on our half"] and by["7"].read["no_auto"] == []
+    ctx = UH.DeckContext.build(TABLE, DECK10)
+    assert ctx.slot_forms == {"BabyDragon": frozenset({1})}
+    assert ctx.form_open("BabyDragon", 1) is None and ctx.form_open("Knight", 0) is None
+    assert ctx.form_open("BabyDragon", 0).startswith("base or evo?")
+
+
+def test_a_cut_is_refined_between_samples_and_each_part_has_its_own_side(tmp_path):
+    grass, red, blue = (82, 152, 70), (220, 40, 40), (40, 40, 220)
+    s = Scene(60)
+    change = 35                                        # images 0-34 our red unit, 35-59 an enemy blue one
+    s.track(1, range(0, 60), 3000, 6000, dy=100)
+    for j, r in enumerate(s.recs):
+        r["epoch"] = "b1e0"
+        p = r["props"][0]
+        p["cands"] = [["HogRider", 0, 0.5]] if j < change else [["Goblin", 1, 0.9]]
+    paint = {j: (unit_box(3000, 6000 + 100 * j), red if j < change else blue) for j in range(60)}
+    bg = np.zeros((SIZE[1], SIZE[0], 3), np.uint8)
+    bg[:] = grass
+
+    def load(path):
+        img = bg.copy()
+        box, colour = paint[int(Path(path).stem)]
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        img[y0:y1, x0:x1] = colour
+        return img
+
+    cfg = UH.FlagConfig(sig_max_frames=12)             # samples 0 5 11 16 21 27 32 38 ...: the change is between
+    an = UH.analyze_scan(s.scan(tmp_path), deck=DECK10, table=TABLE, geometry=GEOM, frames=s.recs,
+                         backgrounds={"b1e0": bg}, load=load, log=lambda m: None, config=cfg)
+    assert [(p.key, p.side, p.first_n, p.last_n) for p in an.parts] == [("1.1", "enemy", 35, 59)]
+    assert (an.stats["split_tracks"], an.stats["split_cuts_moved"], an.stats["ally_parts"]) == (1, 1, 1)
+    assert an.parts[0].flags["S7"] == "part 2 of 2: images 35-59"
+    # refine_cut on hand-made signatures: images 33-37 between the samples 32 and 38
+    a, b = np.zeros(66), np.zeros(66)
+    a[48], b[3] = 1.0, 1.0
+    sigs = {i: (a if i < 35 else b) for i in range(33, 38)}
+    assert UH.refine_cut(sigs, 32, 38, a, b) == 35
+    assert UH.refine_cut({}, 32, 38, a, b) == 38 and UH.refine_cut({}, 5, 6, a, b) == 6
+    assert UH.refine_cut({i: b for i in range(33, 38)}, 32, 38, a, b) == 33
 
 
 def test_track_side_and_the_deck_context():
@@ -819,6 +904,13 @@ def test_find_splits_and_cluster_parts_on_hand_made_signatures():
     drift = [part(1, 20, a), part(2, 19, a * 0.62 + b * 0.38), part(3, 18, a * 0.8 + b * 0.2)]
     assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.3)] == [["3", "2", "1"]]    # joined by the merge pass
     assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.25)] == [["2", "3"], ["1"]]
+    # two confident reads of different labels never share a cluster; a part without one joins either
+    same = [part(1, 10, a), part(2, 9, a), part(3, 8, a)]
+    assert [c_.keys for c_ in UH.cluster_parts(same, keys={"1": 5, "2": 6})] == [["1", "3"], ["2"]]
+    assert [c_.keys for c_ in UH.cluster_parts(same, keys={"1": 5, "2": 5})] == [["1", "2", "3"]]
+    # 3 is nearest 1, but reads another label: it joins 2 (no read), and the merge pass keeps the two apart
+    assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.3, keys={"1": 1, "3": 2})] == [["2", "3"], ["1"]]
+    assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.3, keys={"1": 1, "2": 1})] == [["3", "2", "1"]]
     assert UH.spread_members(list("abcdefgh"), 4) == ["a", "c", "f", "h"] and UH.spread_members(["a"], 4) == ["a"]
     assert UH.part_key(12) == "12" and UH.part_key(12, 1, 2) == "12.1"
 

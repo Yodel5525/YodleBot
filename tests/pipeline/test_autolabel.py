@@ -10,7 +10,10 @@ Checked: images are hard-linked (the same file, so a pruned recording keeps them
 session.json holds the checked deck, role, client and counts, and no machine path; a deck with
 SuperKnight (or any other problem) writes nothing and exits 2; roles from the session id;
 changed roles or decks need --force; ambiguous recordings are refused; status and its coverage.
-No image library, GPU, engine or emulator.
+N10: the legend, the label map, label refusals (cluster maps need --sheet), sheet and label on a
+synthetic scan (paging, labels on other images refused), gold sessions never auto-accepted,
+the side a label trains on, labelled units (not parts) counted, machine paths cut from warnings.
+No image library, GPU, engine or emulator (the synthetic scan needs numpy).
 """
 from __future__ import annotations
 
@@ -212,7 +215,7 @@ def test_label_gaps_name_only_what_the_registry_lacks(keys):
     gaps = VA.deck_label_gaps(VA.parse_deck(DECK_B, resolver), TABLE, known)
     assert len(gaps) == 1                                                  # only the evo slot's form
     assert gaps[0].startswith("inferno-dragon-ev1:") and "InfernoDragon_EV1" in gaps[0]
-    assert "as the base form" in gaps[0]
+    assert "label those tracks as InfernoDragon_EV1 all the same" in gaps[0] and "base form" not in gaps[0]
     bare = VA.deck_label_gaps(VA.parse_deck(DECK_B, resolver), TABLE, VA.crosswalk_base(TABLE).labels)
     text = " | ".join(bare)
     for label in ("BossBandit", "Ronin", "MinionGiant", "DarkMagic", "ThreeMusketeer_Rework_Character_1"):
@@ -390,7 +393,7 @@ LEGEND_A = ["goblinstein", "goblinstein_doctor", "GiantBuffer", "GoblinDemolishe
 
 
 def known():
-    return VA.known_labels(TABLE, VA.Registry.load())
+    return VA.known_labels(TABLE, VA.Registry.load(), base=None)       # the preview: the same on every machine
 
 
 def test_the_legend_lists_only_the_declared_deck(keys):
@@ -451,8 +454,12 @@ def test_names_resolve_through_classes_json_and_the_legend(keys):
     assert "HealSpirit" in res("Heal", legend_c)[1]
     assert res("Zap", legend_c) == res("zap", legend_c) == (VA.Decision(label="zap"), None)
     assert res("MergeMaiden_Normal", legend_c) == (VA.Decision(label="MergeMaiden_Normal"), None)
-    # suggestions: the live read in its form, else the harvest candidates
+    # suggestions: the live read in its form, else the harvest candidates; none when the form is open
     assert VA.suggest({"read": {"live": "BabyDragon", "form": 1}}, legend, TABLE, have) == 13
+    open_read = {"read": {"live": "BabyDragon", "form": 0, "form_open": "base or evo? (a base read ...)"}}
+    assert VA.suggest(open_read, legend, TABLE, have) is None
+    assert VA.form_choice(open_read, legend, TABLE) == [12, 13]
+    assert VA.form_choice({"read": {"live": "BabyDragon", "form": 0}}, legend, TABLE) == []
     assert VA.suggest({"read": {"live": "Knight", "form": 0}, "cands": [["Giant", 0.2], ["GiantBuffer", 0.1]]},
                       legend, TABLE, have) == 2
     assert VA.suggest({"read": {}, "cands": [["Knight", 0.3]]}, legend, TABLE, have) is None
@@ -490,8 +497,9 @@ def test_bad_names_store_nothing_and_good_maps_write_tracks_json(tmp_path, keys,
     sid = "20261101_A_1"
     paths = hand_sheet(tmp_path, keys, sid)
     kw = dict(labels_root=tmp_path / "labels", store=tmp_path / "store", table=TABLE, event_cards=EVENTS)
+    kw1 = dict(kw, sheet=1)
     with pytest.raises(VA.LabelError) as err:            # every bad entry is listed, nothing is stored
-        VA.label_session(sid, "0=Goblinstien,1=Knight,9=x,t99=?,2=goblinstein,t3=s", **kw)
+        VA.label_session(sid, "0=Goblinstien,1=Knight,9=x,t99=?,2=goblinstein,t3=s", **kw1)
     text = " | ".join(err.value.problems)
     for needle in ("cluster 0: unknown name 'Goblinstien'", "cluster 1: 'Knight' (Knight) is not on the declared deck",
                    "no cluster 9 on sheet 1", "no track t99 on sheet 1", "track t3: s splits a cluster"):
@@ -500,26 +508,32 @@ def test_bad_names_store_nothing_and_good_maps_write_tracks_json(tmp_path, keys,
     for bad, needle in (("1=s", "has one track"), ("0=3,0=4", "labelled twice"), ("0=goblinstein,=", "not ID=VALUE"),
                         ("t4=x", "it was split, use t4.0, t4.1")):
         with pytest.raises(VA.LabelError, match=needle):
-            VA.label_session(sid, bad, **kw)
+            VA.label_session(sid, bad, **kw1)
+    with pytest.raises(VA.LabelError, match="renumbered on every sheet") as err:   # cluster ids need --sheet
+        VA.label_session(sid, "0=goblinstein", **kw)
+    assert len(err.value.problems) == 1
     assert not paths.tracks_file.exists()
-    assert cli(tmp_path, "label", sid, "--map", "0=Goblinstien") == VA.EXIT_INPUT
+    assert cli(tmp_path, "label", sid, "--map", "0=Goblinstien", "--sheet", "1") == VA.EXIT_INPUT
     assert "nothing stored" in capsys.readouterr().out and not paths.tracks_file.exists()
+    assert cli(tmp_path, "label", sid, "--map", "0=goblinstein") == VA.EXIT_INPUT
+    assert "--sheet" in capsys.readouterr().out and not paths.tracks_file.exists()
 
-    res = VA.label_session(sid, "0=goblinstein,1=x,2=s", **kw)
+    res = VA.label_session(sid, "0=goblinstein,1=x,2=s", **kw1)
     assert (res.stored, res.auto, res.split, res.open_clusters) == (Counter({"goblinstein": 2, "s": 2, "x": 1}), 1, 2, [])
     doc = json.loads(paths.tracks_file.read_text(encoding="utf-8"))
     assert doc["schema"] == VA.TRACKS_SCHEMA and doc["scan"] == VA.scan_identity(paths.scan_dir)
     assert [(t["key"], t["label"], t["code"], t["source"], t["sheet"], t["cluster"]) for t in doc["tracks"]] == [
         ("1", "goblinstein", None, "owner", 1, 0), ("2", "goblinstein", None, "owner", 1, 0),
         ("3", None, "x", "owner", 1, 1), ("5", "BabyDragon", None, "auto", 1, None)]
-    assert doc["split"] == ["4.0", "4.1"] and doc["tracks"][0]["flags"] == ["S1"] and doc["role"] == "train"
+    assert doc["split"] == ["4.0", "4.1"] and doc["tracks"][0]["flags"] == ["S1"] and "role" not in doc
+    assert [(t["side"], t["side_read"]) for t in doc["tracks"]] == [("enemy", "enemy")] * 4   # labels train as enemy
     assert doc["history"][-1]["map"] == "0=goblinstein,1=x,2=s" and doc["history"][-1]["stored"] == 3
     # labelled before: refused without --force; --force changes it and keeps the history
     with pytest.raises(VA.LabelError, match="labelled already"):
-        VA.label_session(sid, "0=GiantBuffer", **kw)
+        VA.label_session(sid, "0=GiantBuffer", **kw1)
     with pytest.raises(VA.LabelError, match="labelled already"):
         VA.label_session(sid, "t3=?", **kw)
-    VA.label_session(sid, "0=2,t3=?", force=True, **kw)
+    VA.label_session(sid, "0=2,t3=?", force=True, **kw1)
     doc = json.loads(paths.tracks_file.read_text(encoding="utf-8"))
     assert [(t["key"], t["label"], t["code"]) for t in doc["tracks"]] == [
         ("1", "GiantBuffer", None), ("2", "GiantBuffer", None), ("3", None, "?"), ("5", "BabyDragon", None)]
@@ -538,14 +552,17 @@ def test_bad_names_store_nothing_and_good_maps_write_tracks_json(tmp_path, keys,
     assert cli(tmp_path, "label", sid) == VA.EXIT_INPUT and "another scan" in capsys.readouterr().out
 
 
-def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
+def synthetic_scan(tmp_path, keys, sid="20261101_A_1"):
+    """An ingested session with a hand-made scan (scan_frames.jsonl, tracks.json, one
+    background) over 40 real npy images of a grass board: h1 an enemy Rune Giant the live
+    chain reads well (auto-accepted in a training session); h2, h3 red blobs; h4 a blue blob;
+    h5 white, then blue from its 13th image (split)."""
     np = pytest.importorskip("numpy")
     from scripts.vision import unit_harvest as UH
     from scripts.vision.geometry import ArenaGeometry
     from scripts.vision.record import VisionRecorder
     from scripts.vision.types import SCREEN_BATTLE, VisionFrame
 
-    assert (VA.SCAN_DIR, VA.SCAN_JSON, VA.SCAN_TRACKS) == (UH.SCAN_DIR, UH.SCAN_JSON, UH.TRACKS_JSON)
     geom, size, frames = ArenaGeometry.builtin(), (360, 640), 40
     grass = (82, 152, 70)
     colours = {"magenta": (200, 40, 200), "red": (220, 40, 40), "blue": (40, 40, 220), "white": (240, 240, 240)}
@@ -554,8 +571,6 @@ def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
         gx, gy = (float(v) for v in geom.world_to_px(x, y, size))
         return [round(gx - 7, 1), round(gy - 14, 1), round(gx + 7, 1), round(gy, 1)]
 
-    # h1 an enemy Baby Dragon the live chain reads well (auto-accepted); h2, h3 red blobs; h4 a
-    # blue blob; h5 white, then blue from its 13th image (split)
     plan = {1: (range(0, 20), 4500, ["magenta"] * 20), 2: (range(0, 12), 9000, ["red"] * 12),
             3: (range(20, 32), 9000, ["red"] * 12), 4: (range(0, 20), 13000, ["blue"] * 20),
             5: (range(0, 24), 16000, ["white"] * 12 + ["blue"] * 12)}
@@ -573,13 +588,12 @@ def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
             x0, y0, x1, y1 = (int(round(v)) for v in box)
             images[n][y0:y1, x0:x1] = colours[cols[j]]
             p = {"box": box, "src": "det" if h == 1 else "blob", "type": "unit" if h == 1 else "blob", "conf": 0.8,
-                 "cands": [["BabyDragon", 1, 0.8]] if h == 1 else [], "blob": None, "live": None, "live_cls": None,
+                 "cands": [["GiantBuffer", 1, 0.8]] if h == 1 else [], "blob": None, "live": None, "live_cls": None,
                  "x": x, "y": 6000 + 100 * j, "h": h}
             if h == 1:
-                p["live"], p["live_cls"] = [1, 1], "BabyDragon"
-                recs[n]["live"].append([1, "BabyDragon", "unit", 0.8, 0.9, 0, *box])
+                p["live"], p["live_cls"] = [1, 1], "GiantBuffer"
+                recs[n]["live"].append([1, "GiantBuffer", "unit", 0.8, 0.9, 0, *box])
             recs[n]["props"].append(p)
-    sid = "20261101_A_1"
     rec = VisionRecorder(tmp_path / "harvest" / sid, session="capture_t", image_every=1, image_format="npy",
                          clock=lambda: 0.0, wall_clock=lambda: 0.0)
     for n, img in enumerate(images):
@@ -591,8 +605,8 @@ def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
     for r in recs:
         for k, p in enumerate(r["props"]):
             tracks.setdefault(p["h"], UH.HarvestTrack(p["h"], 1)).add(r["n"], k, r["t"], UH.Proposal.from_dict(p))
-    live = {"1:1": {"first_t": 0.0, "last_t": 0.95, "frames": 20, "cls": {"BabyDragon": 20}, "team": 0, "how": "play",
-                    "card": 7, "card_name": "BabyDragon", "forms": {"0": 20}}}
+    live = {"1:1": {"first_t": 0.0, "last_t": 0.95, "frames": 20, "cls": {"GiantBuffer": 20}, "team": 0, "how": "play",
+                    "card": 7, "card_name": "GiantBuffer", "forms": {"0": 20}}}
     (paths.scan_dir / "background").mkdir(parents=True)
     np.save(paths.scan_dir / "background" / "b1e0.npy", images[39])          # frame 39: the empty board
     (paths.scan_dir / UH.TRACKS_JSON).write_text(json.dumps({"schema": UH.SCAN_SCHEMA, "live": live, "harvest": [
@@ -601,6 +615,16 @@ def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
     (paths.scan_dir / UH.SCAN_JSON).write_text(json.dumps({
         "schema": UH.SCAN_SCHEMA, "created": "2026-11-01T21:00:00", "session_dir": "elsewhere",
         "epochs": [{"id": "b1e0", "image": "background/b1e0.npy"}], "meta": {}}), encoding="utf-8")
+    return paths, geom
+
+
+def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
+    pytest.importorskip("numpy")
+    from scripts.vision import unit_harvest as UH
+
+    assert (VA.SCAN_DIR, VA.SCAN_JSON, VA.SCAN_TRACKS) == (UH.SCAN_DIR, UH.SCAN_JSON, UH.TRACKS_JSON)
+    sid = "20261101_A_1"
+    paths, geom = synthetic_scan(tmp_path, keys, sid)
     assert VA.scan_identity(paths.scan_dir) == UH.scan_identity(paths.scan_dir)
 
     kw = dict(labels_root=tmp_path / "labels", store=tmp_path / "store", table=TABLE)
@@ -610,38 +634,111 @@ def test_sheet_and_label_on_a_synthetic_scan(tmp_path, keys):
     doc = res.doc
     assert [c["tracks"] for c in doc["clusters"]] == [["4", "5.1"], ["2", "3"], ["5.0"]]
     assert [c["flags"] for c in doc["clusters"]] == [{"S1": 2, "S7": 1}, {"S1": 2}, {"S1": 1, "S7": 1}]
-    assert doc["auto"] == [{"key": "1", "label": "BabyDragon", "legend": 12, "n": 20}]
-    assert doc["tracks"]["1"]["suggest"] == 12 and doc["tracks"]["2"]["suggest"] is None
+    assert doc["auto"] == [{"key": "1", "label": "GiantBuffer", "legend": 2, "n": 20}] and doc["auto_on"] is True
+    assert doc["tracks"]["1"]["suggest"] == 2 and doc["tracks"]["2"]["suggest"] is None
     assert [e["label"] for e in doc["legend"]] == LEGEND_A and doc["scan"] == VA.scan_identity(paths.scan_dir)
     assert res.image is not None and res.image.exists() and res.image.parent == paths.sheet_dir
+    assert res.images == [res.image] and doc["images"] == [res.image.name] and res.image.stem == "sheet_1"
     assert (paths.sheet_dir / UH.ANALYSIS_JSON).is_file() and paths.sheet_file.is_file()
     legend_text = res.legend_file.read_text(encoding="utf-8")
-    assert " 0 goblinstein" in legend_text and "#0" in legend_text and "label with:" in legend_text
-    again = VA.make_sheet(sid, geometry=geom, log=logs.append, **kw)          # the analysis is reused
+    assert " 0 goblinstein" in legend_text and "#0" in legend_text and f"label {sid} --sheet 1 --map" in legend_text
+    again = VA.make_sheet(sid, geometry=geom, log=logs.append, page_tiles=2, **kw)   # the analysis is reused
     assert again.sheet == 2 and any("reused" in line for line in logs)
     assert [c["tracks"] for c in again.doc["clusters"]] == [["4", "5.1"], ["2", "3"], ["5.0"]]
+    assert [im.stem for im in again.images] == ["sheet_2_p1", "sheet_2_p2"] and again.image == again.images[0]
+    assert all(im.exists() for im in again.images)
 
     with pytest.raises(VA.LabelError, match="the latest sheet"):
         VA.label_session(sid, "0=s", sheet=1, **kw)
-    first = VA.label_session(sid, "0=s,1=goblinstein,2=x", **kw)
+    first = VA.label_session(sid, "0=s,1=goblinstein,2=x", sheet=2, **kw)
     assert (first.auto, first.split, first.open_clusters) == (1, 2, [])
     third = VA.make_sheet(sid, geometry=geom, log=logs.append, **kw)          # the split tracks, one per tile
     assert [c["tracks"] for c in third.doc["clusters"]] == [["4"], ["5.1"]] and third.auto == 0
-    VA.label_session(sid, "0=Vines,1=?", **kw)
+    VA.label_session(sid, "0=Vines,1=?", sheet=3, **kw)
     doc = json.loads(paths.tracks_file.read_text(encoding="utf-8"))
     assert [(t["key"], t["label"], t["code"], t["source"], t["sheet"]) for t in doc["tracks"]] == [
-        ("1", "BabyDragon", None, "auto", 2), ("2", "goblinstein", None, "owner", 2),
+        ("1", "GiantBuffer", None, "auto", 2), ("2", "goblinstein", None, "owner", 2),
         ("3", "goblinstein", None, "owner", 2), ("4", "Vines", None, "owner", 3), ("5.0", None, "x", "owner", 2),
         ("5.1", None, "?", "owner", 3)]
     assert doc["split"] == [] and (doc["tracks"][4]["first_n"], doc["tracks"][4]["last_n"]) == (0, 11)
+    assert [(t["side"], t["side_read"]) for t in doc["tracks"][:4]] == [("enemy", "enemy")] + [("enemy", "unknown")] * 3
+    assert doc["tracks"][0]["read"]["uid"] == "1:1" and doc["tracks"][0]["read"]["held"] == [["1:1", 0, "GiantBuffer", 0,
+                                                                                             20, 0, 19]]
     done = VA.make_sheet(sid, geometry=geom, log=logs.append, **kw)
-    assert (done.clusters, done.image) == (0, None)
+    assert (done.clusters, done.image, done.images) == (0, None, [])
     st = VA.status(tmp_path / "labels", tmp_path / "store", registry=VA.Registry.load())
     assert st["sessions"][0]["stages"] == ["ingest", "scan", "sheet", "label"]
     cov = {c["label"]: c["tracks"] for c in st["coverage"]}
-    assert (cov["goblinstein"], cov["Vines"]) == (2, 1)
+    assert (cov["goblinstein"], cov["Vines"], cov["GiantBuffer"]) == (2, 1, 1)
+    # labels on other images than the analysis cuts (other split settings): refused
+    moved = json.loads(paths.tracks_file.read_text(encoding="utf-8"))
+    moved["tracks"][5]["first_n"] += 1
+    VA.write_json(paths.tracks_file, moved)
+    with pytest.raises(VA.SheetError, match="on other images than this analysis cuts them"):
+        VA.make_sheet(sid, geometry=geom, log=logs.append, **kw)
+    moved["tracks"][5]["first_n"] -= 1
+    VA.write_json(paths.tracks_file, moved)
     # a new scan would get new track ids: refused while tracks.json holds labels
     assert cli(tmp_path, "scan", sid, "--force", "--no-detector") == VA.EXIT_CHECK
     (paths.scan_dir / UH.TRACKS_JSON).write_text("{}", encoding="utf-8")
     with pytest.raises(VA.SheetError, match="labelled on another scan"):
         VA.make_sheet(sid, geometry=geom, log=logs.append, **kw)
+
+
+def test_a_gold_session_is_never_auto_accepted(tmp_path, keys):
+    pytest.importorskip("numpy")
+    sid = "20261101_A_2"                                   # friendly 2: gold
+    paths, geom = synthetic_scan(tmp_path, keys, sid)
+    kw = dict(labels_root=tmp_path / "labels", store=tmp_path / "store", table=TABLE)
+    assert VA.load_session(sid, tmp_path / "labels")["role"] == VA.ROLE_GOLD
+    with pytest.raises(VA.SheetError, match="gold session"):
+        VA.make_sheet(sid, geometry=geom, log=lambda m: None, auto=True, **kw)
+    res = VA.make_sheet(sid, geometry=geom, log=lambda m: None, **kw)
+    assert (res.auto, res.pending, res.doc["auto_on"]) == (0, 6, False)
+    assert any(c["tracks"] == ["1"] for c in res.doc["clusters"])                  # the Rune Giant is on the sheet
+    assert "(gold: no auto-accept)" in res.legend_file.read_text(encoding="utf-8")
+    # a sheet with auto-accepted tracks (made while the session trained): none stored now
+    sheet = json.loads(paths.sheet_file.read_text(encoding="utf-8"))
+    sheet["auto"] = [{"key": "1", "label": "GiantBuffer", "legend": 2, "n": 20}]
+    VA.write_json(paths.sheet_file, sheet)
+    out = VA.label_session(sid, "t2=goblinstein", **kw)
+    assert out.auto == 0 and any("gold session now" in w for w in out.warnings)
+    assert [t["key"] for t in out.doc["tracks"]] == ["2"]
+    # status flags auto labels left in a gold session
+    tdoc = json.loads(paths.tracks_file.read_text(encoding="utf-8"))
+    tdoc["tracks"][0]["source"] = "auto"
+    VA.write_json(paths.tracks_file, tdoc)
+    rows = {r["sid"]: r for r in VA.status(tmp_path / "labels", tmp_path / "store")["sessions"]}
+    assert any("auto-accepted label(s) in a gold session" in n for n in rows[sid]["notes"])
+
+
+def test_sheet_helpers_mixed_clusters_and_counting_units():
+    legend = [VA.LegendEntry(i, label, "Card") for i, label in enumerate(["BushGoblin", "Goblin", "Knight"])]
+    parts = {"a": {"suggest": 0}, "b": {"suggest": 0}, "c": {"suggest": 1}, "d": {"suggest": None}, "e": {"suggest": 0}}
+    assert VA._mix_text(list(parts.values()), legend) == ("mix 3x0 1x1", "mixed: 3x BushGoblin, 1x Goblin")
+    assert VA._mix_text([parts["a"], parts["b"]], legend) == ("", "")
+    assert VA._shown(["a", "b", "c", "d", "e"], parts) == ["a", "b", "c", "d"]
+    assert VA._shown(["a", "b", "e"], parts) == []                                 # one label: spread as before
+    side = VA.entry_side
+    assert (side(VA.Decision(label="Vines"), {"side": "unknown"}), side(VA.Decision(code="o"), {"side": "enemy"}),
+            side(VA.Decision(code="x"), {"side": "unknown"})) == ("enemy", "ally", "unknown")
+
+
+def test_labelled_tracks_count_units_not_parts(tmp_path):
+    VA.write_json(tmp_path / "s1" / VA.TRACKS_FILE, {"tracks": [
+        {"label": "GoblinDemolisher", "h": 4, "part": 0}, {"label": "GoblinDemolisher", "h": 4, "part": 2},
+        {"label": "GoblinDemolisher_kamikaze_form", "h": 4, "part": 1},
+        {"label": "BushGoblin", "h": 7, "read": {"uid": "1:9"}}, {"label": "BushGoblin", "h": 8, "read": {"uid": "1:9"}},
+        {"label": "BushGoblin", "h": 9, "read": {"uid": None}}, {"code": "x", "h": 10}, {"label": "Vines"}, {"label": "Vines"}]})
+    got = VA.labelled_tracks(["s1"], tmp_path)
+    assert got == Counter({"GoblinDemolisher": 1, "GoblinDemolisher_kamikaze_form": 1, "BushGoblin": 2, "Vines": 2})
+
+
+def test_machine_paths_are_cut_from_stored_warnings():
+    root = str(VA.ROOT)
+    text = (f"the RoyaleAPI key map did not load (CardMapError: vendored card map {root}{os.sep}data{os.sep}cards"
+            f"{os.sep}replay_cards.json is missing); registry at C:\\Users\\owner\\Desktop\\reg.json, "
+            "/home/someone/x/reg.json and train/dev stay")
+    out = VA.scrub_paths(text)
+    assert root not in out and "owner" not in out and "someone" not in out
+    assert f"data{os.sep}cards{os.sep}replay_cards.json" in out and "<path>/reg.json," in out and "train/dev" in out

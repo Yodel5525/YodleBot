@@ -14,8 +14,13 @@ nothing here names anything: the owner does, through tools/vision_autolabel.py `
     ... --no-detector                                    blobs only (no GPU; no labels to read)
     ... --limit 400                                      a quick look at the first 400 images
 
-Run it in the GPU venv with MuMu and the browser closed: two detector passes per image (a few
-minutes per battle), then the background median and the blobs on the CPU. The first line scans
+Run it in the GPU venv with MuMu and the browser closed: two detector passes per image, then
+the background median and the blobs on the CPU. Budget (estimates, not measured yet): 10-20
+minutes per battle (HUD reads, 2 YOLO passes and 2 image decodes per image, then the merge and
+the harvest tracker in Python), and 150-300 MB of scan files per battle of about 4,400 images
+(scan_frames.jsonl keeps every harvest box at conf 0.05 or more, up to 300 per image;
+pass1.jsonl.tmp is as large again while pass 2 runs), so about 10 GB for the 36 Tier 1 and 2
+battles. The scan folder can be deleted once its labels are emitted (N11). The first line scans
 a friendly that tools/vision_autolabel.py `ingest` (N08) put in its store
 (<store>/<sid>/recording); vision_autolabel's `scan <sid>` subcommand is meant to call
 scan_session(<store>/<sid>/recording, <store>/<sid>/scan) the same way.
@@ -105,13 +110,16 @@ N10 (analyze_scan; tools/vision_autolabel.py `sheet` and `label` drive it). Per 
   (track_side: candidate scores, a class Yodle2's Hog 2.6 cannot show counting as enemy
   whatever its side, plus the images held by live tracks of each team; a bare blob is
   "unknown", as an enemy spell cast on our half is). Our tracks are left out: their labels
-  come from tonight's model (plan risk 4).
+  come from tonight's model (plan risk 4). A split track's parts each get their own side
+  (frames_side); an ally part is left out the same way.
 - THE SPLIT (S7). Each track's look is a signature per image (appearance: a 64-bin colour
   histogram of the box's foreground pixels against its epoch background, and its log width
-  and height in tiles), on up to `sig_max_frames` evenly spread images. find_splits cuts a
-  track where the mean signatures before and after differ by `split_dist` or more and each
-  side is tight; each part needs `split_min_images` images. Parts are what is flagged,
-  clustered and labelled (key "<h>" or "<h>.<part>").
+  and height in tiles), on every image of a track up to `sig_max_frames` images, else on that
+  many evenly spread ones. find_splits cuts a track where the mean signatures before and after
+  differ by `split_dist` or more and each side is tight; on a sparsely sampled track each cut
+  is then moved to the exact image between its two neighbouring samples (refine_cut); each
+  part needs `split_min_images` images. Parts are what is flagged, clustered and labelled (key
+  "<h>" or "<h>.<part>").
 - THE FLAGS (flag_part), on the live tracks a part held (tracks.json "live"): S1 no enemy (or
   undecided) live track; S2 one no rule explained (how_of unknown, unknown_play or pending,
   card -1, an unknown class); S3 a card or class (or form) the declared deck cannot show
@@ -122,9 +130,17 @@ N10 (analyze_scan; tools/vision_autolabel.py `sheet` and `label` drive it). Per 
   (link_markers, match_markers); S7 split.
 - AUTO-ACCEPT. A part with no flag, of the enemy side, at least `accept_min_images` images,
   live coverage `accept_cover`, mean live score `accept_conf` and one (class, form) on
-  `accept_agree` of its live images carries that read in PartInfo.auto.
+  `accept_agree` of its live images carries that read in PartInfo.auto, unless one of
+  read["no_auto"] holds (flag_part): a class the declared deck shows in an evolution or hero
+  slot read in another form (DeckContext.form_open: the model may read both forms as the base,
+  and the true form must be labelled for it ever to reach thin_tracks), an image held by one
+  of our live tracks, another enemy live track with another read (a unit born where another
+  died inherits the position-only track), the detector's side head under `accept_side` enemy
+  (detector_side: our unit misread as a deck class is put on the enemy team by the tracker's
+  deck rule), or a unit born on our half. vision_autolabel never auto-accepts in a gold session.
 - CLUSTERING (cluster_parts): leader clustering of the parts' mean signatures within
-  `cluster_dist`, then a merge pass; largest first.
+  `cluster_dist`, then a merge pass; largest first. Parts whose confident live reads name two
+  different legend labels are never put in one cluster (keys).
 - THE SHEET: sheet_crop (birth, +1 s, mid-life per shown track; crop_frames), render_sheet
   (header, legend, one tile per cluster) in a 3x5 bitmap font, write_sheet_image.
 save_analysis / load_analysis keep it in the store, keyed by the scan's identity
@@ -167,7 +183,8 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence  # noqa:
 import numpy as np  # noqa: E402
 
 from .detector import BAR_CLASSES, DetectorConfig, box_iou, crop_rect_for  # noqa: E402
-from .geometry import ArenaGeometry, HEIGHT_MT, WIDTH_MT, check_frame_size, in_arena, on_water  # noqa: E402
+from .geometry import (ArenaGeometry, HEIGHT_MT, RIVER_Y_MT, WIDTH_MT, check_frame_size, in_arena,  # noqa: E402
+                       on_water)
 from .labels import (ENEMY_SIDE, TYPE_OBJECT, TYPE_PAD, TYPE_SPELL, TYPE_TOWER, TYPE_UI, TYPE_UNIT,  # noqa: E402
                      TYPE_UNKNOWN, load_class_table, resolve_label, split_side)
 from .record import (FRAMES_FILE, IMAGES_DIR, image_codec_available, list_sessions,  # noqa: E402
@@ -1272,12 +1289,14 @@ class ScanPerception:
     def note_own_tap(self, card: int, tick: int, **kw: Any) -> None:
         self.live.note_own_tap(card, tick, **kw)
 
-    def new_battle(self) -> None:
-        self.live.new_battle()
+    def new_battle(self, **kw: Any) -> None:
+        self.live.new_battle(**kw)
         self.segment += 1
 
-    def end_battle(self) -> None:
-        self.live.end_battle()
+    def end_battle(self, **kw: Any) -> None:
+        # Replay passes keep_towers=True when a battle ends without its end screen
+        # (vision_replay._frame, vision_play.keeps_towers): handed on as given.
+        self.live.end_battle(**kw)
         self.segment += 1
 
     def step(self, rgb: np.ndarray, t: float, stale_s: float = 0.0, *, recorded: Any = None,
@@ -1844,7 +1863,7 @@ class FlagConfig:
     marker_play_tiles: float = 3.0
     # appearance: signatures, the S7 split, clustering
     fg_threshold: int = 30
-    sig_max_frames: int = 48
+    sig_max_frames: int = 480               # a signature on every image up to this many, else evenly spread
     size_weight: float = 0.5
     split_dist: float = 0.35
     split_ratio: float = 0.6
@@ -1856,6 +1875,7 @@ class FlagConfig:
     accept_cover: float = 0.7
     accept_conf: float = 0.6
     accept_agree: float = 0.8
+    accept_side: float = 0.8                # share of the detector's own side scores that are enemy
     # the contact sheet
     cell: int = 72
     crop_pad: float = 0.3
@@ -1865,7 +1885,8 @@ class FlagConfig:
                      "split_min_images", "max_parts", "accept_min_images", "cell"):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"FlagConfig.{name} must be at least 1")
-        for name in ("s4_frac", "marker_conf", "split_ratio", "accept_cover", "accept_conf", "accept_agree"):
+        for name in ("s4_frac", "marker_conf", "split_ratio", "accept_cover", "accept_conf", "accept_agree",
+                     "accept_side"):
             if not 0.0 <= float(getattr(self, name)) <= 1.0:
                 raise ValueError(f"FlagConfig.{name} must be in [0, 1]")
         for name in ("marker_gap_s", "marker_link_tiles", "marker_before_s", "marker_after_s",
@@ -1956,20 +1977,26 @@ def part_key(h: int, part: int = 0, parts: int = 1) -> str:
     return str(int(h)) if int(parts) <= 1 else f"{int(h)}.{int(part)}"
 
 
+FORM_WORDS = ("base", "evo", "hero")
+
+
 @dataclass
 class DeckContext:
     """What the declared deck allows (S3, auto-accept): its cards (catalogue names), every
     label its cards can show (ClassTable.deck_labels) and, per class, the forms its slots show
-    (the base form always; an evolution or hero slot also its form)."""
+    (the base form always; an evolution or hero slot also its form). slot_forms: the classes
+    an evolution or hero slot shows in a form other than their base (form_open)."""
     table: Any
     cards: frozenset[str]
     labels: frozenset[str]
     forms: dict[str, frozenset[int]]
+    slot_forms: dict[str, frozenset[int]] = field(default_factory=dict)
 
     @classmethod
     def build(cls, table: Any, deck: Sequence[tuple[str, int]]) -> "DeckContext":
         cards = [str(c) for c, _ in deck]
         forms: dict[str, set[int]] = {}
+        slots: dict[str, set[int]] = {}
         for card, slot in deck:
             for name in table.deck_classes([str(card)]):
                 vc = table.by_name[name]
@@ -1977,8 +2004,26 @@ class DeckContext:
                 fs.add(vc.base_form)
                 if int(slot) in vc.forms:
                     fs.add(int(slot))
+                    if int(slot) != vc.base_form:
+                        slots.setdefault(name, set()).add(int(slot))
         return cls(table, frozenset(cards), frozenset(table.deck_labels(cards)),
-                   {k: frozenset(v) for k, v in forms.items()})
+                   {k: frozenset(v) for k, v in forms.items()}, {k: frozenset(v) for k, v in slots.items()})
+
+    def form_open(self, cls: str | None, form: int = FORM_BASE) -> str | None:
+        """Why a live read of `cls` in `form` does not tell the unit's form, or None. An
+        evolution or hero slot shows its card in both forms within a match (the evolved cycle
+        only, or after the ability), and a model without the form's label (tonight's has none
+        for most of them, plan 1.3, 1.4) reads both as the base: such a read is never
+        auto-accepted or suggested, so the true form gets labelled (plan 4.5)."""
+        vc = self.table.by_name.get(cls) if cls else None
+        if vc is None:
+            return None
+        slots = self.slot_forms.get(vc.name)
+        if not slots or int(form) in slots:
+            return None
+        other = " or ".join(FORM_WORDS[f] if 0 <= f < len(FORM_WORDS) else str(f) for f in sorted(slots))
+        here = FORM_WORDS[int(form)] if 0 <= int(form) < len(FORM_WORDS) else str(form)
+        return f"base or {other}? (a {here} read of {vc.name} does not tell)"
 
     def problem(self, cls: str | None, form: int = FORM_BASE, card_name: str | None = None) -> str | None:
         """Why a live read (class, form, card) is not this deck's; None when it is."""
@@ -2020,6 +2065,46 @@ def track_side(track: Mapping[str, Any], live_tracks: Mapping[str, Mapping[str, 
             ally += float(frames)
     side = SIDE_ENEMY if enemy > ally else SIDE_ALLY if ally > enemy else SIDE_UNKNOWN
     return side, round(enemy, 3), round(ally, 3)
+
+
+def frames_side(frames: Sequence["TrackFrame"], live_tracks: Mapping[str, Mapping[str, Any]],
+                own_labels: Iterable[str]) -> tuple[str, float, float]:
+    """track_side over some images of a track (one part of it): the same evidence, so over all
+    of a track's images both agree. A part is shown and labelled by its own side."""
+    own = set(own_labels)
+    enemy = ally = 0.0
+    for f in frames:
+        for cls, side, conf in f.cands:
+            if cls in own:
+                if side == 0:
+                    ally += float(conf)
+                elif side == ENEMY_SIDE:
+                    enemy += float(conf)
+            else:
+                enemy += float(conf)
+        if f.live:
+            team = (live_tracks.get(f.live) or {}).get("team")
+            if team == ENEMY_TEAM:
+                enemy += 1.0
+            elif team == OWN_TEAM:
+                ally += 1.0
+    side = SIDE_ENEMY if enemy > ally else SIDE_ALLY if ally > enemy else SIDE_UNKNOWN
+    return side, round(enemy, 3), round(ally, 3)
+
+
+def detector_side(frames: Sequence["TrackFrame"]) -> tuple[float, float]:
+    """(enemy, ally): the detector's own side scores summed over the images, whatever the
+    class. track_side counts a class Yodle2 cannot show as enemy, and the live tracker puts
+    such a label on the enemy team (tracker.py team_of), so one of our units misread as a
+    class of the declared deck looks enemy to both; auto-accept also asks the side head."""
+    enemy = ally = 0.0
+    for f in frames:
+        for _cls, side, conf in f.cands:
+            if side == ENEMY_SIDE:
+                enemy += float(conf)
+            elif side == 0:
+                ally += float(conf)
+    return round(enemy, 3), round(ally, 3)
 
 
 @dataclass(slots=True)
@@ -2220,37 +2305,51 @@ class TrackCluster:
     images: int = 0
 
 
-def cluster_parts(parts: Sequence[PartInfo], *, max_dist: float = 0.3, size_weight: float = 0.5) -> list[TrackCluster]:
+def cluster_parts(parts: Sequence[PartInfo], *, max_dist: float = 0.3, size_weight: float = 0.5,
+                  keys: Mapping[str, Any] | None = None) -> list[TrackCluster]:
     """Leader clustering of the parts' mean signatures (most images first: a part joins the
     nearest centroid within max_dist, else starts a cluster), then clusters whose centroids
     are within max_dist are merged, closest first. A part without a signature is a cluster of
-    its own. Clusters come largest first (tracks, then images), ids 0.. in that order."""
+    its own. keys: part key -> a value (the legend number of a confident live read); parts of
+    two different values never share a cluster (one map value labels a whole cluster), a
+    part without one joins any. Clusters come largest first (tracks, then images), ids 0..
+    in that order."""
+    keyed = dict(keys or {})
     order = sorted(parts, key=lambda p: (-p.n, p.h, p.part))
     groups: list[dict[str, Any]] = []
+
+    def clash(a: Any, b: Any) -> bool:
+        return a is not None and b is not None and a != b
+
     for p in order:
+        k = keyed.get(p.key)
         if p.sig is None:
-            groups.append({"members": [p], "sum": None})
+            groups.append({"members": [p], "sum": None, "key": k})
             continue
         s = np.asarray(p.sig, dtype=np.float64)
         best, best_d = None, None
         for g in groups:
-            if g["sum"] is None:
+            if g["sum"] is None or clash(k, g["key"]):
                 continue
             d = sig_distance(s, g["sum"] / len(g["members"]), size_weight)
             if d <= max_dist and (best_d is None or d < best_d):
                 best, best_d = g, d
         if best is None:
-            groups.append({"members": [p], "sum": s.copy()})
+            groups.append({"members": [p], "sum": s.copy(), "key": k})
         else:
             best["members"].append(p)
             best["sum"] = best["sum"] + s
+            if best["key"] is None:
+                best["key"] = k
     live = [g for g in groups if g["sum"] is not None]
     if len(live) > 1:
         cen = np.stack([g["sum"] / len(g["members"]) for g in live])
 
         def row(i: int) -> np.ndarray:
-            return (0.5 * np.abs(cen[:, :-2] - cen[i, :-2]).sum(axis=1)
-                    + size_weight * 0.5 * np.abs(cen[:, -2:] - cen[i, -2:]).sum(axis=1))
+            r_ = (0.5 * np.abs(cen[:, :-2] - cen[i, :-2]).sum(axis=1)
+                  + size_weight * 0.5 * np.abs(cen[:, -2:] - cen[i, -2:]).sum(axis=1))
+            r_[[clash(live[i]["key"], g["key"]) for g in live]] = np.inf
+            return r_
 
         dist = np.stack([row(i) for i in range(len(live))])
         np.fill_diagonal(dist, np.inf)
@@ -2262,6 +2361,8 @@ def cluster_parts(parts: Sequence[PartInfo], *, max_dist: float = 0.3, size_weig
             k, gone = min(i, j), max(i, j)              # the later group joins the earlier one
             live[k]["members"] += live[gone]["members"]
             live[k]["sum"] = live[k]["sum"] + live[gone]["sum"]
+            if live[k]["key"] is None:
+                live[k]["key"] = live[gone]["key"]
             live[gone]["members"] = []
             alive[gone] = False
             cen[k] = live[k]["sum"] / len(live[k]["members"])
@@ -2364,13 +2465,22 @@ def _main_cls(info: Mapping[str, Any]) -> str:
 
 def flag_part(frames: Sequence[TrackFrame], live_tracks: Mapping[str, Mapping[str, Any]], deck: DeckContext,
               config: FlagConfig | None = None, *, side: str = SIDE_ENEMY, stopwatch: str | None = None,
-              split: str | None = None) -> tuple[dict[str, str], dict[str, Any], list[tuple[str, float]],
-                                                  list[tuple[str, int, int]], dict[str, Any] | None]:
+              split: str | None = None, born_y: float | None = None
+              ) -> tuple[dict[str, str], dict[str, Any], list[tuple[str, float]],
+                         list[tuple[str, int, int]], dict[str, Any] | None]:
     """(flags, read, harvest classes, live classes, auto-accepted read) of one part's images.
     S1-S5 come from the images and the live tracks they held (live_tracks: tracks.json "live",
     "seg:uid" -> team, how, card, card_name, cls); S6 and S7 are passed in (stopwatch: the
     S6 detail; split: the S7 detail). Live tracks of our team count as no live track (S1);
-    the others (enemy, or a team not voted yet) are checked."""
+    the others (enemy, or a team not voted yet) are checked. born_y: where the harvest track
+    began (world y, mt).
+
+    Auto-accept also needs none of read["no_auto"] ("<code>: why"): form, the read cannot tell
+    the form (DeckContext.form_open); ours, an image held by one of our live tracks; units,
+    another enemy live track with another read (a unit born where another died inherits the
+    position-only harvest track); side, the detector's side head under accept_side enemy;
+    half, a unit born on our half. read["held"]: every live track the part held, as [key, team, class,
+    form, images, first n, last n], so a later step can leave out the images of another unit."""
     cfg = config or FlagConfig()
     table = deck.table
     n = len(frames)
@@ -2430,21 +2540,47 @@ def flag_part(frames: Sequence[TrackFrame], live_tracks: Mapping[str, Mapping[st
     live_classes = [(c, int(f), int(m)) for (c, f), m in sorted(reads.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))]
     main = Counter(f.live for f in tf).most_common(1)
     info = (live_tracks.get(main[0][0]) or {}) if main else {}
-    read = {"live": live_classes[0][0] if live_classes else None,
-            "form": live_classes[0][1] if live_classes else FORM_BASE,
+    held_info: list[list[Any]] = []
+    for k in sorted(held, key=lambda x: (min(f.n for f in frames if f.live == x), x)):
+        kf = [f for f in frames if f.live == k]
+        kr = Counter((f.live_cls, f.live_form) for f in kf if f.live_cls)
+        kc, kform = kr.most_common(1)[0][0] if kr else (None, FORM_BASE)
+        held_info.append([k, team(k), kc, int(kform), len(kf), kf[0].n, kf[-1].n])
+    top = live_classes[0] if live_classes else None
+    agree = top[2] / max(1, total) if top else 0.0
+    e_det, a_det = detector_side(frames)
+    read = {"live": top[0] if top else None,
+            "form": top[1] if top else FORM_BASE,
             "card": info.get("card_name"), "how": info.get("how"),
             "uid": main[0][0] if main else None, "live_tracks": len(theirs),
             "harvest": cands[0][0] if cands else None, "harvest_score": cands[0][1] if cands else None,
             "cover": round(len(tf) / max(1, n), 3),
             "conf": round(sum(f.live_conf for f in tf) / len(tf), 3) if tf else None,
-            "ours": sorted(k for k in held if k not in theirs)}
+            "agree": round(agree, 3) if top else None,
+            "ours": sorted(k for k in held if k not in theirs),
+            "held": held_info, "side_det": [e_det, a_det],
+            "form_open": deck.form_open(top[0], top[1]) if top else None}
+    typ = resolve_label(table, top[0]).type if top else None
+    no_auto: list[str] = []
+    if read["form_open"]:
+        no_auto.append("form: " + read["form_open"])
+    mine = sum(hi[4] for hi in held_info if hi[1] == OWN_TEAM)
+    if mine:
+        no_auto.append(f"ours: {mine} image(s) held by our live track(s)")
+    other = sorted({str(hi[2]) for hi in held_info if hi[1] != OWN_TEAM and top and (hi[2], hi[3]) != (top[0], top[1])})
+    if other:
+        no_auto.append("units: another enemy live track read " + ", ".join(other))
+    if e_det + a_det <= 0.0 or e_det / (e_det + a_det) < cfg.accept_side:
+        share = 0.0 if e_det + a_det <= 0.0 else e_det / (e_det + a_det)
+        no_auto.append(f"side: the detector's side scores are {share:.0%} enemy")
+    if typ == TYPE_UNIT and born_y is not None and float(born_y) >= RIVER_Y_MT[1]:
+        no_auto.append("half: born on our half")
+    read["no_auto"] = no_auto
     auto = None
-    if (not flags and side == SIDE_ENEMY and n >= cfg.accept_min_images and read["cover"] >= cfg.accept_cover
-            and (read["conf"] or 0.0) >= cfg.accept_conf and live_classes
-            and live_classes[0][2] / max(1, total) >= cfg.accept_agree):
-        typ = resolve_label(table, live_classes[0][0]).type
-        if typ in (TYPE_UNIT, TYPE_SPELL):
-            auto = {"cls": live_classes[0][0], "form": live_classes[0][1], "type": typ}
+    if (not flags and not no_auto and side == SIDE_ENEMY and n >= cfg.accept_min_images
+            and read["cover"] >= cfg.accept_cover and (read["conf"] or 0.0) >= cfg.accept_conf and top
+            and agree >= cfg.accept_agree and typ in (TYPE_UNIT, TYPE_SPELL)):
+        auto = {"cls": top[0], "form": top[1], "type": typ}
     return flags, read, cands, live_classes, auto
 
 
@@ -2638,31 +2774,38 @@ def analyze_scan(scan: ScanResult, *, deck: Sequence[tuple[str, int]], table: An
                 bgs[epoch] = None
         return bgs[epoch]
 
-    # signatures of evenly spread images of every track (each image read once)
+    # signatures of every image of a track, or of sig_max_frames evenly spread ones (each
+    # image read once)
     picks: dict[int, list[int]] = {h: _evenly(list(range(len(fs))), cfg.sig_max_frames) for h, fs in by_h.items()}
-    need: dict[str, list[tuple[int, int]]] = {}
-    for h, idx in picks.items():
-        for i in idx:
-            f = by_h[h][i]
-            if f.image:
-                need.setdefault(f.image, []).append((h, i))
     sigs: dict[int, dict[int, np.ndarray]] = {h: {} for h in by_h}
-    for image in sorted(need, key=lambda im: min(by_h[h][i].n for h, i in need[im])):
-        try:
-            rgb = np.asarray(load(session / image))[..., :3]
-        except Exception:
-            stats["image_errors"] += 1
-            continue
-        stats["images_read"] += 1
-        for h, i in need[image]:
-            f = by_h[h][i]
-            s = appearance(rgb, f.box, background(f.epoch), threshold=cfg.fg_threshold,
-                           tile=tile_of((rgb.shape[1], rgb.shape[0])))
-            if s is not None:
-                sigs[h][i] = s
 
-    # the S7 split
-    cuts_of: dict[int, list[int]] = {}
+    def read_sigs(want_: Mapping[int, Iterable[int]]) -> None:
+        need: dict[str, list[tuple[int, int]]] = {}
+        for h_, idx_ in want_.items():
+            for i_ in idx_:
+                f_ = by_h[h_][i_]
+                if f_.image and i_ not in sigs[h_]:
+                    need.setdefault(f_.image, []).append((h_, i_))
+        for image in sorted(need, key=lambda im: min(by_h[h_][i_].n for h_, i_ in need[im])):
+            try:
+                rgb = np.asarray(load(session / image))[..., :3]
+            except Exception:
+                stats["image_errors"] += 1
+                continue
+            stats["images_read"] += 1
+            for h_, i_ in need[image]:
+                f_ = by_h[h_][i_]
+                sg = appearance(rgb, f_.box, background(f_.epoch), threshold=cfg.fg_threshold,
+                                tile=tile_of((rgb.shape[1], rgb.shape[0])))
+                if sg is not None:
+                    sigs[h_][i_] = sg
+
+    read_sigs(picks)
+
+    # the S7 split: cuts on the sampled signatures, then (a long track is sampled sparsely)
+    # each cut moved to the image between its two neighbouring samples that best separates
+    # the two looks (refine_cut), from one more read of those images
+    found: dict[int, list[tuple[int, int, np.ndarray, np.ndarray]]] = {}
     for h, fs in by_h.items():
         idx = [i for i in picks[h] if i in sigs[h]]
         if len(fs) < 2 * cfg.split_min_images or len(idx) < 2:
@@ -2670,11 +2813,23 @@ def analyze_scan(scan: ScanResult, *, deck: Sequence[tuple[str, int]], table: An
         min_part = max(3, int(math.ceil(cfg.split_min_images * len(idx) / max(1, len(fs)))))
         cuts = find_splits([sigs[h][i] for i in idx], min_part=min_part, split_dist=cfg.split_dist,
                            split_ratio=cfg.split_ratio, size_weight=cfg.size_weight, max_parts=cfg.max_parts)
-        bounds = [fs[idx[c]].n for c in cuts]
+        if not cuts:
+            continue
+        marks = [0] + list(cuts) + [len(idx)]
+        found[h] = [(idx[c - 1], idx[c], mean_signature([sigs[h][idx[i]] for i in range(marks[j], c)]),
+                     mean_signature([sigs[h][idx[i]] for i in range(c, marks[j + 2])]))
+                    for j, c in enumerate(cuts)]
+    read_sigs({h: [i for lo, hi, _a, _b in plan for i in range(lo + 1, hi)] for h, plan in found.items()})
+    cuts_of: dict[int, list[int]] = {}
+    for h, plan in found.items():
+        fs = by_h[h]
+        starts = [refine_cut(sigs[h], lo, hi, a, b, cfg.size_weight) for lo, hi, a, b in plan]
+        bounds = [fs[i].n for i in starts]
         pieces = _cut(fs, bounds)
         if len(pieces) > 1 and all(len(p) >= cfg.split_min_images for p in pieces):
             cuts_of[h] = bounds
             stats["split_tracks"] += 1
+            stats["split_cuts_moved"] += sum(1 for i, (_lo, hi, _a, _b) in zip(starts, plan) if i != hi)
 
     # the stopwatches (S6)
     events = link_markers(clocks, tile_of, gap_s=cfg.marker_gap_s, link_tiles=cfg.marker_link_tiles,
@@ -2691,7 +2846,7 @@ def analyze_scan(scan: ScanResult, *, deck: Sequence[tuple[str, int]], table: An
         for h, ns in ev.under.items():
             unmatched.setdefault(h, []).append((ns, f"stopwatch at {ev.t0:.1f} s, {ev.why}"))
 
-    # the parts
+    # the parts, each on its own side (an ally part of a track is ours: left out, as ally tracks)
     parts: list[PartInfo] = []
     part_frames: dict[str, list[TrackFrame]] = {}
     for h in sorted(by_h):
@@ -2701,16 +2856,20 @@ def analyze_scan(scan: ScanResult, *, deck: Sequence[tuple[str, int]], table: An
             continue
         pieces = _cut(fs, cuts_of.get(h, []))
         for j, pf in enumerate(pieces):
+            side = sides[h] if len(pieces) == 1 else frames_side(pf, live, own_labels)[0]
+            if side == SIDE_ALLY:
+                stats["ally_parts"] += 1
+                continue
             ns = {f.n for f in pf}
             sw = "; ".join(why for marked, why in unmatched.get(h, ()) if marked & ns)
             split = None
             if len(pieces) > 1:
                 split = f"part {j + 1} of {len(pieces)}: images {pf[0].n}-{pf[-1].n}"
-            flags, read, cands, live_classes, auto = flag_part(pf, live, ctx, cfg, side=sides[h],
-                                                               stopwatch=sw or None, split=split)
-            idx = [i for i in picks[h] if i in sigs[h] and pf[0].n <= fs[i].n <= pf[-1].n]
+            flags, read, cands, live_classes, auto = flag_part(pf, live, ctx, cfg, side=side, stopwatch=sw or None,
+                                                               split=split, born_y=fs[0].y)
+            idx = [i for i in sorted(sigs[h]) if pf[0].n <= fs[i].n <= pf[-1].n]
             sig = mean_signature([sigs[h][i] for i in idx]).tolist() if idx else None
-            p = PartInfo(h, j, len(pieces), meta_of[h].get("hk"), sides[h], len(pf), pf[0].n, pf[-1].n,
+            p = PartInfo(h, j, len(pieces), meta_of[h].get("hk"), side, len(pf), pf[0].n, pf[-1].n,
                          pf[0].t, pf[-1].t, flags, read, cands, live_classes, sig, auto,
                          (int(round(pf[0].x)), int(round(pf[0].y))), [f.n for f in crop_frames(pf)])
             parts.append(p)
@@ -2744,6 +2903,24 @@ def analyze_scan(scan: ScanResult, *, deck: Sequence[tuple[str, int]], table: An
         f"{stats['flagged']} flagged, {stats['weak']} weak; stopwatches {stats['markers']} "
         f"({stats['markers_matched']} matched)")
     return Analysis(parts, crops, [ev.to_dict() for ev in events], dict(stats), identity)
+
+
+def refine_cut(sigs: Mapping[int, Sequence[float]], lo: int, hi: int, left: Sequence[float], right: Sequence[float],
+               size_weight: float = 0.5) -> int:
+    """Where a part starts, between two sampled images lo < hi of a track (find_splits put the
+    cut at hi): the image b in (lo, hi] that leaves the fewest images on the wrong side, an
+    image being on the right's side when its signature is nearer `right`'s mean than
+    `left`'s. Images without a signature do not count; ties go to the later b (hi itself when
+    every image was sampled)."""
+    window = [i for i in range(lo + 1, hi) if i in sigs]
+    nearer_right = {i: sig_distance(sigs[i], right, size_weight) < sig_distance(sigs[i], left, size_weight)
+                    for i in window}
+    best, best_err = hi, None
+    for b in range(hi, lo, -1):
+        err = sum(1 for i in window if (i < b) == nearer_right[i])
+        if best_err is None or err < best_err:
+            best, best_err = b, err
+    return best
 
 
 def _cut(frames: Sequence[TrackFrame], bounds: Sequence[int]) -> list[list[TrackFrame]]:

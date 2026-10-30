@@ -223,6 +223,19 @@ def test_train_as_writes_the_base_index_while_a_form_is_thin(base):
     assert pinned_base.train_label("BerserkerHero", 100) == "Berserker"
     ext2 = pinned_base.extend(base)
     assert pinned_base.train_index(ext2, "BerserkerHero", 1, 100) == ext2.yolo_index("Berserker", 1)
+    # a form labelled before the registry has it (a '*' legend entry) trains as its class's base form
+    assert REG.train_label("BabyDragon_EV1", 0, TABLE) == "BabyDragon" == REG.train_label("BabyDragon_EV1", 99, TABLE)
+    assert REG.train_label("BabyDragon_EV1", 0) == "BabyDragon_EV1"                 # without the table: as before
+    assert REG.train_label("Knight", 0, TABLE) == "Knight" and REG.train_label("Vines", 0, TABLE) == "Vines"
+    assert REG.train_index(ext, "BabyDragon_EV1", 1, 0, TABLE) == ext.yolo_index("BabyDragon", 1)
+
+
+def test_class_indices_need_a_pinned_base(base):
+    with pytest.raises(VA.RegistryError, match="not pinned yet"):
+        registry(entry("Ronin", "Ronin")).extend(base, require_pin=True)
+    pinned = registry(entry("Ronin", "Ronin"), base={"digest": base.digest})
+    assert pinned.extend(base, require_pin=True).index("Ronin") == 155
+    assert registry(entry("Ronin", "Ronin")).extend(base).index("Ronin") == 155      # a preview needs no pin
 
 
 def test_valid_from_client_and_reworks():
