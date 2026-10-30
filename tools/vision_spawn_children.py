@@ -17,8 +17,12 @@ kept, so a regeneration never loses an entry. Names are RoyaleSim card and unit 
 
     kinds           card -> "troop" | "building" | "spell"
     compositions    card -> {unit: count one play deploys}: a troop or building card's
-                    summon_character x count, plus second_summon; and a spell that deploys
-                    a troop (spell.spell_as_deploy with spell.summon): Heal -> {HealSpirit: 1}
+                    summon_character x count, plus second_summon, plus the unit that
+                    summon turns into (spawn_pathfind.morph: Goblin Drill -> {GoblinDrillDig:
+                    1, GoblinDrill: 1}; the dig shows as KataCR's `dirt`, an object no track
+                    follows, so the building is the play's first track); and a spell that
+                    deploys a troop (spell.spell_as_deploy with spell.summon): Heal ->
+                    {HealSpirit: 1}
     variants        a card with forms -> {form card: its elixir}, from spell.variant.options:
                     the Spirit Empress MergeMaiden plays MergeMaiden_Normal (3) below 6 elixir
                     and MergeMaiden_Mounted (6) at 6 or more (royalesim state.rs resolve_play;
@@ -28,17 +32,28 @@ kept, so a regeneration never loses an entry. Names are RoyaleSim card and unit 
     spell_objects   spell card -> its projectile and area-effect object names
     spell_children  spell card -> units it spawns (Goblin Barrel -> BarrelGoblin, Goblin)
     children        unit -> units it creates while alive or as it dies (spawner, death
-                    spawn, projectile and area spawns): Witch -> Skeleton
+                    spawn, projectile and area spawns, the unit it turns into): Witch ->
+                    Skeleton, GoblinDrillDig -> GoblinDrill; and the units a champion's
+                    ability creates, by the champion's unit (ability.effect.unit, unless the
+                    card deploys that unit itself, as Goblinstein's tether names its doctor):
+                    LittlePrince -> ChampionGuard, SkeletonKing -> SkeletonKingSkeleton,
+                    MightyMiner -> MightyMinerBomb
 
 VISION LOOK-ALIKES (LOOKS_LIKE). A unit the detector can only box as another unit's class
 is listed with that unit wherever it is created. 16.402's Goblin Barrel spawns BarrelGoblin
 (15.535's spawned Goblin); KataCR boxes both as `goblin`, which data/vision/classes.json
 reads as the class Goblin, and gives BarrelGoblin no KataCR name. So the barrel's
 spell_children are both: BarrelGoblin for engine states (events.StateTracks), Goblin for the
-screen.
+screen. Likewise KataCR's one `bomb` label is the class GiantSkeletonBomb, and classes.json
+lists BalloonBomb and BombTowerBomb as its "also": a Balloon's or a Bomb Tower's death bomb
+is boxed as GiantSkeletonBomb, so they create it too. (ram-rider's "also" RamRider is not a
+look-alike: it rides the Ram the label already names, and a Ram creating Ram would explain
+a second Ram Rider away.)
 
 Not read: what hero abilities and evolution blocks create (the hero Musketeer's turret, the
-evolved Skeleton Army's General); no detector label exists for those units yet.
+evolved Skeleton Army's General); no detector label exists for those units yet, and some
+name their own hero's unit (the hero Dark Prince's walking form), which as a child would
+explain a second play of the same card away.
 """
 from __future__ import annotations
 
@@ -57,16 +72,19 @@ OUT = ROOT / "data" / "vision" / "spawn_children.json"
 DEFAULT_TABLE = "cards-160402017-20261019.1"
 #: The wheel's own table (15.535.29), read after the selected one.
 FALLBACK_FILE = "cards.json"
-#: Units the detector boxes as another unit's class (module doc).
-LOOKS_LIKE: dict[str, str] = {"BarrelGoblin": "Goblin"}
+#: Units the detector boxes as another unit's class (module doc): data/vision/classes.json's
+#: KataCR `goblin` (Goblin) and `bomb` (GiantSkeletonBomb, "also" BalloonBomb, BombTowerBomb).
+LOOKS_LIKE: dict[str, str] = {"BarrelGoblin": "Goblin", "BalloonBomb": "GiantSkeletonBomb",
+                              "BombTowerBomb": "GiantSkeletonBomb"}
 #: File suffixes of a compiled Python extension (royalesim.abi3.so, royalesim.pyd).
 EXTENSION_SUFFIXES = (".so", ".pyd", ".dylib")
 
 UNIT_KEYS = {"character", "character2", "spawn_character", "death_spawn_character",
-             "summon_character", "attached_character", "spawns", "spawn"}
+             "summon_character", "attached_character", "spawns", "spawn", "morph"}
 SKIP = {"raw", "defaults_applied", "level_scaling", "overlays", "source_table"}
 UNIT_FIELDS = ("spawner", "death_spawn", "death_spawn_projectile", "spawn_area_object",
-               "death_area_effect", "projectile", "attached_character", "area_effect_on_hit")
+               "death_area_effect", "projectile", "attached_character", "area_effect_on_hit",
+               "spawn_pathfind")
 
 
 def package_dir() -> Path:
@@ -176,6 +194,27 @@ def spell_summon(card: Mapping[str, Any]) -> dict[str, int]:
     return {str(summon["character"]): int(summon.get("count") or 1)}
 
 
+def morph_of(unit: Mapping[str, Any] | None) -> str | None:
+    """The unit `unit` turns into where its path ends (spawn_pathfind.morph:
+    GoblinDrillDig -> GoblinDrill), else None (the Miner's dig has morph None)."""
+    path = unit.get("spawn_pathfind") if isinstance(unit, Mapping) else None
+    into = path.get("morph") if isinstance(path, Mapping) else None
+    return str(into) if into else None
+
+
+def ability_units(card: Mapping[str, Any], deployed: Mapping[str, Any]) -> set[str]:
+    """Units a champion card's ability creates (ability.effect.unit): the Little Prince's
+    ChampionGuard, the Skeleton King's SkeletonKingSkeleton, the Mighty Miner's
+    MightyMinerBomb. Not a unit the card deploys itself (`deployed`): Goblinstein's tether
+    names its doctor, which is part of the play."""
+    ab = card.get("ability")
+    effect = ab.get("effect") if isinstance(ab, Mapping) else None
+    unit = effect.get("unit") if isinstance(effect, Mapping) else None
+    if not isinstance(unit, str) or not unit or unit in deployed:
+        return set()
+    return {unit}
+
+
 def card_variants(card: Mapping[str, Any], elixir: Mapping[str, Any]) -> dict[str, int]:
     """{form card: its elixir} of a card with forms (spell.variant.options; the Spirit
     Empress), {} for every other card. A form's cost is its own card's elixir, what the
@@ -219,10 +258,16 @@ def build_one(data: dict) -> dict:
             sc = c.get("summon_character")
             if sc:
                 comp[sc] = int(c.get("count") or 1)
+                into = morph_of(w.units.get(sc))
+                if into and into != sc and w.is_unit(into):
+                    comp[into] = comp.get(into, 0) + comp[sc]
             ss = c.get("second_summon")
             if isinstance(ss, dict) and ss.get("character"):
                 comp[ss["character"]] = comp.get(ss["character"], 0) + int(ss.get("count") or 1)
             compositions[name] = comp
+            made = {u for u in ability_units(c, comp) if u != sc and w.is_unit(u)}
+            if sc and made:
+                children[sc] = sorted(set(children.get(sc, ())) | made)
             continue
         deploys = spell_summon(c)
         if deploys:

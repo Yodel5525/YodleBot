@@ -5,7 +5,8 @@
    "AxeMan_Small"
   ],
   "Balloon": [
-   "BalloonBomb"
+   "BalloonBomb",
+   "GiantSkeletonBomb"
   ],
   "BarbarianHut": [
    "Barbarian"
@@ -21,7 +22,8 @@
   ],
   "BombTower": [
    "BombTowerBomb",
-   "Bomber"
+   "Bomber",
+   "GiantSkeletonBomb"
   ],
   "BombTower_chess": [
    "Bomber_Chess"
@@ -105,8 +107,14 @@
   "GoblinDrill": [
    "Goblin"
   ],
+  "GoblinDrillDig": [
+   "GoblinDrill"
+  ],
   "GoblinDrill_EV1": [
    "Goblin"
+  ],
+  "GoblinDrill_EV1_Dig": [
+   "GoblinDrill_EV1"
   ],
   "GoblinGiant": [
    "SpearGoblinGiant"
@@ -133,6 +141,12 @@
   ],
   "LavaHound": [
    "LavaPups"
+  ],
+  "LittlePrince": [
+   "ChampionGuard"
+  ],
+  "MightyMiner": [
+   "MightyMinerBomb"
   ],
   "Mortar_EV1": [
    "Goblin"
@@ -204,6 +218,9 @@
   ],
   "SkeletonContainerNew": [
    "Skeleton"
+  ],
+  "SkeletonKing": [
+   "SkeletonKingSkeleton"
   ],
   "SpearGoblinGiant": [
    "SpearGoblin"
@@ -383,6 +400,7 @@
    "GoblinDemolisher": 1
   },
   "GoblinDrill": {
+   "GoblinDrill": 1,
    "GoblinDrillDig": 1
   },
   "GoblinGang": {

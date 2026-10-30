@@ -61,7 +61,9 @@ UNKNOWN PLAYS. --unknown-plays turns on the event deriver's safety net, as visio
 --unknown-plays does live (scripts/vision/events.py rule 6, docs/NEW_CARDS_PLAN.md 2.2): an
 enemy track no card explains becomes an UNKNOWN play (card -1, "UNKNOWN" in the summary's
 opp_cards), and the summary's events add "opp_unknown" (how many) and "unknown_tracks" (the
-enemy tracks no card explained, by class). Leave it out to replay the default chain.
+enemy tracks no card explained, by class). --unknown-cost sets the elixir each is charged
+(default events.UNKNOWN_PLAY_COST, 4; the summary's "unknown_plays" says which). Leave them out
+to replay the default chain.
 
 Not here: fitting the perception noise profile (V11's fit_noise_profile, from these errors
 and own-tap ground truth) needs E17's profile format, which is not built yet.
@@ -1074,6 +1076,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--unknown-plays", action="store_true",
                     help="report an enemy track no card explains as an UNKNOWN play (card -1), as "
                          "vision_play --unknown-plays does; default: counted, not reported")
+    ap.add_argument("--unknown-cost", type=int, default=None, metavar="ELIXIR",
+                    help="with --unknown-plays: the elixir each UNKNOWN play is charged (default: "
+                         "events.UNKNOWN_PLAY_COST, as vision_play)")
     ap.add_argument("--no-detector", action="store_true", help="screen cues and HUD only")
     ap.add_argument("--recorded", action="store_true",
                     help="use the recording's detections (a vision_play session) instead of the detector")
@@ -1097,6 +1102,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         det_config = detector_config(args.conf, args.imgsz, args.max_det)
     except ValueError as exc:
         print(f"detector settings: {exc}")
+        return 2
+    try:
+        ev_config = VP.event_config(args)         # None: the live default (no --unknown-plays)
+    except ValueError as exc:
+        print(f"UNKNOWN plays: {exc}")
         return 2
     from scripts.vision import capture as CAP
     from scripts.vision import events as EV
@@ -1160,7 +1170,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config and config.get("deck") and config.get("deck_ids"):
         live_names = {int(i): str(n) for n, i in zip(config["deck"], config["deck_ids"])}
     unknown = bool(args.unknown_plays)
-    ev_config = EV.EventConfig(unknown_plays=True) if unknown else None      # None: the live default
     perception = ReplayPerception(hud_reader=hud_reader, tracker=Tracker(own_classes=table.deck_labels(deck)),
                                   deriver=EV.EventDeriver(tables, ev_config, own_deck=deck_ids), geometry=geometry,
                                   detector=detector, names=names, ticks=ticks, recorded=args.recorded)

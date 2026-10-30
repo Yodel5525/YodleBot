@@ -28,10 +28,13 @@ UNKNOWN PLAYS (--unknown-plays, off by default; docs/NEW_CARDS_PLAN.md 2.2). An 
 card of the event tables explains (a card the detector names and the tables lack, a hero's extra
 unit, a misread) is reported as an UNKNOWN play, card -1: the model reads it as row token 1 in
 the opponent's memory (opp_seen / opp_last, legacy and v2 rows), a v2 row's opponent elixir is
-charged events.UNKNOWN_PLAY_COST for it and is no longer exact, it is not added to the
-opponent's known cards, and an enemy label the class table cannot place stays on the board as
-an unknown unit. Without the flag such units are dropped, as before. Each battle's end record
-then counts the UNKNOWN plays (opp_unknown).
+charged events.UNKNOWN_PLAY_COST for it (--unknown-cost sets another) and is no longer exact,
+and it is not added to the opponent's known cards. Without the flag such a unit is only counted
+(OppStats.unknown), as before. Either way the unit stays on the board, named by its class's card
+in the class table: the board's card -1 rows (PublicStateBuilder unknown_units, which the flag also turns on) are for
+labels the class table cannot place, and the live chain never tracks those (the tracker gets the
+detector's units and spells only). Each battle's end record then counts the UNKNOWN plays
+(opp_unknown).
 
 THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipped):
 
@@ -1325,8 +1328,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="allow waiting at full elixir with a playable card")
     ap.add_argument("--unknown-plays", action="store_true",
                     help="an enemy unit no card explains is an UNKNOWN play (row token 1, charged "
-                         f"{EV.UNKNOWN_PLAY_COST} elixir; the count is then not exact) and an "
-                         "unplaceable enemy label stays on the board; default: dropped, as before")
+                         f"{EV.UNKNOWN_PLAY_COST} elixir; the count is then not exact); its unit stays "
+                         "on the board as before; default: counted, not reported")
+    ap.add_argument("--unknown-cost", type=int, default=None, metavar="ELIXIR",
+                    help="with --unknown-plays: the elixir each UNKNOWN play is charged (default "
+                         f"{EV.UNKNOWN_PLAY_COST}, the mean cost of the cards with no KataCR class; an "
+                         "unlinked child or ability unit really costs 0, so the gate picks it)")
     CT.add_control_args(ap)
     import rs_engine
     rs_engine.add_engine_args(ap)
@@ -1350,8 +1357,26 @@ def _say(lines: Iterable[str]) -> None:
         print(line, flush=True)
 
 
+def event_config(args: argparse.Namespace) -> "EV.EventConfig | None":
+    """The deriver's EventConfig from --unknown-plays and --unknown-cost: None (the defaults, the
+    call as before) without --unknown-plays; with it, rule 6 on, each UNKNOWN play charged
+    --unknown-cost (default events.UNKNOWN_PLAY_COST). ValueError for --unknown-cost without
+    --unknown-plays or below 0. tools/vision_replay.py uses it too."""
+    cost = getattr(args, "unknown_cost", None)
+    if not args.unknown_plays:
+        if cost is not None:
+            raise ValueError("--unknown-cost applies to --unknown-plays")
+        return None
+    return EV.EventConfig(unknown_plays=True, **({} if cost is None else {"unknown_cost": cost}))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        event_config(args)                              # refuse a bad --unknown-cost before anything
+    except ValueError as exc:
+        print(f"refusing to start: {exc}")
+        return 2
     if STOP_FILE.exists():
         print(f"refusing to start: {STOP_FILE} exists. Delete it to run.")
         return 2
@@ -1429,8 +1454,7 @@ def _main(args: argparse.Namespace) -> int:
     tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck))
     # N02 (--unknown-plays): UNKNOWN plays and unknown units; without it, the calls as before
     unknown = bool(args.unknown_plays)
-    deriver = EV.EventDeriver(tables, EV.EventConfig(unknown_plays=True) if unknown else None,
-                              own_deck=deck_ids)
+    deriver = EV.EventDeriver(tables, event_config(args), own_deck=deck_ids)
     perception = LivePerception(hud_reader=hud_reader, tracker=tracker, deriver=deriver,
                                 geometry=geometry, detector=detector)
     # v2 rows (E14) also show the spells in flight: spell tracks become "spells" rows in the
@@ -1495,8 +1519,7 @@ def _main(args: argparse.Namespace) -> int:
                          f"until they land (--obs-delay {plan.obs_delay} ticks); spells in flight")
         if unknown:
             lines.append(f"  unknown    ON: an enemy unit no card explains is an UNKNOWN play (token 1, "
-                         f"{deriver.config.unknown_cost} elixir, count not exact); "
-                         "unplaceable enemy labels stay on the board")
+                         f"{deriver.config.unknown_cost} elixir, count not exact)")
         if detector is None:
             lines.append("  no detector: the board stays empty for the model and taps are refused")
         if not hud_reader.clock_reader.ready:

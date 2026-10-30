@@ -804,6 +804,140 @@ def test_generator_finds_a_table_in_derived_or_in_the_extension(tmp_path):
         VSC.find_table("cards-none.1", pkg)
 
 
+# ---------------------------------------------------------------------------
+# N01 review fixes: KataCR's `bomb` after a Balloon or a Bomb Tower, the Goblin Drill's
+# building, and the units champions' abilities create
+# ---------------------------------------------------------------------------
+def vision_tables(table: dict | None = None) -> tuple[dict, dict, EV.EventTables]:
+    """(the shipped spawn table or `table`, every card of it -> an id, its EventTables with
+    data/vision/classes.json's class map): what the live chain builds."""
+    path = ROOT / "data" / "vision" / "classes.json"
+    if not path.exists():
+        pytest.skip("data/vision/classes.json (E16) is not there")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    table = EV.load_spawn_children() if table is None else table
+    ids = {name: i for i, name in enumerate(sorted(table["kinds"]))}
+    tb = EV.EventTables.from_names(table, ids, class_of=EV.unit_class_map(doc),
+                                   ignore=EV.cardless_classes(doc))
+    return table, ids, tb
+
+
+@pytest.mark.parametrize("parent", ["Balloon", "BombTower"])
+def test_a_death_bomb_boxed_as_the_giant_skeletons_is_its_parents_child(parent):
+    table, ids, tb = vision_tables()
+    assert "GiantSkeletonBomb" in table["children"][parent]          # LOOKS_LIKE
+    assert tb.explains(parent, "GiantSkeletonBomb") and tb.explains("GiantSkeleton", "GiantSkeletonBomb")
+
+    def run(tables):
+        d = started(tables)
+        ev = d.update([tk(1, parent, E, 9000, 20000, 100, 101)], 101)
+        assert [(p.card, p.kind) for p in ev.opp_plays] == [(ids[parent], "unit")]
+        d.update([tk(1, parent, E, 9000, 22000, 100, 200, hp=0.05)], 200)        # it dies here
+        # KataCR's one `bomb` label is the class GiantSkeletonBomb (classes.json "also")
+        return d, d.update([tk(2, "GiantSkeletonBomb", E, 9000, 22000, 205, 206)], 206)
+
+    d, ev = run(tb)
+    assert ev.opp_plays == [] and d.card_of(2) == ids[parent] and d.how_of(2) == "child"
+    assert d.opp_stats.children == 1 and d.opp_stats.unknown == {}
+    # before: only a Giant Skeleton explained the class, so the bomb was an unknown track
+    old = json.loads(json.dumps(table))
+    old["children"][parent] = [k for k in old["children"][parent] if k != "GiantSkeletonBomb"]
+    d, ev = run(vision_tables(old)[2])
+    assert ev.opp_plays == [] and d.card_of(2) is None and d.opp_stats.unknown == {"GiantSkeletonBomb": 1}
+
+
+def test_a_goblin_drill_building_is_a_goblin_drill_play():
+    table, ids, tb = vision_tables()
+    drill = ids["GoblinDrill"]
+    assert table["compositions"]["GoblinDrill"] == {"GoblinDrill": 1, "GoblinDrillDig": 1}
+    assert table["children"]["GoblinDrillDig"] == ["GoblinDrill"]
+    assert tb.unit_cards("GoblinDrill") == (drill,) and tb.explains("GoblinDrillDig", "GoblinDrill")
+    d = started(tb)
+    # the dig is KataCR's `dirt`, an object no track follows: the building is the first track
+    ev = d.update([tk(1, "GoblinDrill", E, 3500, 26000, 300, 301)], 301)
+    assert [(p.card, p.kind, p.uids) for p in ev.opp_plays] == [(drill, "unit", [1])]
+    ev = d.update([tk(1, "GoblinDrill", E, 3500, 26000, 300, 330),
+                   tk(2, "Goblin", E, 3500, 26800, 325, 330)], 330)                # its spawner goblin
+    assert ev.opp_plays == [] and d.card_of(2) == drill and d.opp_stats.unknown == {}
+    # before: the composition was the dig alone, so the building was an unknown track
+    old = json.loads(json.dumps(table))
+    old["compositions"]["GoblinDrill"] = {"GoblinDrillDig": 1}
+    d = started(vision_tables(old)[2])
+    assert d.update([tk(1, "GoblinDrill", E, 3500, 26000, 300, 301)], 301).opp_plays == []
+    assert d.opp_stats.unknown == {"GoblinDrill": 1}
+
+    # engine names (StateTracks): the dig is the play, and the drill it turns into its child
+    raw = EV.EventTables.from_names(table, ids)
+    d = started(raw)
+    ev = d.update([tk(1, "GoblinDrillDig", E, 9000, 4000, 100, 101)], 101)
+    assert [p.card for p in ev.opp_plays] == [drill]
+    d.update([tk(1, "GoblinDrillDig", E, 3500, 26000, 100, 158)], 158)             # it digs across
+    ev = d.update([tk(2, "GoblinDrill", E, 3500, 26000, 160, 161)], 161)
+    assert ev.opp_plays == [] and d.card_of(2) == drill and d.how_of(2) == "child"
+
+
+def test_a_champions_ability_units_are_its_children():
+    table, ids, tb = vision_tables()
+    assert table["children"]["LittlePrince"] == ["ChampionGuard"]
+    assert table["children"]["SkeletonKing"] == ["SkeletonKingSkeleton"]
+    assert table["children"]["MightyMiner"] == ["MightyMinerBomb"]
+    assert "goblinstein" not in table["children"]       # its tether names the doctor of the play itself
+    prince, king = ids["LittlePrince"], ids["SkeletonKing"]
+    d = started(tb)
+    ev = d.update([tk(1, "LittlePrince", E, 9000, 20000, 100, 101),
+                   tk(2, "SkeletonKing", E, 3500, 20000, 100, 101)], 101)
+    assert sorted(p.card for p in ev.opp_plays) == sorted([prince, king])
+    # 10 s later both use their abilities: the Royal Guardian, and skeletons around the King
+    # (classes.json reads SkeletonKingSkeleton as the class Skeleton, KataCR's `skeleton`)
+    alive = [tk(1, "LittlePrince", E, 9000, 21000, 100, 301), tk(2, "SkeletonKing", E, 3500, 21000, 100, 301)]
+    made = [tk(3, "ChampionGuard", E, 9000, 19000, 300, 301)] + [
+        tk(4 + i, "Skeleton", E, 3500 + dx, 21000 + dy, 300, 301)
+        for i, (dx, dy) in enumerate([(2500, 0), (-2500, 0), (0, 2500), (0, -2500)])]
+    ev = d.update(alive + made, 301)
+    assert ev.opp_plays == []                            # before: a phantom Skeletons-type play
+    assert d.card_of(3) == prince and [d.card_of(u) for u in (4, 5, 6, 7)] == [king] * 4
+    assert d.opp_stats.unknown == {} and d.opp_stats.children == 5
+
+
+def test_the_generator_reads_morphs_champion_abilities_and_the_bomb_lookalikes():
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    units = {"GoblinDrillDig": {"spawn_pathfind": {"speed": 300, "morph": "GoblinDrill"}},
+             "GoblinDrill": {"spawner": {"character": "Goblin"}}, "Goblin": {},
+             "Miner": {"spawn_pathfind": {"speed": 650, "morph": None}},
+             "LittlePrince": {}, "ChampionGuard": {}, "goblinstein": {}, "goblinstein_doctor": {},
+             "Balloon": {"death_spawn": {"character": "BalloonBomb"}}, "BalloonBomb": {}}
+    cards = [
+        {"name": "GoblinDrill", "kind": "building", "elixir": 4, "summon_character": "GoblinDrillDig"},
+        {"name": "Miner", "kind": "troop", "elixir": 3, "summon_character": "Miner"},
+        {"name": "LittlePrince", "kind": "troop", "elixir": 3, "summon_character": "LittlePrince",
+         "ability": {"effect": {"kind": "guard", "unit": "ChampionGuard"}}},
+        {"name": "Goblinstein", "kind": "troop", "elixir": 5, "summon_character": "goblinstein",
+         "second_summon": {"character": "goblinstein_doctor", "count": 1},
+         "ability": {"effect": {"kind": "tether", "unit": "goblinstein_doctor"}}},
+        {"name": "Balloon", "kind": "troop", "elixir": 5, "summon_character": "Balloon"},
+    ]
+    doc = VSC.build({"version": "cards-mini.1", "cards": cards, "units": units, "hero_forms": [],
+                     "projectiles": {}, "area_effect_objects": {}}, files=["mini.json"])
+    assert doc["compositions"]["GoblinDrill"] == {"GoblinDrillDig": 1, "GoblinDrill": 1}
+    assert doc["compositions"]["Miner"] == {"Miner": 1}                  # its dig turns into nothing
+    assert doc["compositions"]["Goblinstein"] == {"goblinstein": 1, "goblinstein_doctor": 1}
+    assert doc["children"] == {"Balloon": ["BalloonBomb", "GiantSkeletonBomb"], "GoblinDrill": ["Goblin"],
+                               "GoblinDrillDig": ["GoblinDrill"], "LittlePrince": ["ChampionGuard"]}
+
+
+def test_every_katacr_lookalike_is_one_of_the_generators():
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    path = ROOT / "data" / "vision" / "classes.json"
+    if not path.exists():
+        pytest.skip("data/vision/classes.json (E16) is not there")
+    katacr = json.loads(path.read_text(encoding="utf-8"))["katacr"]
+    rides = {"RamRider"}           # rides the Ram its label names: not a look-alike (generator doc)
+    also = {(u, e["class"]) for e in katacr.values() for u in e.get("also", ()) if u not in rides}
+    assert also == {("BalloonBomb", "GiantSkeletonBomb"), ("BombTowerBomb", "GiantSkeletonBomb")}
+    assert all(VSC.LOOKS_LIKE.get(u) == cls for u, cls in also)
+    assert set(VSC.LOOKS_LIKE.values()) <= {e.get("class") for e in katacr.values()}
+
+
 def test_events_imports_only_the_standard_library_and_its_package():
     tree = ast.parse((ROOT / "scripts" / "vision" / "events.py").read_text(encoding="utf-8"))
     names = set()

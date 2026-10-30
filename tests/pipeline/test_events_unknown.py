@@ -280,3 +280,49 @@ def test_vision_replay_unknown_plays_flag(tmp_path, monkeypatch, capsys):
     assert rc == 0 and s["unknown_plays"] == {"cost": EV.UNKNOWN_PLAY_COST}
     assert (s["events"]["opp_unknown"], s["events"]["unknown_tracks"]) == (0, {})
     assert "unknown    UNKNOWN plays on (card -1, 4 elixir each)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# --unknown-cost (review fix): the gate (N14) can set the charge without a code change
+# ---------------------------------------------------------------------------
+def test_event_config_from_the_unknown_flags():
+    pytest.importorskip("numpy")
+    from scripts import vision_play as VP
+
+    parse = VP.build_parser().parse_args
+    args = parse([])
+    assert (args.unknown_plays, args.unknown_cost) == (False, None)
+    assert VP.event_config(args) is None                           # the deriver's defaults, as before
+    assert VP.event_config(parse(["--unknown-plays"])) == EV.EventConfig(unknown_plays=True)
+    cfg = VP.event_config(parse(["--unknown-plays", "--unknown-cost", "0"]))
+    assert (cfg.unknown_plays, cfg.unknown_cost) == (True, 0)
+    assert VP.event_config(parse(["--unknown-plays", "--unknown-cost", "6"])).unknown_cost == 6
+    with pytest.raises(ValueError, match="applies to --unknown-plays"):
+        VP.event_config(parse(["--unknown-cost", "2"]))
+    with pytest.raises(ValueError):
+        VP.event_config(parse(["--unknown-plays", "--unknown-cost", "-1"]))
+    with pytest.raises(SystemExit):
+        parse(["--unknown-plays", "--unknown-cost", "2.5"])                  # whole elixir only
+
+
+def test_vision_play_refuses_a_bad_unknown_cost_before_anything(monkeypatch, capsys):
+    pytest.importorskip("numpy")
+    from scripts import vision_play as VP
+
+    monkeypatch.setattr(VP, "InstanceLock", lambda *a, **k: pytest.fail("took the instance lock"))
+    monkeypatch.setattr(VP, "_main", lambda args: pytest.fail("started"))
+    assert VP.main(["--unknown-cost", "2"]) == 2
+    assert "refusing to start: --unknown-cost applies to --unknown-plays" in capsys.readouterr().out
+    assert VP.main(["--unknown-plays", "--unknown-cost", "-1"]) == 2
+
+
+def test_vision_replay_unknown_cost_flag(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("numpy")
+    from tests.pipeline import test_latency_and_replay as TLR
+
+    rc, _, s = TLR._replay_main(tmp_path, monkeypatch, "free", "--unknown-plays", "--unknown-cost", "0")
+    assert rc == 0 and s["unknown_plays"] == {"cost": 0}
+    assert "unknown    UNKNOWN plays on (card -1, 0 elixir each)" in capsys.readouterr().out
+    rc, calls, s = TLR._replay_main(tmp_path, monkeypatch, "bad", "--unknown-cost", "3")
+    assert (rc, calls, s) == (2, [], None)                 # refused before the detector or any output
+    assert "UNKNOWN plays: --unknown-cost applies to --unknown-plays" in capsys.readouterr().out
