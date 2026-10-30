@@ -15,6 +15,18 @@ dataset fits in memory. Validation is the hash split written by the builder,
 by match. `--max-rows N` keeps a seeded uniform sample of at most N rows per
 split (train, val, val Hog), for smoke runs or a PC with little RAM.
 
+`--trust legacy` (the default) reads the `trusted` column, as before. `--trust v2`
+reads `trusted_v2` instead (tools/rs_rows.py --trust v2, E09: also cut where the
+engine's towers or game end leave the recording, and no trust for the waits after
+the last recorded play); it stops with an error when a shard has no such column.
+Press rows (tools/rs_rows.py --presses on, E10: act_press > 0) have act_card 0 but
+are not waits, so they are left out of every split, train and validation; rows
+without an act_press column are loaded exactly as before. args.json records
+"trust", "trust_column", "press_rows" ("excluded" or "none") and
+"press_rows_excluded"; the checkpoint meta has them as "train_rows" unless they
+are the legacy ones (trust legacy, no press column), so a legacy meta is still
+vocab.json plus the architecture.
+
 `--wait-keep` is the share of ALL wait rows that training sees. When vocab.json
 says the builder already thinned waits (`wait_keep_at_build`), training keeps
 each remaining wait with probability wait_keep / wait_keep_at_build, and the
@@ -26,12 +38,14 @@ Output in <--runs>/<--name>/:
 * ep01.pt, ep02.pt, ...: the model after each epoch (ep01.pt is the one printed
   as "epoch 0"; the "epoch" stored inside a checkpoint stays 0-based);
 * last.pt (the latest epoch) and best.pt (best val Hog card_acc + tile_near);
-* args.json: the arguments as strings, the resolved wait_keep, and torch / CUDA /
+* args.json: the arguments as strings, the resolved wait_keep, the row record
+  (trust, trust_column, press_rows, press_rows_excluded), and torch / CUDA /
   numpy / Python versions and the git commit;
 * log.jsonl: one line of validation metrics per epoch.
 Each checkpoint is {"model", "meta", "epoch", "train_tokens"}: meta is vocab.json
 (ids, engine fingerprint, schema, observation delay, wait_keep_at_build, whatever
-the builder wrote) plus d / layers / heads, and "train_tokens" repeats args.json.
+the builder wrote) plus d / layers / heads (and "train_rows" when not legacy), and
+"train_tokens" repeats args.json.
 """
 from __future__ import annotations
 
@@ -56,29 +70,112 @@ COLS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "next", "opp_seen
 #: Columns stored as float16 whatever the shard holds (the largest one, ~84% of a row).
 HALF_COLS = ("unit_feats",)
 DEFAULT_WAIT_KEEP = 0.35
-#: vocab.json keys that describe how the rows were made (E01 / E04 / E11 / E18).
+#: vocab.json keys that describe how the rows were made (E01 / E04 / E09 / E10 / E11 / E18).
 #: The whole of vocab.json goes into the checkpoint meta; these are the ones
 #: printed at start and the ones a checkpoint must not lose.
 PROVENANCE_KEYS = ("engine", "version", "fingerprint", "engine_fingerprint", "card_table",
                    "schema", "obs_delay", "obs_delay_jitter", "wait_keep_at_build",
-                   "live_compat")
+                   "live_compat", "trust", "presses")
+#: --trust (E09): the column the trusted-rows filter reads. legacy: `trusted`, as before;
+#: v2: `trusted_v2`, which tools/rs_rows.py --trust v2 writes next to `trusted`.
+TRUST_LEGACY, TRUST_V2 = "legacy", "v2"
+TRUST_COLUMNS = {TRUST_LEGACY: "trusted", TRUST_V2: "trusted_v2"}
+TRUST_MODES = tuple(TRUST_COLUMNS)
+#: E10 press rows (tools/rs_rows.py --presses on): act_press is the pressed button + 1, 0 on
+#: every other row. A press row's act_card is 0, but it is no wait, so the loader leaves it
+#: out (E15's press head will train on them).
+PRESS_COLUMN = "act_press"
+PRESS_EXCLUDED, PRESS_NONE = "excluded", "none"
+#: The checkpoint meta key of the row record (row_record) when it is not the legacy one.
+TRAIN_ROWS_KEY = "train_rows"
 
 
 # ---------------------------------------------------------------------------
 # rows
 # ---------------------------------------------------------------------------
 
-def _keep_mask(z, split: str, wait_keep: float, trusted_only: bool, hog_only: bool, rng):
+def trust_column(trust: str = TRUST_LEGACY) -> str:
+    """The shard column --trust `trust` filters on; ValueError for another mode."""
+    try:
+        return TRUST_COLUMNS[trust]
+    except (KeyError, TypeError):
+        raise ValueError(f"--trust: one of {', '.join(TRUST_MODES)}, got {trust!r}") from None
+
+
+def _files(z) -> set:
+    """The column names of an open shard (np.load's NpzFile; a dict works too)."""
+    files = getattr(z, "files", None)
+    return set(z if files is None else files)
+
+
+def missing_trust(trust: str, missing: list, root, shards: int | None = None) -> str:
+    """The error for --trust `trust` on shards without its column: `missing` shard names,
+    out of `shards` (None: the loader, which stops at the first)."""
+    col = trust_column(trust)
+    where = (f"{len(missing)} of {shards} shard(s) in {root} have no {col} column "
+             f"(first: {missing[0]})" if shards is not None
+             else f"{missing[0]} in {root} has no {col} column")
+    return (f"--trust {trust}: {where}. Build the rows with tools/rs_rows.py --trust {trust}, "
+            f"or train with --trust {TRUST_LEGACY} (the `trusted` column).")
+
+
+def _keep_mask(z, split: str, wait_keep: float, trusted_only: bool, hog_only: bool, rng,
+               trust_col: str = "trusted"):
     """The rows of one shard the loader keeps. One rng draw per row of the shard,
-    whatever the other filters say, so the same seed keeps the same waits."""
+    whatever the other filters say, so the same seed keeps the same waits.
+    `trust_col` is the trusted-rows column (trust_column). Press rows (act_press > 0,
+    when the shard has that column) are left out after the draw: they are not waits."""
     keep = z["split"] == split
     if trusted_only:
-        keep &= z["trusted"]
+        keep &= z[trust_col]
     if hog_only:
         keep &= z["hog"]
     waits = z["act_card"] == 0
     keep &= ~waits | (rng.random(len(waits)) < wait_keep)
+    if PRESS_COLUMN in _files(z):
+        keep &= ~(z[PRESS_COLUMN] > 0)
     return keep
+
+
+def row_record(root: Path, trust: str = TRUST_LEGACY) -> dict:
+    """What --trust and the press rows come to on the shards in `root`, read before any
+    row is loaded: {"trust", "trust_column", "press_rows": "excluded" when a shard has an
+    act_press column, else "none", "press_rows_excluded": rows with act_press > 0 over
+    every split}. args.json gets it as it is, the checkpoint meta as "train_rows" when it
+    is not the legacy record (legacy_rows). SystemExit when --trust is not legacy and a
+    shard lacks its column (rows built without --trust v2). No shards: the legacy counts
+    (load then says there are none)."""
+    col = trust_column(trust)
+    paths = sorted(Path(root).glob("shard-*.npz"))
+    missing, press_shards, presses = [], 0, 0
+    for path in paths:
+        with np.load(path) as z:
+            files = _files(z)
+            if trust != TRUST_LEGACY and col not in files:
+                missing.append(path.name)
+            if PRESS_COLUMN in files:
+                press_shards += 1
+                presses += int((z[PRESS_COLUMN] > 0).sum())
+    if missing:
+        raise SystemExit(missing_trust(trust, missing, root, len(paths)))
+    return {"trust": trust, "trust_column": col,
+            "press_rows": PRESS_EXCLUDED if press_shards else PRESS_NONE,
+            "press_rows_excluded": presses}
+
+
+def legacy_rows(rows: dict | None) -> bool:
+    """Whether a row_record changes nothing: trust legacy and no press column (or no record)."""
+    return rows is None or (rows.get("trust", TRUST_LEGACY) == TRUST_LEGACY
+                            and rows.get("press_rows", PRESS_NONE) == PRESS_NONE)
+
+
+def describe_rows(rows: dict) -> str:
+    """One line for the console."""
+    text = f"trust {rows['trust']} (column {rows['trust_column']})"
+    if rows["press_rows"] == PRESS_EXCLUDED:
+        text += (f"; press rows left out: {rows['press_rows_excluded']:,} rows with "
+                 f"{PRESS_COLUMN} > 0 (not waits)")
+    return text
 
 
 def _cap(picks: list, max_rows: int, seed: int) -> list:
@@ -95,7 +192,7 @@ def _cap(picks: list, max_rows: int, seed: int) -> list:
 
 
 def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed: int = 0,
-         root: Path = DATA, *, max_rows: int = 0):
+         root: Path = DATA, *, max_rows: int = 0, trust: str = TRUST_LEGACY):
     """The rows of one split, every column in COLS, shards in name order.
 
     The same rows, order and dtypes as concatenating every shard's kept rows and
@@ -104,7 +201,10 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
     written into an array of the final size, one shard at a time, so neither
     the per-shard parts nor a float16 copy are held next to the result.
     `max_rows` > 0 keeps a seeded uniform sample of at most that many rows.
+    `trust` (--trust) names the column `trusted_only` reads (trust_column);
+    ValueError when a shard lacks it. Press rows are left out (_keep_mask).
     """
+    col = trust_column(trust)
     rng = np.random.default_rng(seed)
     paths = sorted(Path(root).glob("shard-*.npz"))
     if not paths:
@@ -112,8 +212,10 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
     picks = []
     for path in paths:
         with np.load(path) as z:
+            if trusted_only and col not in _files(z):
+                raise ValueError(missing_trust(trust, [path.name], root))
             picks.append(np.flatnonzero(_keep_mask(z, split, wait_keep, trusted_only,
-                                                   hog_only, rng)))
+                                                   hog_only, rng, col)))
     found = sum(len(p) for p in picks)
     picks = _cap(picks, max_rows, seed)
     total = sum(len(p) for p in picks)
@@ -310,16 +412,21 @@ def git_commit(root: Path = ROOT) -> tuple[str | None, bool | None]:
 
 
 def run_record(args, device: str, wait_keep: float, wait_keep_train: float,
-               wait_keep_at_build: float | None) -> dict:
+               wait_keep_at_build: float | None, rows: dict | None = None) -> dict:
     """args.json: every argument as a string (as before E05; "wait_keep" is the
-    resolved overall share), then the run's environment as JSON values.
+    resolved overall share), then `rows` (row_record: trust, trust_column, press_rows,
+    press_rows_excluded) when given, then the run's environment as JSON values.
 
-    Plain str / float / bool / None only: the record is also stored in every checkpoint,
-    and torch.load's weights_only unpickler (torch >= 2.6's default, used by rs_eval and
-    rs_selfplay) refuses any other class. torch.__version__ is a TorchVersion (a str
-    subclass), so it is converted with str()."""
+    Plain str / int / float / bool / None only: the record is also stored in every
+    checkpoint, and torch.load's weights_only unpickler (torch >= 2.6's default, used by
+    rs_eval and rs_selfplay) refuses any other class. torch.__version__ is a TorchVersion
+    (a str subclass), so it is converted with str()."""
     rec = {k: str(v) for k, v in vars(args).items()}
     rec["wait_keep"] = str(wait_keep)
+    if rows is not None:
+        rec.update({"trust": str(rows["trust"]), "trust_column": str(rows["trust_column"]),
+                    "press_rows": str(rows["press_rows"]),
+                    "press_rows_excluded": int(rows["press_rows_excluded"])})
     commit, dirty = git_commit()
     cuda = torch.version.cuda
     rec.update({
@@ -337,11 +444,20 @@ def run_record(args, device: str, wait_keep: float, wait_keep_train: float,
     return rec
 
 
-def checkpoint_meta(vocab: dict, d: int, layers: int, heads: int) -> dict:
+def checkpoint_meta(vocab: dict, d: int, layers: int, heads: int,
+                    rows: dict | None = None) -> dict:
     """The checkpoint meta: all of vocab.json (ids, n_cards / n_units, and the
     engine fingerprint, schema, observation delay and wait_keep_at_build when the
-    builder wrote them) plus the architecture."""
-    return dict(vocab, d=d, layers=layers, heads=heads)
+    builder wrote them) plus the architecture, plus "train_rows" (the row_record)
+    when the trust column or the press rows differ from the legacy ones; without it
+    the meta is exactly what it was before E09 / E10 reached training."""
+    meta = dict(vocab, d=d, layers=layers, heads=heads)
+    if not legacy_rows(rows):
+        meta[TRAIN_ROWS_KEY] = {"trust": str(rows["trust"]),
+                                "trust_column": str(rows["trust_column"]),
+                                "press_rows": str(rows["press_rows"]),
+                                "press_rows_excluded": int(rows["press_rows_excluded"])}
+    return meta
 
 
 def one_cycle_pct(steps: int, pct: float = 0.05) -> float:
@@ -376,6 +492,10 @@ def main(argv: list[str] | None = None) -> int:
                          f"wait_keep_at_build when the builder thinned waits, else {DEFAULT_WAIT_KEEP})")
     ap.add_argument("--all-rows", action="store_true",
                     help="include rows after the match's divergence point")
+    ap.add_argument("--trust", choices=TRUST_MODES, default=TRUST_LEGACY,
+                    help="which rows are trusted: 'legacy' (default) the `trusted` column, as "
+                         "before; 'v2' the `trusted_v2` column of tools/rs_rows.py --trust v2 "
+                         "(refused when the rows have none)")
     ap.add_argument("--finetune-hog", action="store_true")
     ap.add_argument("--init", type=Path)
     ap.add_argument("--seed", type=int, default=0)
@@ -411,11 +531,16 @@ def main(argv: list[str] | None = None) -> int:
           flush=True)
     print(f"wait_keep {wait_keep} (rows built with {at_build}; kept at load with p {keep_p:g})",
           flush=True)
+    rows_rec = row_record(args.data, args.trust)      # SystemExit: --trust v2 without the column
+    if not legacy_rows(rows_rec):
+        print(f"rows: {describe_rows(rows_rec)}", flush=True)
     t0 = time.time()
     train = load("train", keep_p, not args.all_rows, args.finetune_hog, args.seed, args.data,
-                 max_rows=args.max_rows)
-    val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=args.max_rows)
-    val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=args.max_rows)
+                 max_rows=args.max_rows, trust=args.trust)
+    val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=args.max_rows,
+               trust=args.trust)
+    val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=args.max_rows,
+                   trust=args.trust)
     mb = (_nbytes(train) + _nbytes(val) + _nbytes(val_hog)) / 2 ** 20
     print(f"rows: train {len(train['act_card']):,}  val {len(val['act_card']):,}  "
           f"val(hog) {len(val_hog['act_card']):,}  ({mb:,.0f} MB, {time.time() - t0:.0f}s)",
@@ -423,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
     if not len(train["act_card"]):
         raise SystemExit(f"no training rows in {args.data} (split 'train' after the filters)")
 
-    meta = checkpoint_meta(vocab, args.d, args.layers, args.heads)
+    meta = checkpoint_meta(vocab, args.d, args.layers, args.heads, rows=rows_rec)
     model = TokenPolicy(meta["n_cards"], meta["n_units"], d=args.d, layers=args.layers,
                         heads=args.heads).to(device)
     if args.init:
@@ -434,7 +559,7 @@ def main(argv: list[str] | None = None) -> int:
                                                 pct_start=one_cycle_pct(steps))
     out = Path(args.runs) / args.name
     out.mkdir(parents=True, exist_ok=True)
-    record = run_record(args, device, wait_keep, keep_p, at_build)
+    record = run_record(args, device, wait_keep, keep_p, at_build, rows=rows_rec)
     (out / "args.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     best = -1.0
     step = 0

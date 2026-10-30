@@ -6,7 +6,10 @@
 * evaluate() is correct / eligible per statistic, not batch-size weighted;
 * --device cuda without CUDA stops before anything is read;
 * a tiny CPU run on two synthetic shards writes ep01.pt, ep02.pt, last.pt, best.pt,
-  args.json with versions, and checkpoints whose meta carries vocab.json.
+  args.json with versions, and checkpoints whose meta carries vocab.json;
+* --trust v2 reads trusted_v2 (and refuses rows without it), press rows (act_press > 0)
+  are left out after the wait draw, and rows without these columns load as before;
+  args.json and the meta record both.
 
 Needs numpy and torch (both venvs have them); no engine, data or GPU, except the
 one gpu-marked run.
@@ -170,6 +173,181 @@ def test_max_rows_does_not_change_which_waits_are_kept(mixed_rows):
     capped = tt.load("train", 0.35, True, False, 0, mixed_rows, max_rows=5)
     assert len(capped["outcome"]) == 5
     assert np.isin(capped["outcome"], thinned["outcome"]).all()
+
+
+# ---------------------------------------------------------------------------
+# --trust v2 and press rows (E09 / E10 rows in training)
+# ---------------------------------------------------------------------------
+
+#: Rows with i % 9 == 8 lose trusted_v2; waits with i % 9 == 0 are presses.
+V2_CUT, PRESS_EVERY = 8, 9
+
+
+def with_v2_and_presses(a: dict) -> dict:
+    """A shard_arrays shard as tools/rs_rows.py --trust v2 --presses on writes it: trusted_v2
+    is `trusted` less the rows with i % 9 == 8, and the waits with i % 9 == 0 are press rows
+    (act_press 1 or 2, act_card 0; act_press 0 on every other row)."""
+    i = np.arange(len(a["act_card"]))
+    a = dict(a)
+    a["trusted_v2"] = a["trusted"] & (i % PRESS_EVERY != V2_CUT)
+    press = (a["act_card"] == 0) & (i % PRESS_EVERY == 0)
+    a["act_press"] = np.where(press, 1 + (i // PRESS_EVERY) % 2, 0).astype(np.int16)
+    return a
+
+
+@pytest.fixture
+def press_rows(tmp_path):
+    """Two shards with trusted_v2 and act_press: 50 rows (presses at i = 0, 9, 18, 27, 36, 45)
+    and 40 rows (0, 9, 18, 27, 36): 11 press rows, 7 of them in the train split (i % 5 < 3:
+    0, 27, 36, 45 and 0, 27, 36)."""
+    root = tmp_path / "press"
+    write_shard(root, 0, with_v2_and_presses(shard_arrays(50, start=0, seed=21)))
+    write_shard(root, 1, with_v2_and_presses(shard_arrays(40, start=100, seed=22)))
+    return root
+
+
+def outcomes_of_presses(root: Path) -> np.ndarray:
+    """The outcome (row id) of every press row in `root`."""
+    out = []
+    for path in sorted(root.glob("shard-*.npz")):
+        with np.load(path) as z:
+            out.append(z["outcome"][z["act_press"] > 0])
+    return np.concatenate(out)
+
+
+def without(data: dict, outcomes: np.ndarray) -> dict:
+    keep = ~np.isin(data["outcome"], outcomes)
+    return {c: data[c][keep] for c in tt.COLS}
+
+
+LOADS = [
+    ("train", 0.35, True, False, 0),
+    ("val", 0.35, True, True, 1),
+    ("train", 1.0, False, False, 5),          # --all-rows, every wait
+    ("test", 0.5, True, False, 2),
+]
+
+
+def test_the_fixture_holds_what_its_doc_says(press_rows):
+    presses = outcomes_of_presses(press_rows)
+    assert sorted(np.round(presses * 100).astype(int).tolist()) == [
+        0, 9, 18, 27, 36, 45, 100, 109, 118, 127, 136]
+    for path in sorted(press_rows.glob("shard-*.npz")):
+        with np.load(path) as z:
+            assert (z["act_card"][z["act_press"] > 0] == 0).all()     # presses look like waits
+            assert z["act_press"].dtype == np.int16
+            assert (z["trusted_v2"] <= z["trusted"]).all() and (z["trusted_v2"] < z["trusted"]).any()
+
+
+@pytest.mark.parametrize("split, wait_keep, trusted_only, hog_only, seed", LOADS)
+def test_press_rows_are_left_out_after_the_same_wait_draws(press_rows, split, wait_keep,
+                                                          trusted_only, hog_only, seed):
+    # The old loader ignores act_press: its rows less the press rows are what the loader keeps,
+    # so the press rows still take their rng draw and every other wait is kept as before.
+    new = tt.load(split, wait_keep, trusted_only, hog_only, seed, press_rows)
+    old = legacy_load(split, wait_keep, trusted_only, hog_only, seed, press_rows)
+    assert_same(new, without(old, outcomes_of_presses(press_rows)))
+
+
+def test_press_rows_left_out_by_hand(press_rows):
+    every = tt.load("train", 1.0, False, False, 0, press_rows)
+    old = legacy_load("train", 1.0, False, False, 0, press_rows)
+    assert (len(old["outcome"]), len(every["outcome"])) == (30 + 24, 30 + 24 - 7)
+    gone = np.setdiff1d(old["outcome"], every["outcome"])
+    assert np.round(gone * 100).astype(int).tolist() == [0, 27, 36, 45, 100, 127, 136]
+
+
+def test_rows_with_no_presses_load_as_before(tmp_path):
+    root = tmp_path / "rows"
+    for k, n in ((0, 30), (1, 25)):
+        a = shard_arrays(n, start=100 * k, seed=30 + k)
+        a["act_press"] = np.zeros(n, dtype=np.int16)          # presses on, none replayed
+        write_shard(root, k, a)
+    for args in LOADS:
+        assert_same(tt.load(*args, root), legacy_load(*args, root))
+
+
+@pytest.mark.parametrize("split, wait_keep, trusted_only, hog_only, seed", LOADS)
+def test_trust_v2_reads_trusted_v2(press_rows, tmp_path, split, wait_keep, trusted_only,
+                                   hog_only, seed):
+    # The same shards with trusted_v2 moved into `trusted`: the legacy trust on them is what
+    # --trust v2 gives on the originals.
+    swapped = tmp_path / "swapped"
+    for k, path in enumerate(sorted(press_rows.glob("shard-*.npz"))):
+        with np.load(path) as z:
+            a = {c: z[c] for c in z.files}
+        a["trusted"] = a.pop("trusted_v2")
+        write_shard(swapped, k, a)
+    v2 = tt.load(split, wait_keep, trusted_only, hog_only, seed, press_rows, trust="v2")
+    assert_same(v2, tt.load(split, wait_keep, trusted_only, hog_only, seed, swapped))
+    assert_same(v2, without(legacy_load(split, wait_keep, trusted_only, hog_only, seed, swapped),
+                            outcomes_of_presses(press_rows)))
+    legacy = tt.load(split, wait_keep, trusted_only, hog_only, seed, press_rows)
+    if trusted_only:      # each of these loads keeps a play that trusted_v2 cuts (i % 9 == 8)
+        assert len(v2["outcome"]) < len(legacy["outcome"])
+        assert np.isin(v2["outcome"], legacy["outcome"]).all()
+    else:                 # no trust filter: the trust column does not matter
+        assert_same(v2, legacy)
+
+
+def test_legacy_trust_ignores_trusted_v2(press_rows):
+    for args in LOADS:
+        assert_same(tt.load(*args, press_rows, trust="legacy"), tt.load(*args, press_rows))
+
+
+def test_trust_v2_without_the_column_is_refused(mixed_rows):
+    with pytest.raises(ValueError, match="no trusted_v2 column"):
+        tt.load("train", 0.35, True, False, 0, mixed_rows, trust="v2")
+    with pytest.raises(ValueError, match="no trusted_v2 column"):
+        tt.load("val", 0.35, True, True, 1, mixed_rows, trust="v2")
+    # --all-rows' train load filters on no trust column, so it needs none
+    assert_same(tt.load("train", 1.0, False, False, 0, mixed_rows, trust="v2"),
+                tt.load("train", 1.0, False, False, 0, mixed_rows))
+    with pytest.raises(SystemExit) as exc:
+        tt.row_record(mixed_rows, "v2")
+    msg = str(exc.value)
+    assert "--trust v2: 3 of 3 shard(s)" in msg and "shard-0000.npz" in msg
+    assert "rs_rows.py --trust v2" in msg and "--trust legacy" in msg
+
+
+def test_trust_v2_names_the_shards_that_lack_the_column(press_rows, tmp_path):
+    root = tmp_path / "half"
+    with np.load(sorted(press_rows.glob("shard-*.npz"))[0]) as z:
+        write_shard(root, 0, {c: z[c] for c in z.files})
+    write_shard(root, 1, shard_arrays(20, start=300, seed=4))         # built before E09
+    with pytest.raises(SystemExit) as exc:
+        tt.row_record(root, "v2")
+    assert "1 of 2 shard(s)" in str(exc.value) and "shard-0001.npz" in str(exc.value)
+    with pytest.raises(ValueError, match="shard-0001.npz"):
+        tt.load("train", 0.35, True, False, 0, root, trust="v2")
+
+
+def test_unknown_trust_is_refused(mixed_rows):
+    assert tt.trust_column("legacy") == "trusted" and tt.trust_column("v2") == "trusted_v2"
+    assert tt.TRUST_MODES == ("legacy", "v2")
+    for bad in ("v3", None, ""):
+        with pytest.raises(ValueError, match="--trust"):
+            tt.trust_column(bad)
+    with pytest.raises(ValueError, match="--trust"):
+        tt.load("train", 0.35, True, False, 0, mixed_rows, trust="v3")
+
+
+def test_row_record(mixed_rows, press_rows, tmp_path):
+    legacy = {"trust": "legacy", "trust_column": "trusted", "press_rows": "none",
+              "press_rows_excluded": 0}
+    assert tt.row_record(mixed_rows) == tt.row_record(mixed_rows, "legacy") == legacy
+    assert tt.legacy_rows(legacy) and tt.legacy_rows(None)
+    assert tt.row_record(tmp_path / "empty") == legacy          # load says there are no shards
+    got = tt.row_record(press_rows)
+    assert got == {"trust": "legacy", "trust_column": "trusted", "press_rows": "excluded",
+                   "press_rows_excluded": 11}                   # every split
+    assert not tt.legacy_rows(got)
+    v2 = tt.row_record(press_rows, "v2")
+    assert v2 == dict(got, trust="v2", trust_column="trusted_v2")
+    assert not tt.legacy_rows(v2)
+    assert type(v2["press_rows_excluded"]) is int
+    assert "11 rows with act_press > 0" in tt.describe_rows(v2)
+    assert "press" not in tt.describe_rows(legacy)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +573,41 @@ def test_checkpoint_meta_is_vocab_plus_architecture():
     assert (meta["d"], meta["layers"], meta["heads"]) == (256, 6, 8)
 
 
+ROWS_LEGACY = {"trust": "legacy", "trust_column": "trusted", "press_rows": "none",
+               "press_rows_excluded": 0}
+ROWS_V2 = {"trust": "v2", "trust_column": "trusted_v2", "press_rows": "none",
+           "press_rows_excluded": 0}
+ROWS_PRESSES = dict(ROWS_LEGACY, press_rows="excluded", press_rows_excluded=11)
+
+
+def test_checkpoint_meta_records_the_rows_unless_they_are_legacy():
+    vocab = {"n_cards": N_CARDS, "n_units": N_UNITS, "live_compat": True, "cards": {"Cannon": 2},
+             "trust": {"mode": "v2", "sides": "unordered"}}          # rs_rows' rule stays as it is
+    plain = dict(vocab, d=192, layers=4, heads=6)
+    assert tt.checkpoint_meta(vocab, 192, 4, 6, rows=ROWS_LEGACY) == plain
+    assert tt.checkpoint_meta(vocab, 192, 4, 6, rows=None) == plain
+    for rows in (ROWS_V2, ROWS_PRESSES, dict(ROWS_V2, press_rows="excluded")):
+        meta = tt.checkpoint_meta(vocab, 192, 4, 6, rows=rows)
+        assert meta == dict(plain, train_rows=rows)
+        assert meta["trust"] == vocab["trust"]
+        assert all(type(v) in (str, int) for v in meta["train_rows"].values())
+    assert "train_rows" not in vocab                                 # the vocab is not changed
+
+
+def test_run_record_has_the_rows(monkeypatch):
+    monkeypatch.setattr(tt, "git_commit", lambda root=tt.ROOT: ("abc123", False))
+    args = Namespace(name="dt_big", wait_keep=0.25, trust="v2", all_rows=False)
+    rec = tt.run_record(args, "cpu", 0.25, 0.25, None, rows=dict(ROWS_V2, press_rows="excluded",
+                                                                 press_rows_excluded=3))
+    assert (rec["trust"], rec["trust_column"]) == ("v2", "trusted_v2")
+    assert (rec["press_rows"], rec["press_rows_excluded"]) == ("excluded", 3)
+    assert rec["name"] == "dt_big" and rec["wait_keep"] == "0.25"
+    for k, v in rec.items():
+        assert type(v) in (str, int, float, bool, type(None)), (k, type(v))
+    old = tt.run_record(Namespace(name="x", wait_keep=0.35), "cpu", 0.35, 0.35, None)
+    assert not {"trust", "trust_column", "press_rows", "press_rows_excluded"} & set(old)
+
+
 # ---------------------------------------------------------------------------
 # a tiny run end to end
 # ---------------------------------------------------------------------------
@@ -452,6 +665,7 @@ def test_tiny_cpu_run_writes_every_epoch_and_versions(smoke_rows, tmp_path):
     assert args["wait_keep"] == "0.5"                    # vocab's wait_keep_at_build
     assert (args["wait_keep_train"], args["wait_keep_at_build"]) == (1.0, 0.5)
     assert args["max_rows"] == "0" and args["epochs"] == "2"
+    assert {k: args[k] for k in ROWS_LEGACY} == ROWS_LEGACY     # the default, recorded
 
     ep1, ep2, last, best = (_load(out / n) for n in ("ep01.pt", "ep02.pt", "last.pt", "best.pt"))
     assert (ep1["epoch"], ep2["epoch"], last["epoch"]) == (0, 1, 1)
@@ -463,6 +677,7 @@ def test_tiny_cpu_run_writes_every_epoch_and_versions(smoke_rows, tmp_path):
         for k, v in VOCAB.items():                      # E04: vocab.json reaches the meta
             assert meta[k] == v, k
         assert (meta["d"], meta["layers"], meta["heads"]) == (16, 1, 2)
+        assert meta == dict(VOCAB, d=16, layers=1, heads=2)     # no train_rows: legacy rows
         assert blob["train_tokens"] == args
     net = TokenPolicy(ep2["meta"]["n_cards"], ep2["meta"]["n_units"], d=16, layers=1, heads=2)
     net.load_state_dict(ep2["model"])
@@ -490,6 +705,60 @@ def test_tiny_run_with_max_rows(smoke_rows, tmp_path):
 def test_negative_max_rows_is_refused(smoke_rows, tmp_path):
     with pytest.raises(SystemExit):
         _run(smoke_rows, tmp_path / "runs", "--device", "cpu", "--max-rows", "-1")
+
+
+@pytest.fixture
+def smoke_v2_rows(tmp_path):
+    """smoke_rows as rs_rows --trust v2 --presses on would write them: trusted_v2 also cuts
+    rows 37-39, and rows 3 (train) and 33 (val), both waits, are presses. Per shard the val
+    rows then are, under --trust legacy, 30-39 less 33: 9 rows, plays 31, 32, 34, 35, 37, 38;
+    Hog (even) 30, 32, 34, 36, 38, plays 32, 34, 38. Under --trust v2, 30-36 less 33: 6 rows,
+    plays 31, 32, 34, 35; Hog 30, 32, 34, 36, plays 32, 34."""
+    root = tmp_path / "rows_v2"
+    i = np.arange(40)
+    for k in (0, 1):
+        a = shard_arrays(40, start=100 * k, seed=10 + k, splits=["train"] * 30 + ["val"] * 10,
+                         trusted=i >= 2, hog=i % 2 == 0)
+        assert (a["act_card"][[3, 33]] == 0).all()
+        a["trusted_v2"] = (i >= 2) & (i < 37)
+        a["act_press"] = np.where(np.isin(i, (3, 33)), 1, 0).astype(np.int16)
+        write_shard(root, k, a)
+    (root / "vocab.json").write_text(json.dumps(VOCAB), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("trust, column, val, val_hog", [
+    ("legacy", "trusted", (18, 12), (10, 6)),
+    ("v2", "trusted_v2", (12, 8), (8, 4)),
+])
+def test_tiny_run_with_v2_trust_and_press_rows(smoke_v2_rows, tmp_path, capsys, trust, column,
+                                              val, val_hog):
+    runs = tmp_path / "runs"
+    extra = [] if trust == "legacy" else ["--trust", trust]
+    assert _run(smoke_v2_rows, runs, "--device", "cpu", "--epochs", "1", *extra) == 0
+    assert f"rows: trust {trust} (column {column}); press rows left out: 4 rows" in capsys.readouterr().out
+    out = runs / "smoke"
+    args = json.loads((out / "args.json").read_text(encoding="utf-8"))
+    rows = {"trust": trust, "trust_column": column, "press_rows": "excluded",
+            "press_rows_excluded": 4}
+    assert {k: args[k] for k in rows} == rows
+    (rec,) = [json.loads(line) for line in (out / "log.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert (rec["val"]["rows"], rec["val"]["plays"]) == val
+    assert (rec["val_hog"]["rows"], rec["val_hog"]["plays"]) == val_hog
+    for name in ("ep01.pt", "best.pt"):
+        blob = _load(out / name)
+        assert blob["meta"] == dict(VOCAB, d=16, layers=1, heads=2, train_rows=rows)
+        assert blob["train_tokens"] == args
+
+
+def test_trust_v2_on_rows_without_the_column_stops_first(smoke_rows, tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        _run(smoke_rows, tmp_path / "runs", "--device", "cpu", "--trust", "v2")
+    assert "--trust v2: 2 of 2 shard(s)" in str(exc.value)
+    assert "no trusted_v2 column" in str(exc.value)
+    assert not (tmp_path / "runs").exists()                # before anything is written
+    with pytest.raises(SystemExit):                        # argparse: not a --trust mode
+        _run(smoke_rows, tmp_path / "runs", "--device", "cpu", "--trust", "v3")
 
 
 @pytest.mark.gpu

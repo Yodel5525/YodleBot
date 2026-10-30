@@ -33,6 +33,7 @@ $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, roy
 | 14: first model | done: `runs\tokens\live_big_hog\best.pt` (Hog card 66.8%, tile-within-1 55.7%) |
 | 10, 13 | not reported back. Section 16 covers what step 10 was for. |
 | 15-18: detector, calibration, dry run, first friendly with taps | to do |
+| 19: second model (decision-time rows) | to do |
 
 ## 1. GPU driver
 
@@ -676,6 +677,43 @@ Later, once you trust it:
 
 Do not commit `reports\vision_play\`, `reports\vision\`, `STOP` or `MANUAL`. They are not gitignored, and the recordings show account names.
 
+## 19. Second model: decision-time rows
+
+**Close MuMu and the browser first.** These jobs use most of the RAM. Do not run this while the live runner is running.
+
+The first model learned each play at the tick it landed. Live, the bot decides about 24 ticks (1.2 s) earlier: the client's command delay of 21-22 ticks, plus capture and inference. In the simulator the first model loses about 11 points at a 21-tick delay (46.0% against 56.7%). The second model is trained on decision-time rows: each play is shown at the moment its player tapped it, about 24 ticks before it lands. The rows also show only what the screen shows (no invisible enemies), and they drop more of the rows where the simulator has drifted from the recording (trust v2). Unit tokens stay `--live-compat`, like the first model.
+
+It needs the first model from section 14: `runs\tokens\live_big_hog\best.pt` and `runs\tokens\live_big\ep01.pt`. The script checks for them before it starts.
+
+**One script runs everything unattended.** It stops at the first failure and writes everything to `reports\second_model_<time>.log`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\second_model.ps1
+```
+
+| Step | What it runs | Time (first model) |
+|---|---|---|
+| rows | `tools\rs_rows.py --live-compat --obs-delay 24 --obs-delay-jitter 3 --opp-lag 1 --visibility public --trust v2 --presses off --others 20000 --workers 8 --out data\rs_rows_dt` | about 25 min (20 min) |
+| general | `sim.train_tokens --name dt_big`, d256, 6 layers, 8 heads, 3 epochs, `--wait-keep 0.25 --trust v2` | about 35 min (33 min) |
+| hog | the same with `--name dt_big_hog --finetune-hog --init runs\tokens\dt_big\best.pt` | about 10 min (9.4 min) |
+| eval | three runs of `tools\rs_eval.py`, 300 matches each, against `live_big\ep01.pt`: A `live_big_hog` at `--delay 21`, B `dt_big_hog` at `--delay 21`, C `dt_big_hog` with no delay | about 20 min (two runs: 13 min) |
+
+That is about 1.5 hours in all. Options:
+- `-Workers 6` uses less RAM.
+- `-From general` (or `hog`, `eval`) restarts at a later step.
+- `-MaxRows 4000000` trains on a sample, if training runs out of memory.
+- `-League` adds an optional last step: `tools\rs_league_eval.py run` with `dt_big_hog` as the candidate and `live_big_hog` as the champion. It plays 400 paired games at a 24-tick delay with the default perception noise, on both seats and with both decks, on at most 4 workers. Allow another 30-60 minutes; this step has not been timed yet. It writes `runs\league\second_model.jsonl` and `runs\league\second_model.report.json`. `-From league` runs that step alone.
+
+**Reading the result.** A and B are the comparison. Both use the same opponent, the same 300 held-out matches and the same delay. A re-measures the first model under the current code, because the evaluator's opponent memory has changed since the 46.0% (E08: plays are now remembered when they land). Compare B with A, not with 46.0%. Each interval is about +-5.6 points, so a difference of less than about 8 points between A and B is not conclusive at 300 matches. The league step is the finer test. C shows how much of B's result is lost to the delay. The 400-game league result is only a first reading: the real promotion gate needs 1,000 games.
+
+Keep using `live_big_hog` in the live runner (sections 17-18) until these numbers are back.
+
+Send back the log, `reports\second_model_<time>.log`. If you cannot send all of it, send:
+- the rows step's header lines (`memory:`, `seen:`, `trust:`, `observed:`), its `selected` line, and its last two lines (`done: ... rows` and the trusted / trusted_v2 rates);
+- from both trainings, the `rows:` lines and every `epoch N: val ...` line;
+- the three `rs_eval` result lines (`...: N/300 wins (...)`);
+- with `-League`, the gate decision and the `report:` line.
+
 ## If something breaks
 
 Paste these back to the cloud session:
@@ -691,7 +729,7 @@ These need code that is not on the branch yet. Each one gets exact commands here
 | Phase | What you will run | Waits for |
 |---|---|---|
 | 2. Engine re-baseline | spawn tables for both card tables; then a fidelity grid over 2,000 validation matches (`tools/rs_fidelity_grid.py`), which picks the RoyaleSim card table and writes `data/engine.json` | E01, E03, E06 |
-| 4. Decision-time models | v2 rows on the vision class list, with delay and noise; memory-mapped training; the league evaluation | E11-E18, L01-L03 |
+| 4. Decision-time models, v2 | the first decision-time model is section 19. Still to come: v2 rows on the vision class list, with perception noise in the rows; the ability head; memory-mapped training | E14-E18 |
 | 5. Screen perception, second pass | label frames from our own friendlies for the cards and forms the KataCR dataset lacks, then score the detector on them (`tools/vision_replay.py --labels`); fit the perception-noise profile used in training (`tools/fit_noise_profile.py`) | V11 (rest), E17 |
-| 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows and the measured delay D | E11, E14, E15, E18, the V06 upgrade |
+| 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows (section 19's, or the v2 model) and the measured delay D | section 19's results; E14, E15, E18, the V06 upgrade |
 | 7. RL fine-tuning | the RL driver with gating and resume (`tools/rl/train_loop.py`); runs for days with MuMu closed | R01-R05 |
