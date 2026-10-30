@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "name": "stress_2x",
+  "description": "The perception noise of default_prior with every sigma, spread, rate and probability times 2 (probabilities capped at 1), made by tools/noise_scale.py: the stress profile of docs/LIVE_SEARCH_PLAN.md S11 (M6).",
+  "_derived": {
+    "tool": "tools/noise_scale.py",
+    "source": "data/noise/default_prior.json",
+    "source_name": "default_prior",
+    "source_digest": "e3c93cf3a8b9e7cf",
+    "factor": 2.0,
+    "cap": 1.0
+  },
+  "board": {
+    "lag_ticks": 0,
+    "jitter_ticks": 0,
+    "max_hold_ticks": 2
+  },
+  "new_units": {
+    "delay_ticks": 2,
+    "jitter_ticks": 2
+  },
+  "drop": {
+    "small": 0.24,
+    "medium": 0.1,
+    "large": 0.06,
+    "building": 0.04,
+    "by_class": {}
+  },
+  "size": {
+    "small_max_hp": 400,
+    "large_min_hp": 2500
+  },
+  "forms": {
+    "evo_to_base_p": 0.6,
+    "hero_to_base_p": 1.0,
+    "unlabelled_to_base": true
+  },
+  "confusion": {
+    "unknown_p": 0.02,
+    "pairs": {
+      "IceSpirits": {
+        "FireSpirits": 0.04,
+        "ElectroSpirit": 0.04,
+        "HealSpirit": 0.02
+      },
+      "FireSpirits": {
+        "IceSpirits": 0.04,
+        "ElectroSpirit": 0.02
+      },
+      "ElectroSpirit": {
+        "IceSpirits": 0.04
+      },
+      "Goblin": {
+        "SpearGoblin": 0.06
+      },
+      "SpearGoblin": {
+        "Goblin": 0.06
+      },
+      "Minion": {
+        "MegaMinion": 0.04
+      },
+      "MegaMinion": {
+        "Minion": 0.04
+      },
+      "Wizard": {
+        "IceWizard": 0.04,
+        "ElectroWizard": 0.04
+      },
+      "IceGolemite": {
+        "Golemite": 0.06
+      },
+      "Golemite": {
+        "IceGolemite": 0.06
+      },
+      "Giant": {
+        "RoyalGiant": 0.02
+      },
+      "RoyalGiant": {
+        "Giant": 0.02
+      },
+      "HogRider": {
+        "RoyalHog": 0.02
+      }
+    }
+  },
+  "side_flip": {
+    "p": 0.02
+  },
+  "position": {
+    "sigma_x_mt": 500,
+    "sigma_y_mt": 800,
+    "flyer_dx_mt": 0,
+    "flyer_dy_mt": 0,
+    "flyer_sigma_mt": 800
+  },
+  "hp": {
+    "no_bar_p": 0.3,
+    "sigma": 0.06,
+    "quant": 0.025,
+    "full_snap": 0.95
+  },
+  "deploy": {
+    "age_offset_ticks": 1
+  },
+  "false_positives": {
+    "rate": 0.1,
+    "classes": {},
+    "near_sigma_mt": 1400
+  },
+  "towers": {
+    "sigma_frac": 0.006,
+    "bias_frac": 0.0,
+    "quant_hp": 0
+  },
+  "elixir": {
+    "fraction_sigma_milli": 240,
+    "fraction_lost_p": 0.1,
+    "fraction_fill_milli": 0,
+    "digit_error_p": 0.01
+  },
+  "clock": {
+    "bias_ticks": 0,
+    "sigma_ticks": 4,
+    "quant_ticks": 0
+  },
+  "opponent_plays": {
+    "miss_p": 0.06,
+    "spell_miss_p": 0.3,
+    "late_ticks": 3,
+    "late_jitter_ticks": 4,
+    "unknown_p": 0.04
+  }
+}
