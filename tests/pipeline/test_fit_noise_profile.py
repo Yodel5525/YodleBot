@@ -489,6 +489,16 @@ def test_a_biased_position_warns_to_refit_the_geometry():
     assert res.notes["new_units"]["why"] == "fewer samples than the minimum (--min-tracks 2)"
 
 
+def test_reports_before_the_first_sighting_clamp_the_delay_and_warn():
+    T = FNP.TapErrors()
+    T.delays = [-5, -5]                                     # the frames' ticks run behind the tracker's
+    res = FNP.fit("default", None, T, FNP.FitConfig(min_tracks=2))
+    # 1 (the prior's age offset) + half_up(-5.0) = 1 - 5 = -4: a profile refuses negative ticks
+    assert (res.profile.new_units.delay_ticks, res.profile.new_units.jitter_ticks) == (0, 0)
+    assert res.notes["new_units"]["measured"]["delay_ticks"]["clamped_from"] == -4
+    assert len(res.warnings) == 1 and res.warnings[0].startswith("own units were first reported 5 ticks")
+
+
 # ---------------------------------------------------------------------------
 # fallbacks, settings, the command line
 # ---------------------------------------------------------------------------

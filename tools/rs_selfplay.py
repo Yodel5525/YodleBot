@@ -519,16 +519,19 @@ def loop(args):
         col = json.loads(c.stdout.strip().splitlines()[-1])
         engine = read_engine_record(data)
         if engine is not None:
+            # The collect's config must be the one this launch resolved (record["engine"]), also
+            # on the run's first collect; once stamped, its engine id too.
+            if engine.get("engine") != record["engine"] or (
+                    record.get("engine_id") and engine.get("engine_id") != record["engine_id"]):
+                print(f"error: iteration {it} was collected under engine id "
+                      f"{engine.get('engine_id')} {json.dumps(engine.get('engine'))}, run "
+                      f"{args.name!r} under {record.get('engine_id') or '(not stamped yet)'} "
+                      f"{json.dumps(record['engine'])}; start a new --name to change engines.",
+                      file=sys.stderr, flush=True)
+                return 1
             if not record.get("engine_id"):
                 record.update((k, engine.get(k)) for k in STAMP_FIELDS)
                 args_json.write_text(json.dumps(record, default=str))
-            elif (engine.get("engine_id"), engine.get("engine")) != (record["engine_id"],
-                                                                   record["engine"]):
-                print(f"error: iteration {it} was collected under engine id "
-                      f"{engine.get('engine_id')} {json.dumps(engine.get('engine'))}, run "
-                      f"{args.name!r} under {record['engine_id']} {json.dumps(record['engine'])}; "
-                      "start a new --name to change engines.", file=sys.stderr, flush=True)
-                return 1
         nxt = run / f"it{it + 1:03d}.pt"
         t = subprocess.run([str(bb), me, "train", "--ckpt", str(ckpt), "--ref", args.ref or args.init,
                             "--data", str(data), "--out", str(nxt), "--lr", str(args.lr),

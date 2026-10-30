@@ -107,7 +107,8 @@ when a source is missing or has fewer samples than the minimum):
   new_units        (b) delay_ticks = the base profile's deploy.age_offset_ticks (the first
                    sighting's lag after the unit appears, which the logs cannot separate from
                    D) + the median of first report - first sighting (the tracker's
-                   confirmation), rounded half up, over every claimed own unit; jitter_ticks =
+                   confirmation), rounded half up, over every claimed own unit (at least 0: a
+                   negative one, reports dated before the first sighting, warns); jitter_ticks =
                    half the p10..p90 spread of the latter, rounded half up; >= --min-tracks.
   false_positives  (a) rate: unmatched perceived units per scored frame (>= --min-samples
                    frames). Each phantom is "near" when a labelled unit is within 2000 mt (a
@@ -1025,8 +1026,14 @@ def fit(base: Any, labels: LabelErrors | None = None, taps: TapErrors | None = N
     if T is not None and len(T.delays) >= cfg.min_tracks:
         st = LP.describe(T.delays)
         off = int(doc["deploy"]["age_offset_ticks"])
-        put("new_units", "delay_ticks", off + LP.half_up(st["median"]), SRC_TAPS, st["n"],
-            confirm_median=st["median"], age_offset_ticks=off)
+        delay, extra = off + LP.half_up(st["median"]), {}
+        if delay < 0:                       # a profile's ticks are >= 0 (NoiseProfile refuses less)
+            warnings.append(f"own units were first reported {-st['median']:g} ticks (median) before the "
+                            "tracker first saw them: the frames' ticks and the tracker's disagree (check the "
+                            "clock reads); new_units.delay_ticks set to 0")
+            delay, extra = 0, {"clamped_from": delay}
+        put("new_units", "delay_ticks", delay, SRC_TAPS, st["n"],
+            confirm_median=st["median"], age_offset_ticks=off, **extra)
         put("new_units", "jitter_ticks", LP.half_up((st["p90"] - st["p10"]) / 2.0), SRC_TAPS, st["n"],
             p10=st["p10"], p90=st["p90"])
     # the notes for what was kept

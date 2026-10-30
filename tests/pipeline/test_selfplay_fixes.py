@@ -435,3 +435,12 @@ def test_loop_hands_the_engine_on_and_keeps_one_per_run(sp, machine_env, monkeyp
     assert "start a new --name" in capsys.readouterr().err
     kept = json.loads((run / "args.json").read_text(encoding="utf-8"))
     assert {k: kept[k] for k in mod.STAMP_FIELDS} == {k: saved[k] for k in mod.STAMP_FIELDS}
+
+    # a new run whose first collect resolved another config than the launch: refused, not stamped
+    calls.clear()
+    reported = {"engine": {**want, "level": 12}, "engine_fingerprint": {"id": "cafe"}, "engine_id": "cafe"}
+    assert mod.loop(argparse.Namespace(**{**vars(args), "name": "u"})) == 1
+    assert [c[2] for c in calls] == ["collect"]
+    assert "start a new --name" in capsys.readouterr().err
+    fresh = json.loads((tmp_path / "runs" / "u" / "args.json").read_text(encoding="utf-8"))
+    assert fresh["engine"] == want and "engine_id" not in fresh
