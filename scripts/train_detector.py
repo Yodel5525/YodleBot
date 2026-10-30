@@ -32,23 +32,43 @@ V09 additions:
   (<data root>/vision/detector_pin.json; `--no-pin` keeps the old pin).
 
 N06, fine-tunes (docs/NEW_CARDS_PLAN.md 2.3, 8 and risk 9): `--optimizer`,
-`--lr0`, `--cls-pw` and `--freeze` reach ultralytics' train() as optimizer,
-lr0, cls_pw and freeze; left out, they are not passed and ultralytics' own
-defaults apply, as before. With optimizer=auto ultralytics picks the optimizer
-and rate from the iteration count (AdamW at about 0.01 / (4 + classes) up to
-10,000 iterations, MuSGD at 0.01 above) and ignores lr0, so a short fine-tune
-needs both --optimizer and --lr0. Starting from trained weights (best.pt, not
-a stock yolo*.pt) with the default --name prints a WARNING: the run folder is
-reused (exist_ok), so its weights are replaced, and the pin moves to the new
-best.pt; fine-tunes pass a new --name and --no-pin.
+`--lr0`, `--cls-pw`, `--freeze` and `--warmup-bias-lr` reach ultralytics'
+train() as optimizer, lr0, cls_pw, freeze and warmup_bias_lr; left out, they
+are not passed and ultralytics' own defaults apply, as before. With
+optimizer=auto ultralytics picks the optimizer and rate from the iteration
+count (AdamW at about 0.01 / (4 + classes) up to 10,000 iterations, MuSGD at
+0.01 above), ignores lr0 and starts the bias warmup at 0, so a short fine-tune
+needs both --optimizer and --lr0. An explicit optimizer keeps ultralytics'
+warmup_bias_lr of 0.1 (engine/trainer.py build_optimizer resets it only under
+auto): every bias, the class-head priors included, would start the warmup at
+0.1, 100x an AdamW lr0 of 0.001. So with --optimizer (not auto) this passes
+warmup_bias_lr 0.0, as auto does, unless --warmup-bias-lr says otherwise.
+--resume continues the checkpoint's own settings (ultralytics' check_resume
+drops a new optimizer, lr0, cls_pw or warmup_bias_lr), so those flags are
+refused with it; --freeze is kept.
+
+A WARNING is printed, and training still runs, when a run would replace
+weights or move the pin unasked: a start from trained weights (best.pt, not a
+stock yolov8s.pt / yolo11m.pt / *.yaml) with the default --name; a run folder
+(--project/--name, reused: exist_ok) that already holds best.pt or last.pt,
+which then are replaced (a rebase from yolov8s.pt over tonight's M0, a
+fine-tune re-run under its own name), with a line when the pinned weights are
+among them; and --pin with trained starting weights (fine-tunes pass --no-pin
+until the gate passes, docs/NEW_CARDS_PLAN.md 6.5).
 
     python scripts/prepare_yolo_dataset.py           class list x side (V09)
     python scripts/train_detector.py                 yolov8s, 640 px, batch 32, 150 epochs
-    python scripts/train_detector.py --epochs 60     a quicker first model
     python scripts/train_detector.py --model tmp/yolo/runs/cr_detector/weights/best.pt
         --name ft_20261101 --optimizer AdamW --lr0 0.001 --epochs 40 --no-pin
                                                      a fine-tune, on one line (0.001 is
                                                      ultralytics' AdamW default, not a tuned rate)
+    python scripts/train_detector.py ... --freeze "0,1,22.cv2"
+                                                     quote a comma list in PowerShell (or
+                                                     space-separate it: --freeze 0 1 22.cv2)
+
+Fewer epochs is not a quicker equivalent: below 115 epochs (10,000 iterations of
+ceil(5551 / 64) at nbs 64) optimizer=auto switches from MuSGD at 0.01 to AdamW at
+about 3.2e-5 for 310 classes (docs/NEW_CARDS_PLAN.md 8); pass --optimizer and --lr0.
 """
 
 from __future__ import annotations
@@ -75,12 +95,24 @@ OPTIMIZERS = ("auto", "SGD", "MuSGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam
 BATCH_12GB_640 = {"n": 64, "s": 32, "m": 16, "l": 8, "x": 4}
 REFERENCE_VRAM_GB = 12.0
 _SIZE = re.compile(r"yolo(?:v\d+|\d+)([nsmlx])", re.I)
+_STOCK = re.compile(r"yolo(?:v\d+|\d+)[nsmlx]\.(?:pt|ya?ml)", re.I)
+#: The warmup_bias_lr ultralytics' optimizer=auto uses (engine/trainer.py build_optimizer);
+#: passed with an explicit --optimizer unless --warmup-bias-lr is given.
+AUTO_WARMUP_BIAS_LR = 0.0
+#: train() keywords ultralytics' check_resume drops on --resume (it keeps freeze).
+RESUME_DROPS = ("optimizer", "lr0", "cls_pw", "warmup_bias_lr")
 
 
 def model_size(model: str) -> Optional[str]:
     """yolov8s.pt -> "s", yolo11m.pt -> "m"; None for other names (best.pt)."""
     m = _SIZE.search(Path(str(model)).name)
     return m.group(1).lower() if m else None
+
+
+def is_stock(model: str) -> bool:
+    """Stock starting weights or architecture, by file name: yolov8s.pt, yolo11m.pt,
+    yolov8s.yaml. Not best.pt, last.pt, or a trained file renamed yolov8s-m0.pt."""
+    return _STOCK.fullmatch(Path(str(model)).name) is not None
 
 
 def default_batch(model: str, imgsz: int = 640, vram_gb: Optional[float] = None) -> int:
@@ -103,7 +135,8 @@ def optimizer_name(text: str) -> str:
 
 
 def _fraction(text: str, *, zero_ok: bool) -> float:
-    """A number in [0, 1] ((0, 1] unless zero_ok): ultralytics' range for lr0 and cls_pw."""
+    """A number in [0, 1] ((0, 1] unless zero_ok): ultralytics' range for lr0, cls_pw and
+    warmup_bias_lr."""
     try:
         x = float(text)
     except ValueError:
@@ -123,6 +156,11 @@ def class_weight_power(text: str) -> float:
     return _fraction(text, zero_ok=True)
 
 
+def bias_warmup_rate(text: str) -> float:
+    """--warmup-bias-lr: in [0, 1] (a fraction key of ultralytics' cfg, as lr0 and cls_pw)."""
+    return _fraction(text, zero_ok=True)
+
+
 def freeze_spec(text: str) -> int | list:
     """--freeze: N (the first N layers, an int) or a comma list of layer indices and module
     names (0,1,2 or 22.cv2) -> a list, as ultralytics' freeze takes them."""
@@ -136,8 +174,14 @@ def freeze_spec(text: str) -> int | list:
 
 
 def train_overrides(args: argparse.Namespace) -> dict:
-    """The fine-tune settings given on the command line, as train() keywords (none: {})."""
-    pairs = (("optimizer", args.optimizer), ("lr0", args.lr0), ("cls_pw", args.cls_pw), ("freeze", args.freeze))
+    """The fine-tune settings given on the command line, as train() keywords (none: {}); with
+    an explicit --optimizer other than auto, warmup_bias_lr AUTO_WARMUP_BIAS_LR unless
+    --warmup-bias-lr is given (module doc)."""
+    warmup = getattr(args, "warmup_bias_lr", None)
+    if warmup is None and args.optimizer not in (None, "auto"):
+        warmup = AUTO_WARMUP_BIAS_LR
+    pairs = (("optimizer", args.optimizer), ("lr0", args.lr0), ("cls_pw", args.cls_pw), ("freeze", args.freeze),
+             ("warmup_bias_lr", warmup))
     return {k: v for k, v in pairs if v is not None}
 
 
@@ -164,25 +208,41 @@ def pinned_weights(pin_file: Optional[Path] = None) -> Optional[Path]:
 
 def fine_tune_warnings(args: argparse.Namespace,
                        read_pin: Callable[[Optional[Path]], Optional[Path]] = pinned_weights) -> List[str]:
-    """WARNING lines for a fine-tune that keeps the default --name: ultralytics reuses the run
-    folder (exist_ok=True), so its weights are replaced, and the pin moves when training ends.
-    A fine-tune starts from weights that are not a stock yolo*.pt (best.pt, last.pt, ...);
+    """WARNING lines for a run that would replace weights or move the pin unasked (module doc):
+    a start from trained weights (not is_stock: best.pt, last.pt, ...) with the default --name;
+    a run folder (--project/--name, which ultralytics reuses: exist_ok=True) already holding
+    weights/best.pt or last.pt, which are replaced; and --pin with trained starting weights.
     --resume continues a run in its own folder on purpose and is never warned about. The pin
-    (read_pin(args.pin_file) -> its weights) is read only when there is something to warn about."""
-    if args.resume or args.name != DEFAULT_NAME or model_size(args.model) is not None:
+    (read_pin(args.pin_file) -> its weights) is read only when weights would be replaced."""
+    if args.resume:
         return []
     run_dir = Path(args.project) / args.name
-    lines = [f"WARNING: fine-tuning from {args.model} with the default --name {args.name}: ultralytics "
-             f"reuses {run_dir} (exist_ok), so the weights/best.pt and last.pt there are replaced."]
-    if _inside(Path(args.model), run_dir):
-        lines.append("  The starting weights are in that folder: they are overwritten while training.")
-    pinned = read_pin(args.pin_file)
-    if pinned is not None and _inside(Path(pinned), run_dir):
-        lines.append(f"  The pinned detector {pinned} is in that folder: once overwritten, its SHA-256 "
-                     "no longer matches the pin and the live detector refuses to load.")
-    if args.pin:
+    trained = not is_stock(args.model)
+    default_name = trained and args.name == DEFAULT_NAME
+    held = [p.name for p in (run_dir / "weights" / "best.pt", run_dir / "weights" / "last.pt") if p.is_file()]
+    replacing = default_name or bool(held)
+    lines: List[str] = []
+    if replacing:
+        if default_name:
+            lines.append(f"WARNING: fine-tuning from {args.model} with the default --name {args.name}: "
+                         f"ultralytics reuses {run_dir} (exist_ok), so the weights/best.pt and last.pt "
+                         "there are replaced.")
+        else:
+            lines.append(f"WARNING: {run_dir} already holds weights/{' and '.join(held)}: ultralytics "
+                         "reuses the folder (exist_ok), so they are replaced.")
+        if trained and _inside(Path(args.model), run_dir):
+            lines.append("  The starting weights are in that folder: they are overwritten while training.")
+        pinned = read_pin(args.pin_file)
+        if pinned is not None and _inside(Path(pinned), run_dir):
+            lines.append(f"  The pinned detector {pinned} is in that folder: once overwritten, its SHA-256 "
+                         "no longer matches the pin and the live detector refuses to load"
+                         + (" until the pin moves." if args.pin else " (--no-pin: the pin stays)."))
+    if args.pin and (replacing or trained):
+        if not lines:
+            lines.append(f"WARNING: training from {args.model}, not stock weights, with the pin on.")
         lines.append("  When training ends the pin moves to the new best.pt (pass --no-pin until it passes the gate).")
-    lines.append("  Pass a new --name (e.g. --name ft_YYYYMMDD) to keep the old run.")
+    if replacing:
+        lines.append("  Pass a new --name (e.g. --name ft_YYYYMMDD) to keep the old run.")
     return lines
 
 
@@ -256,10 +316,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--cls-pw", type=class_weight_power, default=None,
                         help="class weight power in [0, 1]: 0 none, 1 full inverse frequency "
                              "(default: not passed, ultralytics' 0.0)")
-    parser.add_argument("--freeze", type=freeze_spec, default=None,
-                        help="freeze the first N layers, or a comma list of layer indices / module names "
-                             "such as 22.cv2 (default: not passed, nothing frozen)")
+    parser.add_argument("--freeze", nargs="+", default=None, metavar="N|LIST",
+                        help="freeze the first N layers, or a list of layer indices / module names such as "
+                             "22.cv2, comma- or space-separated (quote a comma list in PowerShell: "
+                             "--freeze \"0,1,22.cv2\"; default: not passed, nothing frozen)")
+    parser.add_argument("--warmup-bias-lr", type=bias_warmup_rate, default=None,
+                        help="bias learning rate the warmup starts from, in [0, 1] (default: not passed; "
+                             f"with --optimizer other than auto, {AUTO_WARMUP_BIAS_LR:g} as auto uses, since "
+                             "ultralytics' 0.1 would start every bias at 0.1)")
     args = parser.parse_args(argv)
+    if args.freeze is not None:
+        try:                                # PowerShell splits an unquoted 0,1,22.cv2 into 3 arguments
+            args.freeze = freeze_spec(",".join(args.freeze))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(f"argument --freeze: {exc}")
+    if args.resume:
+        dropped = [f"--{k.replace('_', '-')}" for k in RESUME_DROPS if getattr(args, k, None) is not None]
+        if dropped:
+            parser.error(f"--resume continues the checkpoint's own settings: ultralytics ignores "
+                         f"{', '.join(dropped)} then (start a new run to change them; --freeze is kept)")
     overrides = train_overrides(args)
 
     from scripts.vision import detector as vision_detector
@@ -283,6 +358,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("train settings: " + ", ".join(f"{k} {v}" for k, v in overrides.items()))
     if args.lr0 is not None and overrides.get("optimizer", "auto") == "auto":
         print("note: ultralytics ignores --lr0 with optimizer auto; pass --optimizer too (e.g. AdamW)")
+    if args.warmup_bias_lr is None and "warmup_bias_lr" in overrides:
+        print(f"note: warmup_bias_lr {AUTO_WARMUP_BIAS_LR:g}, as optimizer auto starts it (ultralytics' 0.1 "
+              "would start every bias at 0.1); --warmup-bias-lr sets another")
+    elif args.warmup_bias_lr is not None and overrides.get("optimizer", "auto") == "auto":
+        print("note: ultralytics resets warmup_bias_lr to 0 with optimizer auto; pass --optimizer too")
     for line in fine_tune_warnings(args):
         print(line)
 

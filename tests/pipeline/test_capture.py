@@ -441,6 +441,29 @@ def test_capture_refuses_a_budget_that_is_not_a_positive_size(tmp_path, monkeypa
     assert not (tmp_path / "rec").exists()                       # refused before recording
 
 
+def test_capture_refuses_a_budget_other_sessions_already_fill(tmp_path, monkeypatch, capsys):
+    """A root holding an older session (the Round 0 friendly): a --budget-mb at or below its
+    images would delete them at the first saved image, so it is refused before recording."""
+    old = tmp_path / "rec" / "friendly_20261029"
+    (old / R.IMAGES_DIR).mkdir(parents=True)
+    (old / R.FRAMES_FILE).write_text("{}\n", encoding="utf-8")
+    image = old / R.IMAGES_DIR / "00000001.npy"
+    image.write_bytes(b"\0" * (1024 * 1024))                              # 1 MB of images
+    for value in ("0.5", "1"):
+        with pytest.raises(SystemExit) as exc:
+            _capture_main(monkeypatch, tmp_path, "rec", "--budget-mb", value)
+        assert exc.value.code == 2
+        assert "already holds 1.0 MB of other sessions' images" in capsys.readouterr().err
+    assert image.is_file() and sorted(p.name for p in (tmp_path / "rec").iterdir()) == ["friendly_20261029"]
+    rc, made = _capture_main(monkeypatch, tmp_path, "rec", "--budget-mb", "2")
+    assert rc == 0 and made[0][1].budget.budget_bytes == 2 * 1024 * 1024 and image.is_file()
+    out = capsys.readouterr().out
+    assert "image budget 2 MB for everything under" in out
+    assert "1.0 MB of it is other sessions' images" in out
+    rc, made = _capture_main(monkeypatch, tmp_path, "rec")                # no --budget-mb: as before
+    assert rc == 0 and "other sessions" not in capsys.readouterr().out
+
+
 def test_capture_budget_mb_needs_record(monkeypatch):
     monkeypatch.setattr(C, "open_source", lambda kind, **kw: pytest.fail("opened a source"))
     with pytest.raises(SystemExit) as exc:

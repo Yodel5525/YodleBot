@@ -361,7 +361,7 @@ The images are hard-linked, not copied, so it needs almost no extra disk. Each c
 ```
 
 - The first run downloads the starting weights, `yolov8s.pt` (about 22 MB).
-- `--epochs 60` gives a quicker first model.
+- Keep the default 150 epochs. Below 115 epochs ultralytics' automatic optimizer switches to AdamW at about 3e-5, a setting not tried here (`docs\NEW_CARDS_PLAN.md` section 8).
 - If the GPU runs out of memory, add `--batch 16`. If RAM runs low, add `--workers 2`.
 - Without CUDA it stops with exit code 2 instead of training on the CPU for days. Then check steps 1 and 6.
 - If the PC restarts during the run, resume it:

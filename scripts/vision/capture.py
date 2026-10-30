@@ -38,7 +38,9 @@ the frames (VisionFrames with empty perception plus every Nth image), e.g. to
 label a friendly later. The recorder prunes the OLDEST images under the whole
 --record root once they pass --budget-mb (default 4000 MB, record.py's
 VisionRecorder): give each session its own root, or raise the budget, to keep
-every image of several battles.
+every image of several battles. A --budget-mb no larger than the images other
+sessions already hold under the root is refused (it would delete them at the
+first image); a larger one prints how much of it they take.
 
     python -m scripts.vision.capture --source auto --seconds 420 --record reports/vision/harvest/S1 --budget-mb 8000
 """
@@ -635,11 +637,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --record: the image budget of the WHOLE --record root in MB; above it the "
                          "oldest images under the root are deleted (default: the recorder's 4000)")
     args = ap.parse_args(argv)
+    held_mb = 0.0
     if args.budget_mb is not None:
         if not args.record:
             ap.error("--budget-mb applies to --record")
         if not (math.isfinite(args.budget_mb) and args.budget_mb > 0):
             ap.error(f"--budget-mb must be a positive number of MB, not {args.budget_mb}")
+        from .record import _MB, DiskBudget
+        held_mb = DiskBudget(args.record, 0).total_bytes / _MB     # scans only; deletes nothing
+        if held_mb and held_mb >= args.budget_mb:
+            ap.error(f"--budget-mb {args.budget_mb:g}: {args.record} already holds {held_mb:.1f} MB of "
+                     "other sessions' images, so the recorder would delete the oldest of them at its "
+                     "first image. Record to a root of its own (one per session) or pass a larger budget.")
     from .geometry import parse_size
     resize = parse_size(args.resize) if args.resize else None
     source = open_source(args.source, instance=args.instance, max_stale_s=args.max_stale, resize_to=resize)
@@ -652,6 +661,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"recording to {recorder.session_dir}")
         if budget:
             print(f"  image budget {args.budget_mb:g} MB for everything under {recorder.root}")
+            if held_mb > 0:
+                print(f"  {held_mb:.1f} MB of it is other sessions' images: once the total passes the "
+                      "budget the oldest go first")
     seen_t: list[float] = []
     stale: list[float] = []
     size = None
