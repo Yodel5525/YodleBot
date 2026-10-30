@@ -156,6 +156,16 @@ def refuse(team, ticks, reason=NOT_ENOUGH):
     return results
 
 
+def true_tick(battle):
+    """The battle's own tick when a seat acts: FakeBattle keeps it as `tick`; RoyaleSim's
+    Battle has no tick attribute, only its state's "tick" (the seat's `state` argument may be
+    a noisy view and its `tick` argument carries the view's shift, so neither is used)."""
+    tick = getattr(battle, "tick", None)
+    if tick is None:
+        tick = json.loads(battle.state_json())["tick"]
+    return int(tick)
+
+
 class Plays:
     """Plays hand slot 0 at the (true) ticks in `at`, in its own half."""
 
@@ -163,7 +173,7 @@ class Plays:
         self.at = tuple(at)
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
-        if battle.tick not in self.at:
+        if true_tick(battle) not in self.at:
             return None
         return (team, 0, 9000 * sub, (8000 if team == 0 else 24_000) * sub)
 
@@ -175,7 +185,7 @@ class Presser:
         self.at, self.slot = tuple(at), slot
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
-        return (team, self.slot, 0, 0) if battle.tick in self.at else None
+        return (team, self.slot, 0, 0) if true_tick(battle) in self.at else None
 
 
 class Views:
@@ -185,7 +195,7 @@ class Views:
         self.views = {}
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
-        self.views[battle.tick] = copy.deepcopy(mem)
+        self.views[true_tick(battle)] = copy.deepcopy(mem)
         return None
 
 
@@ -209,9 +219,10 @@ def counting(M, engine):
             self.counts, self.views, self.bars = {}, {}, {}
 
         def act(self, battle, state, team, mem, tick, sub, royalesim):
-            self.counts[battle.tick] = self.opp_elixir(team, mem, tick, royalesim)
-            self.views[battle.tick] = [tuple(p) for p in mem["last"][1 - team]]
-            self.bars[battle.tick] = int(state["players"][1 - team]["elixir_milli"])
+            now = true_tick(battle)
+            self.counts[now] = self.opp_elixir(team, mem, tick, royalesim)
+            self.views[now] = [tuple(p) for p in mem["last"][1 - team]]
+            self.bars[now] = int(state["players"][1 - team]["elixir_milli"])
             return None
     return Counting()
 
