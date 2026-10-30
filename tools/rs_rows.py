@@ -156,6 +156,55 @@ from the row's tick, as before. vocab.json: obs_delay ticks and jitter, "decisio
 rows_for's info and manifest.json get "decision" counts (play_rows, press_rows, not_in_hand,
 clamped, pending_rows, exact_rows). sim/train_tokens.py reads none of the new columns (E14 /
 E15 will): the legacy model trains on decision-time rows as they are, schema rs_rows/legacy.
+
+Schema v2 (E14; tools/rs_schema.py, which holds both layouts as data; tokens-14): `--schema
+legacy` (the default) writes the rows above, schema rs_rows/legacy, so the rows, vocab.json and
+manifest.json are byte-identical to the rows before E14. `--schema v2` writes rs_rows/v2: every
+row has the same columns whatever the other flags (only --trust v2 still adds trusted_v2), and
+build() casts each to rs_schema.V2's dtype (tick int32, side int8, next int16, outcome and won
+float32). Against legacy:
+  unit_feats    9 features: the 7 above (of the --units mode or --live-compat), then "form",
+                0 base, 0.5 evolution, 1 hero (under --units vision the class table's, else
+                the unit type's name, unit_form_table), and "burrow", 1 for a unit tunnelling
+                now (status_flags read as under --visibility public: the engine's -1 is
+                refused); there is no unit_form or unit_burrow column. --visibility public
+                still leaves the unseen enemies out.
+  scalars       7: the 4 above, then "triple" (3x elixir from 240 s, tick 4800, rs_elixir's
+                law), "opp_elixir" (/ 10000) and "opp_exact": the opponent's bar as the acting
+                side counts it from what it has seen (SeenElixir: one rs_elixir.ElixirCounter a
+                side, priced from the catalogue; fed each play the engine ran, and under
+                --presses on each press it took, once exec_tick + max(BOARD_LAG, L) <= t, L =
+                --mem-lag: the plays the memory view holds), and whether that count is still
+                known to be exact. A recorded play the engine refused never reached the board,
+                so it is not counted (the memory still lists it, as before). Own elixir stays
+                the raw bar, what the client shows (tokens-19).
+  hand_feats    per hand slot: the card's form in players[t]["deck"] / ["forms"] / 2, 1 when
+                its next play is evolved, and its evolution charge (players[t]["evo"]: plays
+                since its last evolved play / the plays it needs, at most 1); hand_features.
+                Zeros for a deck without evolutions or heroes (the bot's own, live).
+  spell_ids, spell_feats
+                up to 8 cast spells in flight (state["spells"] read through
+                royalesim.SPELL_FIELDS, spell_index, as tools/rs_shadow.py reads them), nearest
+                the own king first: the spell card + 2, and own, its centre and its aim in the
+                acting player's frame (/ 18000, / 32000), ticks_flown / 40 within [0, 1];
+                spell_features. Only objects of a SPELL card (SPELL_CARDS, catalogue
+                card_kind): what the screen shows as a spell (vision_classes.KATACR_SPELLS),
+                not the effects a troop or building leaves (an evolution's areas, a death bomb,
+                a deploy blow, a hero ability).
+  own_pending, own_pending_land
+                always; zeros for rows at execution (E11 fills them at --obs-delay D > 0).
+  ability_card, ability_state
+                always, from players[t]["abilities"] as under --presses on (the engine reports
+                its buttons whether or not presses are replayed).
+  act_press     always; 0 on every row without --presses on.
+  hand_exact    honest for every row (exact_hand), also at --obs-delay 0.
+--mem-lag legacy is refused. vocab.json: "schema" rs_rows/v2, "schema_spec"
+(rs_schema.V2.to_json(B)) and only trusted_v2 in "extra_columns"; rows_for's info and
+manifest.json get "observation" counts (rows, opp_inexact, spell_rows). obs_row(...,
+schema="v2", opp_elixir=SeenElixir.view(team, t)) gives the same row from any state dict, a
+live one from tools/public_state.py included, once _setup has filled UNIT_FORMS, SPELL_CARDS
+and SF. sim/train_tokens.py and the model read v2 rows from E15 on (the legacy trainer cannot:
+unit_feats has 9 features and scalars 7); rs_eval and the live runner still build legacy rows.
 """
 from __future__ import annotations
 
@@ -178,10 +227,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
 import rs_cards  # noqa: E402
+import rs_elixir  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
 import rs_presses  # noqa: E402
+import rs_schema  # noqa: E402
 import vision_classes  # noqa: E402
 
 OUT = ROOT / "data" / "rs_rows"
@@ -243,6 +294,30 @@ HAND_SIZE = rs_presses.FALLBACK_HAND_SIZE
 #: label act_press first), as vocab.json "extra_columns" lists them.
 PRESS_FIELDS = ("ability_card", "ability_state")
 PRESS_COLUMNS = ("act_press",) + PRESS_FIELDS
+
+#: --schema (module doc, "Schema v2"): the row layout, rs_schema.SCHEMA_LEGACY (the rows before
+#: E14) or rs_schema.SCHEMA_V2; build and main set it like the settings above.
+ROW_SCHEMA = rs_schema.SCHEMA_LEGACY
+#: The keys of a v2 obs_row row, in order, and its features per unit.
+V2_OBS_FIELDS = rs_schema.V2.obs_fields()
+V2_UF = rs_schema.V2.unit_features
+#: Where "opp_exact" sits in a v2 row's scalars.
+V2_OPP_EXACT = rs_schema.V2.index("scalars", "opp_exact")
+#: royalesim.SPELL_FIELDS (name -> column) for state["spells"] rows; _setup fills it (spell_index),
+#: None reads them in royalegym protocol.SpellState's order, SPELL_FIELDS_FALLBACK.
+SF = None
+SPELL_FIELDS_FALLBACK = ("team", "card_id", "motion", "x", "y", "aim_x", "aim_y", "delay_ticks",
+                         "travelled", "length", "hits", "ticks_flown")
+#: The spell columns a v2 row cannot do without (ticks_flown is optional: -1 / absent reads 0).
+SPELL_REQUIRED = ("team", "card_id", "x", "y", "aim_x", "aim_y")
+#: v2 unit "form" by unit_type for --units types and --live-compat rows (unit_form_table of
+#: this Battle's unit_types_json()); _setup fills it.
+UNIT_FORMS = None
+#: The catalogue ids of the SPELL cards (card_kind, catalogue column CARD_KIND_COLUMN): the spell
+#: objects a v2 row shows (spell_features); _setup fills it. tools/rs_orient.py reads the column
+#: at the same place, as CARD_BUILDING above does.
+SPELL_CARDS = None
+CARD_KIND_COLUMN = 8
 
 
 def press_vocab(presses) -> dict:
@@ -560,6 +635,204 @@ def burrowing(e, fields=None) -> bool:
     return bool(unit_status(e, fields) & STATUS_UNDERGROUND)
 
 
+# ---------------------------------------------------------------------------
+# schema v2 (E14; module doc, "Schema v2")
+# ---------------------------------------------------------------------------
+
+def schema_mode(value) -> str:
+    """--schema as obs_row, rows_for, build and vocab_record take it: "legacy" / "v2", a full
+    vocab.json name or an rs_schema.Schema, as its vocab.json name (rs_schema.schema_name).
+    ValueError (rs_schema.SchemaError) otherwise."""
+    return rs_schema.schema_name(value)
+
+
+def describe_schema(schema) -> str:
+    """One line for the console."""
+    name = schema_mode(schema)
+    if name == rs_schema.SCHEMA_LEGACY:
+        return f"{name} (the rows before E14)"
+    return (f"{name} (spells in flight, the opponent's counted elixir, own pending plays, hand "
+            f"evolution, {BUTTONS} ability buttons, unit form and burrow; "
+            f"{rs_schema.V2.row_bytes(BUTTONS):,} bytes a row)")
+
+
+def spell_index(royalesim=None) -> dict:
+    """royalesim.SPELL_FIELDS as name -> column; SPELL_FIELDS_FALLBACK's when the engine does
+    not export them (royalegym checks that the engine's list is a prefix of that order)."""
+    names = getattr(royalesim, "SPELL_FIELDS", None) if royalesim is not None else None
+    return {str(n): i for i, n in enumerate(names or SPELL_FIELDS_FALLBACK)}
+
+
+def unit_form_table(unit_types) -> tuple:
+    """The v2 unit "form" of each name of unit_types_json(), in order: 0 base, 0.5 evolution
+    (an _EV<n> name), 1 hero (a ...Hero name), by vision_classes.split_form's name rules (the
+    rules data/vision/classes.json was built with)."""
+    names = [str(n) for n in unit_types]
+    index = vision_classes.NameIndex(names)
+    return tuple(vision_classes.split_form(n, index)[1] / vision_classes.FORM_HERO for n in names)
+
+
+def unit_form(unit) -> float:
+    """UNIT_FORMS of unit_type `unit`; 0.0 for -1 (not reported) and an unknown index."""
+    u = int(unit)
+    return UNIT_FORMS[u] if 0 <= u < len(UNIT_FORMS) else 0.0
+
+
+def _opp_elixir(value) -> tuple:
+    """obs_row's opp_elixir as (milli, exact): a (milli, exact) pair, or milli alone (exact)."""
+    if value is None:
+        raise ValueError("--schema v2: obs_row needs opp_elixir, the (milli, exact) the acting "
+                         "side counts for its opponent (SeenElixir.view)")
+    if isinstance(value, (tuple, list)):
+        milli, exact = value
+    else:
+        milli, exact = value, True
+    return int(milli), bool(exact)
+
+
+def hand_features(player) -> np.ndarray:
+    """v2 hand_feats (rs_schema.HAND_FEATS), float16 [4, 3], one row per hand slot of `player`
+    (a state_json player): the card's form in the deck ("deck" / "forms"; an "evo" row alone
+    reads as an evolution) / 2, 1 when its next play is evolved, and its evolution charge,
+    plays since its last evolved play / plays it needs (at most 1; the ready flag when it needs
+    none). Zeros for an empty slot and for a player that reports none of these (the live HUD:
+    the bot's own cards are all base)."""
+    forms = {int(c): int(f) for c, f in zip(player.get("deck") or (), player.get("forms") or ())}
+    evo = {int(r[0]): [int(v) for v in r] for r in (player.get("evo") or ()) if len(r)}
+    out = np.zeros((rs_schema.HAND_SIZE, len(rs_schema.HAND_FEATS)), dtype=np.float16)
+    for k, card in enumerate(list(player.get("hand") or ())[:rs_schema.HAND_SIZE]):
+        card = int(card)
+        if card < 0:
+            continue
+        row = evo.get(card)
+        ready = progress = 0.0
+        if row is not None:
+            since = row[1] if len(row) > 1 else 0
+            ready = 1.0 if len(row) > 2 and row[2] else 0.0
+            need = row[3] if len(row) > 3 else 0
+            progress = min(1.0, max(0.0, since / need)) if need > 0 else ready
+        form = forms.get(card, vision_classes.FORM_EVO if row is not None else 0)
+        out[k] = (form / vision_classes.FORM_HERO, ready, progress)
+    return out
+
+
+def spell_cards(cat) -> frozenset:
+    """The catalogue ids of the SPELL cards in catalogue_json() rows `cat` (card_kind,
+    CARD_KIND_COLUMN): SPELL_CARDS."""
+    return frozenset(i for i, row in enumerate(cat)
+                     if len(row) > CARD_KIND_COLUMN and row[CARD_KIND_COLUMN] == "SPELL")
+
+
+def spell_features(state, team, sub, king, cards=None) -> tuple:
+    """v2 (spell_ids int16 [8], spell_feats float16 [8, 6]) of `team`'s view: the objects of
+    state["spells"] (read through SF, else SPELL_FIELDS_FALLBACK's order) whose card is a SPELL
+    card (`cards`, None: SPELL_CARDS; module doc, "Schema v2"), nearest `king` ((x, y) engine
+    subtiles, the point obs_row sorts the units from) first, the first rs_schema.SPELL_SLOTS.
+    Each: its card + 2, and (rs_schema.SPELL_FEATS) own, its centre and its aim in `team`'s
+    frame (/ 18000, / 32000), ticks_flown / 40 within [0, 1] (0 when not reported, -1).
+    RuntimeError before _setup has filled SPELL_CARDS; rs_engine.EngineError when SF lacks a
+    SPELL_REQUIRED name."""
+    cards = SPELL_CARDS if cards is None else cards
+    if cards is None:
+        raise RuntimeError("--schema v2 rows need the spell cards: _setup() fills SPELL_CARDS "
+                           "from the engine's catalogue")
+    sf = SF if SF is not None else spell_index()
+    missing = [n for n in SPELL_REQUIRED if n not in sf]
+    if missing:
+        raise rs_engine.EngineError(f"royalesim.SPELL_FIELDS {list(sf)} has no {missing}: "
+                                    "--schema v2 reads them")
+    kx, ky = king
+    spells = sorted((list(sp) for sp in (state.get("spells") or ())
+                     if int(sp[sf["card_id"]]) in cards),
+                    key=lambda sp: (sp[sf["x"]] - kx) ** 2 + (sp[sf["y"]] - ky) ** 2)
+    ids = np.zeros(rs_schema.SPELL_SLOTS, dtype=np.int16)
+    feats = np.zeros((rs_schema.SPELL_SLOTS, len(rs_schema.SPELL_FEATS)), dtype=np.float16)
+    at_flown = sf.get("ticks_flown")
+    for k, sp in enumerate(spells[:rs_schema.SPELL_SLOTS]):
+        ids[k] = int(sp[sf["card_id"]]) + 2
+        x, y = own(sp[sf["x"]], sp[sf["y"]], team, sub)
+        ax, ay = own(sp[sf["aim_x"]], sp[sf["aim_y"]], team, sub)
+        flown = int(sp[at_flown]) if at_flown is not None and len(sp) > at_flown else -1
+        feats[k] = (1.0 if sp[sf["team"]] == team else 0.0, x / 18_000, y / 32_000,
+                    ax / 18_000, ay / 32_000,
+                    min(1.0, flown / rs_schema.SPELL_FLOWN_SCALE) if flown > 0 else 0.0)
+    return ids, feats
+
+
+def press_cost(player, button: int) -> int:
+    """The elixir `player`'s ability button `button` costs: its abilities row's cost column
+    (royalegym AbilityRow: available, spent, cost, ...); 0 when the engine sends no row."""
+    rows = list(player.get("abilities") or ())
+    if 0 <= int(button) < len(rows) and len(rows[int(button)]) > 2:
+        return max(0, int(rows[int(button)][2]))
+    return 0
+
+
+def elixir_law(engine=None) -> rs_elixir.ElixirLaw:
+    """The elixir law of the battles `engine` builds (rs_engine.resolve): royalesim's
+    calibration under the config's calibration_overrides (as tools/rs_match.py counts it)."""
+    cfg = rs_engine.resolve(engine)
+    if cfg.calibration_overrides:
+        return rs_elixir.ElixirLaw.load(overrides=dict(cfg.calibration_overrides))
+    return rs_elixir.default_law()
+
+
+class SeenElixir:
+    """E14: each side's elixir as the other side counts it from the plays it has seen.
+
+    One rs_elixir.ElixirCounter per side (seeded with START_MANA at tick 0, paid when a play
+    RUNS, regenerated by the law, capped, a Mirror priced as its copy + 1), fed only the events
+    its observer knows: view(observer, t) first feeds the observer's opponent every recorded
+    event with exec_tick + lag <= t, then returns (elixir_milli(t), exact). With lag >=
+    BOARD_LAG (rows_for: max(BOARD_LAG, --mem-lag), the memory view's) no event dated t is fed
+    at t, so that is the bar the engine's state(t) shows once every play has been seen (and the
+    costs are the engine's: no Collector or Elixir Golem payouts, which rs_elixir does not
+    model); a play still unseen at t is not paid yet at t, and once seen it is paid at its own
+    tick (rs_elixir re-folds the count). Live, where perception records a play when it first
+    sees it, lag 0. Queries in nondecreasing tick order give each observer's view.
+
+    record(team, exec_tick, card) logs `team`'s play of catalogue card `card` (cost= overrides
+    the catalogue price); press(team, exec_tick, cost) a press that ran. rows_for records only
+    what the engine ran (step results "OK").
+    """
+
+    def __init__(self, catalogue, *, fields=None, law=None, lag: int = rs_memory.BOARD_LAG):
+        self.lag = _ticks(lag, "SeenElixir lag")
+        self.counters = {t: rs_elixir.ElixirCounter.from_catalogue(catalogue, fields=fields,
+                                                                   law=law) for t in (0, 1)}
+        self._waiting: dict = {0: [], 1: []}       # events recorded and not fed yet
+
+    def _team(self, team) -> int:
+        team = _ticks(team, "team")
+        if team not in (0, 1):
+            raise ValueError(f"team must be 0 or 1, got {team}")
+        return team
+
+    def record(self, team, exec_tick, card, cost=None) -> None:
+        self._waiting[self._team(team)].append(
+            (_ticks(exec_tick, "exec_tick"), "play", int(card), cost))
+
+    def press(self, team, exec_tick, cost) -> None:
+        self._waiting[self._team(team)].append(
+            (_ticks(exec_tick, "exec_tick"), "press", None, int(cost)))
+
+    def view(self, observer, tick) -> tuple:
+        """(milli, exact): `observer`'s count of its opponent's bar at `tick`."""
+        side = 1 - self._team(observer)
+        tick = int(tick)
+        counter, waiting = self.counters[side], self._waiting[side]
+        if waiting:
+            due = [e for e in waiting if e[0] + self.lag <= tick]
+            if due:
+                self._waiting[side] = [e for e in waiting if e[0] + self.lag > tick]
+                for when, kind, card, cost in due:
+                    if kind == "play":
+                        counter.play(when, card, cost=cost)
+                    else:
+                        counter.press(when, cost)
+        return counter.elixir_milli(tick), counter.exact
+
+
 #: --trust (module doc, "Trust v2"): TRUST_LEGACY, `trusted` only (the rows before E09);
 #: TRUST_V2, also `trusted_v2`.
 TRUST_LEGACY, TRUST_V2 = "legacy", "v2"
@@ -780,7 +1053,8 @@ def trust_stats(rows, infos, rule=None) -> dict:
     hog_trusted_v2, "cuts_v2" and princess_votes ({seat name: {vote: matches}}). When the
     infos carry "presses" (--presses on), also "presses": press_rows (rows with a press label)
     and the matches' rs_presses.PressLog counts summed. When they carry "decision" (E11,
-    --obs-delay > 0), also "decision": those counts summed."""
+    --obs-delay > 0), also "decision": those counts summed; "observation" (E14, --schema v2)
+    likewise."""
     rule = trust_rule(rule)
     hog = [r for r in rows if r["hog"]]
     st = {"rows": len(rows), "play_rows": sum(1 for r in rows if r["action"][0]),
@@ -804,6 +1078,11 @@ def trust_stats(rows, infos, rule=None) -> dict:
         for i in infos:
             merge_stats(decision, i.get("decision", {}))
         st["decision"] = decision
+    if any("observation" in i for i in infos):          # E14, --schema v2
+        observation: dict = {}
+        for i in infos:
+            merge_stats(observation, i.get("observation", {}))
+        st["observation"] = observation
     return st
 
 
@@ -856,6 +1135,8 @@ def manifest(totals: dict, shards, skipped, rule=None) -> dict:
         out["presses"] = totals["presses"]
     if "decision" in totals:
         out["decision"] = totals["decision"]
+    if "observation" in totals:
+        out["observation"] = totals["observation"]
     out["shards"] = sorted(shards, key=lambda s: s["shard"])
     return out
 
@@ -877,6 +1158,11 @@ def describe_manifest(man: dict) -> str:
         text += (f"; decision time: {d.get('not_in_hand', 0):,} of {d.get('play_rows', 0):,} "
                  f"play rows tap a card not yet in hand, {d.get('clamped', 0):,} taps floored "
                  f"at tick 0")
+    if "observation" in man:
+        o = man["observation"]
+        text += (f"; schema v2: {o.get('spell_rows', 0):,} of {o.get('rows', 0):,} rows show a "
+                 f"spell in flight, {o.get('opp_inexact', 0):,} count the opponent's elixir "
+                 f"inexactly")
     return text
 
 
@@ -970,10 +1256,13 @@ def _setup(engine=None):
     (rs_engine.field_index), and under --units vision (UNITS) VCT, the class table, and VC,
     its lookup of this Battle's unit_types_json(). Under --visibility public (VISIBILITY) it
     first checks royalesim.STATUS_BITS (check_status_bits). BUTTONS and HAND_SIZE come from
-    royalesim.ABILITY_BUTTONS / HAND_SIZE (rs_presses.button_count / hand_size)."""
-    global F, VC, VCT, BUTTONS, HAND_SIZE
+    royalesim.ABILITY_BUTTONS / HAND_SIZE (rs_presses.button_count / hand_size). For --schema v2
+    rows (E14) it also fills SF (spell_index), UNIT_FORMS (unit_form_table) and SPELL_CARDS
+    (spell_cards), whatever the settings (the live runner's rows need them too), and under v2
+    (ROW_SCHEMA) it checks STATUS_BITS, since every v2 row reads the burrow bit."""
+    global F, VC, VCT, BUTTONS, HAND_SIZE, SF, UNIT_FORMS, SPELL_CARDS
     import royalesim
-    if VISIBILITY == VIS_PUBLIC:
+    if VISIBILITY == VIS_PUBLIC or ROW_SCHEMA == rs_schema.SCHEMA_V2:
         check_status_bits(royalesim)
     BUTTONS, HAND_SIZE = rs_presses.button_count(royalesim), rs_presses.hand_size(royalesim)
     names = rs_cards.load()
@@ -984,9 +1273,12 @@ def _setup(engine=None):
     for i, row in enumerate(cat):
         CARD_FLY[i] = bool(row[5])
         CARD_BUILDING[i] = row[8] == "BUILDING"
+    unit_types = json.loads(b.unit_types_json())
+    SF, UNIT_FORMS = spell_index(royalesim), unit_form_table(unit_types)
+    SPELL_CARDS = spell_cards(cat)
     if UNITS == UNITS_VISION:
         VCT = vision_classes.load()
-        VC = VCT.lookup(json.loads(b.unit_types_json()))
+        VC = VCT.lookup(unit_types)
     return royalesim, names, ids, cat
 
 
@@ -1009,7 +1301,7 @@ def towers_vec(state, team):
 
 
 def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None, presses=None,
-            buttons=None, pending=None, hand_exact=None):
+            buttons=None, pending=None, hand_exact=None, schema=None, opp_elixir=None):
     """One row of `team`'s view. `mem` is the opponent memory, {"seen", "last"} as
     rs_memory.PublicMemory.view() gives it. `live` / `units` / `visibility` / `presses` default
     to LIVE / UNITS / VISIBILITY / PRESSES; with units "vision" (and not live) the row also has
@@ -1022,17 +1314,30 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
     button the engine's rows do not). With `pending` (E11, decision-time rows: `team`'s own
     pending plays, (card token, ticks to land) soonest first; [] for none) the row also has
     "own_pending" and "own_pending_land" (pending_features); None leaves them out. `hand_exact`
-    is the row's flag (None: True, as the rows before E11 say)."""
+    is the row's flag (None: True, as the rows before E11 say).
+
+    `schema` (None: ROW_SCHEMA) "v2" (E14) gives the row of rs_schema.V2, keys in its
+    obs_fields order (module doc, "Schema v2"): `opp_elixir` is then required, the (milli,
+    exact) count of the opponent's bar the acting side holds (SeenElixir.view; an int alone is
+    exact), `pending` None reads as [], the ability columns are there whatever `presses` says,
+    and unit_form / unit_burrow go into unit_feats (UNIT_FORMS must be filled, by _setup, for
+    the types and live tokens)."""
     live = LIVE if live is None else live
     units = unit_mode(UNITS if units is None else units)
+    v2 = schema_mode(ROW_SCHEMA if schema is None else schema) == rs_schema.SCHEMA_V2
     public = visibility_mode(VISIBILITY if visibility is None else visibility) == VIS_PUBLIC
     press = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
     vision = not live and units == UNITS_VISION
     if vision and VC is None:
         raise RuntimeError("--units vision rows need the class lookup: set UNITS = 'vision' "
                            "before _setup(), which fills VC")
-    forms = np.zeros(MAX_UNITS, dtype=np.float16) if vision else None
-    burrow = np.zeros(MAX_UNITS, dtype=np.float16) if public else None
+    if v2:
+        opp_milli, opp_exact = _opp_elixir(opp_elixir)
+        if not vision and UNIT_FORMS is None:
+            raise RuntimeError("--schema v2 rows need the unit form table: _setup() fills "
+                               "UNIT_FORMS from the engine's unit types")
+    forms = np.zeros(MAX_UNITS, dtype=np.float16) if vision and not v2 else None
+    burrow = np.zeros(MAX_UNITS, dtype=np.float16) if public and not v2 else None
     ents = [e for e in state["entities"] if e[F["tower_slot"]] < 0 and e[F["hp"]] > 0]
     if public:
         # E12: only what `team`'s screen shows, before the sort and the MAX_UNITS cut, so the
@@ -1046,34 +1351,41 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
               else (9000 * 18, (3000 if team == 0 else 29000) * 18))
     ents.sort(key=lambda e: (e[F["x"]] - kx) ** 2 + (e[F["y"]] - ky) ** 2)
     ids = np.zeros(MAX_UNITS, dtype=np.int16)
-    feats = np.zeros((MAX_UNITS, UF), dtype=np.float16)
+    feats = np.zeros((MAX_UNITS, V2_UF if v2 else UF), dtype=np.float16)
     for k, e in enumerate(ents[:MAX_UNITS]):
         ox, oy = own(e[F["x"]], e[F["y"]], team, sub)
         if live:
             card = e[F["card_id"]]
             ids[k] = card + 2
-            feats[k] = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
-                        e[F["hp"]] / max(1, e[F["max_hp"]]),
-                        1.0 if CARD_FLY.get(card) else 0.0,
-                        1.0 if CARD_BUILDING.get(card) else 0.0,
-                        float(np.log1p(max(0, e[F["max_hp"]]))) / 10.0)
+            vals = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
+                    e[F["hp"]] / max(1, e[F["max_hp"]]),
+                    1.0 if CARD_FLY.get(card) else 0.0,
+                    1.0 if CARD_BUILDING.get(card) else 0.0,
+                    float(np.log1p(max(0, e[F["max_hp"]]))) / 10.0)
         elif vision:
             # The vision class of the unit type, flags from the class table; the form goes
-            # to its own column until the v2 schema (E14) makes room in unit_feats.
+            # to its own column, or (v2, E14) into unit_feats.
             unit = e[F["unit_type"]]
             ids[k] = VC.token(unit)
             fly, building = VC.flags(unit)
-            feats[k] = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
-                        e[F["hp"]] / max(1, e[F["max_hp"]]), fly, building,
-                        1.0 if e[F["deploy_ticks"]] > 0 else 0.0)
-            forms[k] = VC.form_feature(unit)
+            vals = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
+                    e[F["hp"]] / max(1, e[F["max_hp"]]), fly, building,
+                    1.0 if e[F["deploy_ticks"]] > 0 else 0.0)
+            if forms is not None:
+                forms[k] = VC.form_feature(unit)
         else:
             ids[k] = e[F["unit_type"]] + 2
-            feats[k] = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
-                        e[F["hp"]] / max(1, e[F["max_hp"]]), 1.0 if e[F["flying"]] else 0.0,
-                        1.0 if e[F["kind"]] == 1 else 0.0,
-                        1.0 if e[F["deploy_ticks"]] > 0 else 0.0)
-        if public:
+            vals = (1.0 if e[F["team"]] == team else 0.0, ox / 18_000, oy / 32_000,
+                    e[F["hp"]] / max(1, e[F["max_hp"]]), 1.0 if e[F["flying"]] else 0.0,
+                    1.0 if e[F["kind"]] == 1 else 0.0,
+                    1.0 if e[F["deploy_ticks"]] > 0 else 0.0)
+        if v2:
+            # E14: the form and the burrow flag are unit features 7 and 8.
+            unit = e[F["unit_type"]]
+            vals += (VC.form_feature(unit) if vision else unit_form(unit),
+                     1.0 if burrowing(e) else 0.0)
+        feats[k] = vals
+        if burrow is not None:
             burrow[k] = 1.0 if burrowing(e) else 0.0
     p = state["players"][team]
     hand = [c + 2 for c in p["hand"][:4]] + [0] * (4 - len(p["hand"][:4]))
@@ -1081,13 +1393,17 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
     seen = sorted(mem["seen"][opp])[:8]
     last = mem["last"][opp][-4:]
     t_ms = tick * 50
+    scalars = [p["elixir_milli"] / 10_000, min(1.0, t_ms / 300_000),
+               1.0 if t_ms >= 120_000 else 0.0, 1.0 if t_ms >= 180_000 else 0.0]
+    if v2:
+        # E14: 3x elixir from 240 s, and the opponent's bar as this side counts it.
+        scalars += [1.0 if t_ms >= 240_000 else 0.0, opp_milli / 10_000,
+                    1.0 if opp_exact else 0.0]
     row = {
         "tick": tick, "side": 1 if team == 0 else -1,
         "hand_exact": True if hand_exact is None else bool(hand_exact),
         "unit_ids": ids, "unit_feats": feats, "towers": towers_vec(state, team),
-        "scalars": np.asarray([p["elixir_milli"] / 10_000, min(1.0, t_ms / 300_000),
-                               1.0 if t_ms >= 120_000 else 0.0,
-                               1.0 if t_ms >= 180_000 else 0.0], dtype=np.float32),
+        "scalars": np.asarray(scalars, dtype=np.float32),
         "hand": np.asarray(hand, dtype=np.int16),
         "next": (p["next_card"] + 2) if p.get("next_card", -1) >= 0 else 0,
         "opp_seen": np.asarray(seen + [0] * (8 - len(seen)), dtype=np.int16),
@@ -1095,22 +1411,26 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
         "opp_last_age": np.asarray([min(1.0, (tick - t) / 400) for _, t in last]
                                    + [1.0] * (4 - len(last)), dtype=np.float16),
     }
-    if vision:
+    if forms is not None:
         row["unit_form"] = forms
-    if public:
+    if burrow is not None:
         row["unit_burrow"] = burrow
-    if press:
+    if press or v2:
         cards, states = rs_presses.ability_features(p, BUTTONS, buttons)
         row["ability_card"] = np.asarray(cards, dtype=np.int16)
         row["ability_state"] = np.asarray(states, dtype=np.float16).reshape(
             BUTTONS, len(rs_presses.ABILITY_FEATS))
-    if pending is not None:
-        row["own_pending"], row["own_pending_land"] = pending_features(pending)
+    if pending is not None or v2:
+        row["own_pending"], row["own_pending_land"] = pending_features(pending or ())
+    if v2:
+        row["hand_feats"] = hand_features(p)
+        row["spell_ids"], row["spell_feats"] = spell_features(state, team, sub, (kx, ky))
+        row = {k: row[k] for k in V2_OBS_FIELDS}
     return row
 
 
 def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, presses=None,
-             info=None, decision=None):
+             info=None, decision=None, schema=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
     since the recorded ticks are the ticks the plays executed. `decision` as --obs-delay
     (decision_rule; None: DECISION): a delay > 0 observes each play and press at its tap,
@@ -1124,13 +1444,20 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
     info["trust"] = {"cut": the tick `trusted` was cut at or None, "why": its CUT_* reason or
     CUT_NONE} and under v2 also "cut_v2", "why_v2" and "votes" (princess_vote of blue and red
     at the end of the run); under presses "on" also info["presses"] (rs_presses.PressLog);
-    with a delay also info["decision"], the counts manifest.json sums (module doc)."""
+    with a delay also info["decision"], the counts manifest.json sums (module doc). `schema`
+    as --schema (schema_mode; None: ROW_SCHEMA): "v2" gives rs_schema.V2's rows (module doc,
+    "Schema v2"), the opponent's elixir counted by a SeenElixir at the memory view's lag, and
+    info["observation"] (rows, opp_inexact, spell_rows); legacy calls obs_row as before."""
     lag = mem_lag_value(MEM_LAG if mem_lag is None else mem_lag)
     legacy = lag == MEM_LEGACY
     drule = decision_rule(DECISION if decision is None else decision)
     if drule.on and legacy:
         raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
                          "--mem-lag legacy is the order before E08")
+    v2 = schema_mode(ROW_SCHEMA if schema is None else schema) == rs_schema.SCHEMA_V2
+    if v2 and legacy:
+        raise ValueError("--schema v2: the rows read the memory dated at execution; --mem-lag "
+                         "legacy is the order before E08")
     rule = trust_rule(trust)
     press_on = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
     royalesim, names, ids, cat = ctx
@@ -1194,12 +1521,13 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
     # the obs_row keywords of each team's rows. Off: no press, and obs_row is called as before.
     press_q, btns, pkw, plog = [], {0: [], 1: []}, {0: {}, 1: {}}, None
     hand_n = rs_presses.hand_size(royalesim)
-    if press_on:
+    if press_on or v2:                              # v2 rows show the buttons with presses off
         champs = rs_presses.champion_ids(cat, getattr(royalesim, "CATALOGUE_FIELDS", None))
         for t in (0, 1):
             s = seat_of[t]
             btns[t] = rs_presses.side_buttons([ids[c] for c in dealt[s]],
                                               [forms[s][k] for k in perm[s]], champs)
+    if press_on:
         press_q = [(p.tick, rs[p.side], p)
                    for p in rs_presses.parse(payload["events"], names, ids)]
         plog = rs_presses.PressLog(events=len(press_q))
@@ -1222,6 +1550,33 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                             (payload.get("source") or {}).get("replay_tag", ""), drule)
         dstat = {"play_rows": 0, "press_rows": 0, "not_in_hand": 0, "clamped": 0,
                  "pending_rows": 0, "exact_rows": 0}
+    # E14 (--schema v2): the opponent's elixir each side counts from what its memory view holds
+    # (the same lag), and an honest hand_exact for the rows at execution too (a DecisionPlan
+    # without a delay knows which plays ran before a tick). Legacy: none of it.
+    seen_elixir, hist, ostat = None, plan, None
+    if v2:
+        seen_elixir = SeenElixir(cat, fields=list(getattr(royalesim, "CATALOGUE_FIELDS", ())
+                                                  or ()) or None,
+                                 law=elixir_law(engine), lag=max(rs_memory.BOARD_LAG, lag))
+        if hist is None:
+            hist = DecisionPlan(queue, [ids[q[2]] + 2 for q in queue], [],
+                                (payload.get("source") or {}).get("replay_tag", ""),
+                                DecisionRule())
+        ostat = {"rows": 0, "opp_inexact": 0, "spell_rows": 0}
+
+    def vkw(team, tick, decision_row=False):
+        """The obs_row keywords --schema v2 adds for `team`'s row at `tick` (none for legacy,
+        so obs_row is called exactly as before E14). A decision-time row brings its own
+        pending plays and hand_exact."""
+        if not v2:
+            return {}
+        kw = {"schema": rs_schema.SCHEMA_V2, "opp_elixir": seen_elixir.view(team, tick)}
+        if not press_on:                            # presses on: pkw has the buttons
+            kw["buttons"] = btns[team]
+        if not decision_row:
+            kw["pending"] = []
+            kw["hand_exact"] = hist.exact(team, tick)
+        return kw
 
     def drow(state, team, view, tick):
         """A decision-time row of `team` at `tick`: obs_row with its pending plays and honest
@@ -1231,7 +1586,7 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         dstat["pending_rows"] += int(bool(pending))
         dstat["exact_rows"] += int(exact)
         return obs_row(state, team, sub, view, tick, **pkw[team], pending=pending,
-                       hand_exact=exact)
+                       hand_exact=exact, **vkw(team, tick, True))
 
     while tick <= end:
         state = json.loads(b.state_json())
@@ -1290,7 +1645,7 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         while i < len(queue) and queue[i][0] <= tick:
             due.append(queue[i])
             i += 1
-        cmds = []
+        cmds, sent_plays = [], []
         acting = set()
         for (_, team, card, x, y) in due:
             acting.add(team)
@@ -1300,18 +1655,19 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             ox, oy = own(ex, ey, team, sub)
             if plan is None:                        # E11: decision-time rows were taken above
                 row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                              **pkw[team])
+                              **pkw[team], **vkw(team, tick))
                 row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
                 rows.append(row)
             if cid in hand:
                 cmds.append((team, hand.index(cid), ex, ey))
+                sent_plays.append((team, cid))      # E14: counted once the engine runs it
             elif cut > tick:
                 cut, cut_why = tick, CUT_HAND
             mem.record(team, cid + 2, tick)        # the recorded tick is the tick it ran
         # E10: this tick's presses, after its plays: a row each (action (0, 0, 0), press =
         # button + 1) and the command (team, HAND_SIZE + button, 0, 0). A press no single
         # button is behind is not sent, and cuts trust.
-        pcmds = []
+        pcmds, pcost = [], []
         while j < len(press_q) and press_q[j][0] <= tick:
             _, team, press = press_q[j]
             j += 1
@@ -1324,11 +1680,12 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                 continue
             if plan is None:                        # E11: its row was taken at its tap
                 row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                              **pkw[team])
+                              **pkw[team], **vkw(team, tick))
                 row["action"] = (0, 0, 0)
                 row["press"] = button + 1
                 rows.append(row)
             pcmds.append(rs_presses.command(team, button, hand_n))
+            pcost.append((team, press_cost(state["players"][team], button)))
             plog.sent += 1
         if tick % WAIT_EVERY == 0:
             for team in (0, 1):
@@ -1342,7 +1699,7 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                 soon = any(tick < t <= tick + 10 for t in soon_ticks[team])
                 if team not in acting and not soon and tick > 0:
                     row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                                  **pkw[team])
+                                  **pkw[team], **vkw(team, tick))
                     row["action"] = (0, 0, 0)
                     rows.append(row)
         nxt = queue[i][0] if i < len(queue) else end + 1
@@ -1355,10 +1712,20 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         for k, r in enumerate(res):
             reason = royalesim.DEPLOY_REASONS[r[1]]
             if press_on and k >= len(cmds):          # E10: a press's result
-                if not plog.result(reason) and cut > tick:
+                taken = plog.result(reason)
+                if not taken and cut > tick:
                     cut, cut_why = tick, CUT_PRESS
-            elif reason != "OK" and cut > tick:
-                cut, cut_why = tick, CUT_REFUSED
+                elif taken and seen_elixir is not None:
+                    # E14: a press that ran is public, and costs its button's elixir.
+                    who, cost = pcost[k - len(cmds)]
+                    seen_elixir.press(who, tick, cost)
+            elif reason != "OK":
+                if cut > tick:
+                    cut, cut_why = tick, CUT_REFUSED
+            elif seen_elixir is not None and k < len(sent_plays):
+                # E14: a play the engine ran is on the board, and its side has paid for it.
+                who, cid = sent_plays[k]
+                seen_elixir.record(who, tick, cid)
         tick += step
     if rule.v2:
         # E09: the first divergence is the earliest of the legacy cut, the first tick an engine
@@ -1390,6 +1757,10 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
         row["hog"] = frozenset(decks[seat_of[team]]) == HOG26
         if rule.v2:
             row["trusted_v2"] = row["tick"] + HORIZON <= cut_v2 and row["tick"] <= last + WAIT_TAIL
+        if ostat is not None:
+            ostat["rows"] += 1
+            ostat["opp_inexact"] += int(not row["scalars"][V2_OPP_EXACT])
+            ostat["spell_rows"] += int(bool(row["spell_ids"].any()))
     if info is not None:
         trust_info = {"cut": None if cut_why is None else cut, "why": cut_why or CUT_NONE}
         if rule.v2:
@@ -1401,6 +1772,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             info["presses"] = plog.to_json()
         if dstat is not None:
             info["decision"] = dstat
+        if ostat is not None:
+            info["observation"] = ostat
     return rows, "ok"
 
 
@@ -1458,6 +1831,11 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           obs_delay ticks / jitter from the rule (an `obs_delay` or
                           `obs_delay_jitter` given as well must agree, else ValueError); a
                           delay of 0 (or None) adds nothing
+      schema_spec         with `schema` rs_schema.SCHEMA_V2 (E14; "v2" is read as it):
+                          rs_schema.V2.to_json(BUTTONS), the layout of every column; and
+                          extra_columns then lists only the columns outside it (trusted_v2
+                          under --trust v2), since unit_form, unit_burrow, act_press, the
+                          ability and the pending columns are v2's own
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -1466,6 +1844,9 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
     vision = classes is not None
     if vision:
         unit_mode(UNITS_VISION, live)
+    if isinstance(schema, rs_schema.Schema) or schema in rs_schema.SHORT_NAMES:
+        schema = schema_mode(schema)                 # any other string is written as given
+    rows_v2 = schema == rs_schema.SCHEMA_V2
     public = visibility is not None and visibility_mode(visibility) == VIS_PUBLIC
     rule = None if trust is None else trust_rule(trust)
     v2 = rule is not None and rule.v2
@@ -1518,10 +1899,15 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         rec["presses"] = press_entry
     if drule is not None:
         rec["decision_rows"] = drule.to_json()
-    extra = ((list(VISION_FIELDS) if vision else []) + (list(VISIBILITY_FIELDS) if public else [])
-             + (list(TRUST_FIELDS) if v2 else [])
-             + (list(PRESS_COLUMNS) if press_entry is not None else [])
-             + (list(DECISION_FIELDS) if drule is not None else []))
+    if rows_v2:
+        rec["schema_spec"] = rs_schema.V2.to_json(BUTTONS)
+        extra = list(TRUST_FIELDS) if v2 else []
+    else:
+        extra = ((list(VISION_FIELDS) if vision else [])
+                 + (list(VISIBILITY_FIELDS) if public else [])
+                 + (list(TRUST_FIELDS) if v2 else [])
+                 + (list(PRESS_COLUMNS) if press_entry is not None else [])
+                 + (list(DECISION_FIELDS) if drule is not None else []))
     if extra:
         rec["extra_columns"] = extra
     return rec
@@ -1529,17 +1915,19 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
           mem_lag=None, visibility=None, trust=None, presses=None, stats=False,
-          decision=None):
+          decision=None, schema=None):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
-    `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` as --units /
-    --mem-lag / --visibility / --trust (trust_rule) / --presses / --obs-delay (decision_rule),
-    kept as UNITS / MEM_LAG / VISIBILITY / TRUST / PRESSES / DECISION for this process (None:
-    keep the module's); main passes all six to every worker, as it passes `live`. Under presses
-    "on" the shard also has act_press (int16, from each row's "press") and PRESS_FIELDS; with a
-    delay (E11) DECISION_FIELDS. A delay with mem_lag "legacy" is refused (ValueError) before
-    any match. Returns (batch_id, rows, skipped by reason); with `stats`, also the shard's
-    trust_stats, which main merges into manifest.json."""
-    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION
+    `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` / `schema` as --units /
+    --mem-lag / --visibility / --trust (trust_rule) / --presses / --obs-delay (decision_rule) /
+    --schema (schema_mode), kept as UNITS / MEM_LAG / VISIBILITY / TRUST / PRESSES / DECISION /
+    ROW_SCHEMA for this process (None: keep the module's); main passes all seven to every
+    worker, as it passes `live`. Under presses "on" the shard also has act_press (int16, from
+    each row's "press") and PRESS_FIELDS; with a delay (E11) DECISION_FIELDS. Under schema v2
+    (E14) the shard has rs_schema.V2's columns (shard_columns, with trusted_v2 under --trust v2),
+    each cast to its dtype. A delay or schema v2 with mem_lag "legacy" is refused (ValueError)
+    before any match. Returns (batch_id, rows, skipped by reason); with `stats`, also the
+    shard's trust_stats, which main merges into manifest.json."""
+    global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
@@ -1547,11 +1935,15 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
     rule = trust_rule(trust)
     press = rs_presses.press_mode(PRESSES if presses is None else presses)
     drule = decision_rule(decision)
+    name = schema_mode(ROW_SCHEMA if schema is None else schema)
     if drule.on and lag == MEM_LEGACY:
         raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
                          "--mem-lag legacy is the order before E08")
+    if name == rs_schema.SCHEMA_V2 and lag == MEM_LEGACY:
+        raise ValueError("--schema v2: the rows read the memory dated at execution; --mem-lag "
+                         "legacy is the order before E08")
     LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES = live, units, lag, vis, rule, press
-    DECISION = drule
+    DECISION, ROW_SCHEMA = drule, name
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
@@ -1570,7 +1962,19 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
         rows += r
         tags += [tag] * len(r)
         infos.append(info)
-    if rows:
+    if rows and ROW_SCHEMA == rs_schema.SCHEMA_V2:
+        # E14: every column of rs_schema.V2 at its dtype, act_press on every row.
+        spec = rs_schema.V2
+        data = {k: np.stack([np.asarray(r[k]) for r in rows]).astype(spec.dtype(k))
+                for k in spec.row_fields(TRUST_FIELDS if TRUST.v2 else ())}
+        act = np.asarray([r["action"] for r in rows], dtype=np.int16)
+        data["act_card"], data["act_x"], data["act_y"] = act[:, 0], act[:, 1], act[:, 2]
+        data["act_press"] = np.asarray([r.get("press", 0) for r in rows], dtype=np.int16)
+        data["match"] = np.asarray(tags)
+        data["split"] = np.asarray([split_of(t) for t in tags])
+        OUT.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(OUT / f"shard-{batch_id:04d}.npz", **data)
+    elif rows:
         press_on = PRESSES == rs_presses.PRESS_ON
         fields = (FIELDS + (VISION_FIELDS if UNITS == UNITS_VISION and not LIVE else ())
                   + (VISIBILITY_FIELDS if VISIBILITY == VIS_PUBLIC else ())
@@ -1632,6 +2036,11 @@ def main() -> int:
                          "replay activate_ability events as button commands, add press rows "
                          "(act_press) and ability_card / ability_state columns; a refused or "
                          "unplaceable press cuts trust")
+    ap.add_argument("--schema", choices=rs_schema.CHOICES, default="legacy",
+                    help="the row layout (tools/rs_schema.py): 'legacy' (default) the rows as "
+                         "before, schema rs_rows/legacy; 'v2' (E14) adds spells in flight, the "
+                         "opponent's counted elixir, own pending plays, hand evolution, the "
+                         "ability buttons and unit form and burrow (schema rs_rows/v2)")
     ap.add_argument("--out", type=Path, default=None)
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
@@ -1644,14 +2053,19 @@ def main() -> int:
         if decision.on and args.mem_lag == MEM_LEGACY:
             raise ValueError("--obs-delay needs the memory dated at execution: --mem-lag / "
                              "--opp-lag TICKS, not legacy")
+        schema = schema_mode(args.schema)
+        if schema == rs_schema.SCHEMA_V2 and args.mem_lag == MEM_LEGACY:
+            raise ValueError("--schema v2 needs the memory dated at execution: --mem-lag / "
+                             "--opp-lag TICKS, not legacy")
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
-    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION
+    global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
     LIVE = args.live_compat
     UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
     PRESSES = args.presses
     DECISION = decision
+    ROW_SCHEMA = schema
     if args.out:
         OUT = args.out
     import pyarrow.parquet as pq
@@ -1667,6 +2081,7 @@ def main() -> int:
     print(f"presses: {rs_presses.describe_presses(PRESSES)}"
           + (f", {BUTTONS} buttons a side" if PRESSES == rs_presses.PRESS_ON else ""), flush=True)
     print(f"observed: {describe_decision(DECISION)}", flush=True)
+    print(f"schema: {describe_schema(ROW_SCHEMA)}", flush=True)
     if UNITS == UNITS_VISION:
         print(f"units:  vision classes, {VCT.describe()}", flush=True)
         if VC.unknown:
@@ -1705,7 +2120,7 @@ def main() -> int:
     unit_types = json.loads(vocab_battle.unit_types_json())
     (OUT / "vocab.json").write_text(json.dumps(vocab_record(
         cat, unit_types, cfg, fp, card_map, LIVE,
-        version=getattr(royalesim, "__version__", "?"),
+        version=getattr(royalesim, "__version__", "?"), schema=ROW_SCHEMA,
         classes=VCT if UNITS == UNITS_VISION else None,
         **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST),
         **press_vocab(PRESSES), **decision_vocab(DECISION))),
@@ -1716,7 +2131,8 @@ def main() -> int:
                              initargs=(cfg.to_json(),)) as pool:
         futs = [pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
                             mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
-                            presses=PRESSES, stats=True, decision=DECISION.to_json())
+                            presses=PRESSES, stats=True, decision=DECISION.to_json(),
+                            schema=ROW_SCHEMA)
                 for k, b in enumerate(batches)]
         for n, f in enumerate(as_completed(futs), 1):
             bid, rows, sk, st = f.result()
