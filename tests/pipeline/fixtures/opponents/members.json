@@ -1,0 +1,67 @@
+{
+ "items": [
+  {
+   "tag": "#2GJUV9",
+   "name": "Fixture Mate 1",
+   "role": "leader",
+   "expLevel": 62,
+   "trophies": 9000,
+   "arena": {
+    "id": 54000127,
+    "name": "Fixture Arena"
+   },
+   "clanRank": 1,
+   "previousClanRank": 1,
+   "donations": 120,
+   "donationsReceived": 80
+  },
+  {
+   "tag": "#PL0QY8",
+   "name": "Fixture Owner",
+   "role": "coLeader",
+   "expLevel": 58,
+   "trophies": 8800,
+   "arena": {
+    "id": 54000127,
+    "name": "Fixture Arena"
+   },
+   "clanRank": 2,
+   "previousClanRank": 3,
+   "donations": 90,
+   "donationsReceived": 60
+  },
+  {
+   "tag": "#8RPYCQ",
+   "name": "Fixture Mate 2",
+   "role": "elder",
+   "expLevel": 50,
+   "trophies": 7600,
+   "arena": {
+    "id": 54000127,
+    "name": "Fixture Arena"
+   },
+   "clanRank": 3,
+   "previousClanRank": 2,
+   "donations": 40,
+   "donationsReceived": 40
+  },
+  {
+   "tag": "#Y0GRC2",
+   "name": "Fixture Bot",
+   "role": "member",
+   "expLevel": 40,
+   "trophies": 6000,
+   "arena": {
+    "id": 54000127,
+    "name": "Fixture Arena"
+   },
+   "clanRank": 4,
+   "previousClanRank": 4,
+   "donations": 0,
+   "donationsReceived": 0
+  }
+ ],
+ "paging": {
+  "cursors": {}
+ }
+}

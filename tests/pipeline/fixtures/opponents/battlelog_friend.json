@@ -1,0 +1,243 @@
+[
+ {
+  "type": "friendly",
+  "battleTime": "20261029T210000.000Z",
+  "isLadderTournament": false,
+  "arena": {
+   "id": 54000127,
+   "name": "Fixture Arena"
+  },
+  "gameMode": {
+   "id": 72000009,
+   "name": "Friendly"
+  },
+  "deckSelection": "collection",
+  "team": [
+   {
+    "tag": "#LUV2R8",
+    "name": "Fixture Friend",
+    "crowns": 0,
+    "kingTowerHitPoints": 0,
+    "princessTowersHitPoints": [],
+    "cards": [
+     {
+      "name": "Mirror",
+      "id": 28000006,
+      "level": 6,
+      "maxLevel": 11,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/mirror.png"
+      }
+     },
+     {
+      "name": "Giant",
+      "id": 26000003,
+      "level": 9,
+      "maxLevel": 14,
+      "evolutionLevel": 2,
+      "maxEvolutionLevel": 2,
+      "elixirCost": 5,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/giant.png"
+      }
+     },
+     {
+      "name": "Knight",
+      "id": 26000000,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 3,
+      "maxEvolutionLevel": 3,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/knight.png"
+      }
+     },
+     {
+      "name": "Fisherman",
+      "id": 26000061,
+      "level": 3,
+      "maxLevel": 8,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/fisherman.png"
+      }
+     },
+     {
+      "name": "Electro Spirit",
+      "id": 26000084,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/electro-spirit.png"
+      }
+     },
+     {
+      "name": "Hunter",
+      "id": 26000044,
+      "level": 6,
+      "maxLevel": 11,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/hunter.png"
+      }
+     },
+     {
+      "name": "Earthquake",
+      "id": 28000014,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/earthquake.png"
+      }
+     },
+     {
+      "name": "Royal Giant",
+      "id": 26000024,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 6,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/royal-giant.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Dagger Duchess",
+      "id": 159000001,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "opponent": [
+   {
+    "tag": "#Y0GRC2",
+    "name": "Fixture Bot",
+    "crowns": 3,
+    "kingTowerHitPoints": 4824,
+    "princessTowersHitPoints": [
+     3052,
+     3052
+    ],
+    "clan": {
+     "tag": "#9QJ0RV2",
+     "name": "Fixture Clan",
+     "badgeId": 16000000
+    },
+    "cards": [
+     {
+      "name": "Cannon",
+      "id": 27000000,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/cannon.png"
+      }
+     },
+     {
+      "name": "Musketeer",
+      "id": 26000014,
+      "level": 9,
+      "maxLevel": 14,
+      "evolutionLevel": 2,
+      "maxEvolutionLevel": 3,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/musketeer.png"
+      }
+     },
+     {
+      "name": "Skeletons",
+      "id": 26000010,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/skeletons.png"
+      }
+     },
+     {
+      "name": "Hog Rider",
+      "id": 26000021,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/hog-rider.png"
+      }
+     },
+     {
+      "name": "Ice Golem",
+      "id": 26000038,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/ice-golem.png"
+      }
+     },
+     {
+      "name": "Ice Spirit",
+      "id": 26000030,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/ice-spirit.png"
+      }
+     },
+     {
+      "name": "Fireball",
+      "id": 28000000,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/fireball.png"
+      }
+     },
+     {
+      "name": "The Log",
+      "id": 28000011,
+      "level": 3,
+      "maxLevel": 8,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/the-log.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Tower Princess",
+      "id": 159000000,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "isHostedMatch": false
+ }
+]

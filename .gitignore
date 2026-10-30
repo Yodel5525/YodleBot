@@ -81,6 +81,11 @@ data/ladder/ladder_battles.csv
 data/ladder/ladder_meta.json
 data/ladder/.scratch/
 
+# The opponent store (tools/opponents.py, U03): config with real tags, clanmates' battle logs,
+# Yodle2's spars, raw API responses. Local only; data/opponents.example.json is the template.
+data/opponents/
+data/opponents.json
+
 # Downloaded official scrcpy binary distribution.
 tools/scrcpy/
 

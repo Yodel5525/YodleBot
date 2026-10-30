@@ -1,0 +1,468 @@
+[
+ {
+  "type": "clanMate",
+  "battleTime": "20261030T181500.000Z",
+  "isLadderTournament": false,
+  "arena": {
+   "id": 54000127,
+   "name": "Fixture Arena"
+  },
+  "gameMode": {
+   "id": 72000009,
+   "name": "Friendly"
+  },
+  "deckSelection": "collection",
+  "team": [
+   {
+    "tag": "#2GJUV9",
+    "name": "Fixture Mate 1",
+    "crowns": 1,
+    "kingTowerHitPoints": 4824,
+    "princessTowersHitPoints": [
+     3052
+    ],
+    "clan": {
+     "tag": "#9QJ0RV2",
+     "name": "Fixture Clan",
+     "badgeId": 16000000
+    },
+    "cards": [
+     {
+      "name": "Knight",
+      "id": 26000000,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 3,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/knight.png"
+      }
+     },
+     {
+      "name": "Bats",
+      "id": 26000049,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/bats.png"
+      }
+     },
+     {
+      "name": "Fireball",
+      "id": 28000000,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/fireball.png"
+      }
+     },
+     {
+      "name": "Zap",
+      "id": 28000008,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/zap.png"
+      }
+     },
+     {
+      "name": "Goblin Gang",
+      "id": 26000041,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/goblin-gang.png"
+      }
+     },
+     {
+      "name": "Arrows",
+      "id": 28000001,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/arrows.png"
+      }
+     },
+     {
+      "name": "Mini P.E.K.K.A",
+      "id": 26000018,
+      "level": 9,
+      "maxLevel": 14,
+      "evolutionLevel": 2,
+      "maxEvolutionLevel": 2,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/mini-pekka.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Tower Princess",
+      "id": 159000000,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "opponent": [
+   {
+    "tag": "#Y0GRC2",
+    "name": "Fixture Bot",
+    "crowns": 2,
+    "kingTowerHitPoints": 4824,
+    "princessTowersHitPoints": [
+     3052
+    ],
+    "clan": {
+     "tag": "#9QJ0RV2",
+     "name": "Fixture Clan",
+     "badgeId": 16000000
+    },
+    "cards": [
+     {
+      "name": "Cannon",
+      "id": 27000000,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/cannon.png"
+      }
+     },
+     {
+      "name": "Musketeer",
+      "id": 26000014,
+      "level": 9,
+      "maxLevel": 14,
+      "evolutionLevel": 2,
+      "maxEvolutionLevel": 3,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/musketeer.png"
+      }
+     },
+     {
+      "name": "Skeletons",
+      "id": 26000010,
+      "level": 11,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/skeletons.png"
+      }
+     },
+     {
+      "name": "Hog Rider",
+      "id": 26000021,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/hog-rider.png"
+      }
+     },
+     {
+      "name": "Ice Golem",
+      "id": 26000038,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/ice-golem.png"
+      }
+     },
+     {
+      "name": "Ice Spirit",
+      "id": 26000030,
+      "level": 11,
+      "maxLevel": 16,
+      "elixirCost": 1,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/ice-spirit.png"
+      }
+     },
+     {
+      "name": "Fireball",
+      "id": 28000000,
+      "level": 9,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/fireball.png"
+      }
+     },
+     {
+      "name": "The Log",
+      "id": 28000011,
+      "level": 3,
+      "maxLevel": 8,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/the-log.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Tower Princess",
+      "id": 159000000,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "isHostedMatch": false
+ },
+ {
+  "type": "pathOfLegend",
+  "battleTime": "20261030T150000.000Z",
+  "isLadderTournament": false,
+  "arena": {
+   "id": 54000127,
+   "name": "Fixture Arena"
+  },
+  "gameMode": {
+   "id": 72000464,
+   "name": "Ranked1v1_Fixture"
+  },
+  "deckSelection": "collection",
+  "team": [
+   {
+    "tag": "#2GJUV9",
+    "name": "Fixture Mate 1",
+    "crowns": 2,
+    "kingTowerHitPoints": 4824,
+    "princessTowersHitPoints": [
+     3052,
+     3052
+    ],
+    "clan": {
+     "tag": "#9QJ0RV2",
+     "name": "Fixture Clan",
+     "badgeId": 16000000
+    },
+    "cards": [
+     {
+      "name": "Knight",
+      "id": 26000000,
+      "level": 15,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 3,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/knight.png"
+      }
+     },
+     {
+      "name": "Bats",
+      "id": 26000049,
+      "level": 15,
+      "maxLevel": 16,
+      "evolutionLevel": 1,
+      "maxEvolutionLevel": 1,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/bats.png"
+      }
+     },
+     {
+      "name": "Fireball",
+      "id": 28000000,
+      "level": 13,
+      "maxLevel": 14,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/fireball.png"
+      }
+     },
+     {
+      "name": "Zap",
+      "id": 28000008,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/zap.png"
+      }
+     },
+     {
+      "name": "Goblin Gang",
+      "id": 26000041,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/goblin-gang.png"
+      }
+     },
+     {
+      "name": "Arrows",
+      "id": 28000001,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/arrows.png"
+      }
+     },
+     {
+      "name": "Mini P.E.K.K.A",
+      "id": 26000018,
+      "level": 13,
+      "maxLevel": 14,
+      "evolutionLevel": 2,
+      "maxEvolutionLevel": 2,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/mini-pekka.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Tower Princess",
+      "id": 159000000,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "opponent": [
+   {
+    "tag": "#U2CRQ9",
+    "name": "Fixture Outsider 2",
+    "crowns": 0,
+    "kingTowerHitPoints": 4824,
+    "princessTowersHitPoints": [
+     3052,
+     3052
+    ],
+    "cards": [
+     {
+      "name": "Mega Knight",
+      "id": 26000055,
+      "level": 7,
+      "maxLevel": 8,
+      "elixirCost": 7,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/mega-knight.png"
+      }
+     },
+     {
+      "name": "Bats",
+      "id": 26000049,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/bats.png"
+      }
+     },
+     {
+      "name": "Zap",
+      "id": 28000008,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/zap.png"
+      }
+     },
+     {
+      "name": "Miner",
+      "id": 26000032,
+      "level": 7,
+      "maxLevel": 8,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/miner.png"
+      }
+     },
+     {
+      "name": "Wall Breakers",
+      "id": 26000058,
+      "level": 10,
+      "maxLevel": 11,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/wall-breakers.png"
+      }
+     },
+     {
+      "name": "Goblin Gang",
+      "id": 26000041,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 3,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/goblin-gang.png"
+      }
+     },
+     {
+      "name": "Spear Goblins",
+      "id": 26000019,
+      "level": 15,
+      "maxLevel": 16,
+      "elixirCost": 2,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/spear-goblins.png"
+      }
+     },
+     {
+      "name": "Inferno Dragon",
+      "id": 26000037,
+      "level": 7,
+      "maxLevel": 8,
+      "elixirCost": 4,
+      "iconUrls": {
+       "medium": "https://example.invalid/cards/inferno-dragon.png"
+      }
+     }
+    ],
+    "supportCards": [
+     {
+      "name": "Tower Princess",
+      "id": 159000000,
+      "level": 11,
+      "maxLevel": 16,
+      "iconUrls": {
+       "medium": "https://example.invalid/towers/x.png"
+      }
+     }
+    ],
+    "elixirLeaked": 2.25
+   }
+  ],
+  "isHostedMatch": false,
+  "leagueNumber": 7
+ }
+]

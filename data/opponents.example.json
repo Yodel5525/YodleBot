@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Template for <data>/opponents/config.json, read by tools/opponents.py (U03 of docs/SEASON_UPDATES.md).",
+    "This file is committed, so it holds placeholders only: never put a real player or clan tag here.",
+    "Write the real config with: tools/opponents.py init --clan \"#...\" --owner \"#...\" --bot \"#...\" [--friend \"#...\"]. It lands in <data>/opponents/, which is gitignored.",
+    "clan: the clan whose members' battle logs are pulled. owner: the owner's main account. bot: Yodle2, the account the bot plays. friends: sparring partners outside the clan.",
+    "Spars are Yodle2's battles against the owner, anyone the clan roster has listed, or a friend; they are found by tag, not by the battle's type.",
+    "base: empty for the official API (or HASTYCR_CR_API_BASE), 'proxy' for RoyaleAPI's proxy (the key must list 45.79.218.79). transport: urllib or curl. rate: requests per second, at most 5.",
+    "form_rule: slot, field or base (see tools/opponents.py); run tools/opponents.py probe on the PC to choose. keep_raw_days: days the raw responses are kept (0 keeps none). meta_top, meta_weeks: the top players' pull."
+  ],
+  "schema": 1,
+  "clan": "#CLAN_TAG",
+  "owner": "#OWNER_TAG",
+  "bot": "#YODLE2_TAG",
+  "friends": [],
+  "base": "",
+  "transport": "urllib",
+  "rate": 2.0,
+  "form_rule": "slot",
+  "keep_raw_days": 30,
+  "meta_top": 1000,
+  "meta_weeks": 8
+}

@@ -1,0 +1,224 @@
+{
+ "tag": "#PL0QY8",
+ "name": "Fixture Owner",
+ "expLevel": 58,
+ "trophies": 8800,
+ "clan": {
+  "tag": "#9QJ0RV2",
+  "name": "Fixture Clan",
+  "badgeId": 16000000
+ },
+ "cards": [
+  {
+   "name": "Cannon",
+   "id": 27000000,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/cannon.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Musketeer",
+   "id": 26000014,
+   "level": 13,
+   "maxLevel": 14,
+   "evolutionLevel": 3,
+   "maxEvolutionLevel": 3,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/musketeer.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Skeletons",
+   "id": 26000010,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/skeletons.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Hog Rider",
+   "id": 26000021,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/hog-rider.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Ice Golem",
+   "id": 26000038,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/ice-golem.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Ice Spirit",
+   "id": 26000030,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/ice-spirit.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Fireball",
+   "id": 28000000,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/fireball.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "The Log",
+   "id": 28000011,
+   "level": 7,
+   "maxLevel": 8,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/the-log.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Knight",
+   "id": 26000000,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 0,
+   "maxEvolutionLevel": 3,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/knight.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Giant",
+   "id": 26000003,
+   "level": 12,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/giant.png"
+   },
+   "count": 1
+  }
+ ],
+ "currentDeck": [
+  {
+   "name": "Cannon",
+   "id": 27000000,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/cannon.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Musketeer",
+   "id": 26000014,
+   "level": 13,
+   "maxLevel": 14,
+   "evolutionLevel": 3,
+   "maxEvolutionLevel": 3,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/musketeer.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Skeletons",
+   "id": 26000010,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/skeletons.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Hog Rider",
+   "id": 26000021,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/hog-rider.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Ice Golem",
+   "id": 26000038,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/ice-golem.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Ice Spirit",
+   "id": 26000030,
+   "level": 15,
+   "maxLevel": 16,
+   "evolutionLevel": 1,
+   "maxEvolutionLevel": 1,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/ice-spirit.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "Fireball",
+   "id": 28000000,
+   "level": 13,
+   "maxLevel": 14,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/fireball.png"
+   },
+   "count": 1
+  },
+  {
+   "name": "The Log",
+   "id": 28000011,
+   "level": 7,
+   "maxLevel": 8,
+   "iconUrls": {
+    "medium": "https://example.invalid/cards/the-log.png"
+   },
+   "count": 1
+  }
+ ],
+ "currentDeckSupportCards": [
+  {
+   "name": "Tower Princess",
+   "id": 159000000,
+   "level": 11,
+   "maxLevel": 16,
+   "iconUrls": {
+    "medium": "https://example.invalid/towers/x.png"
+   }
+  }
+ ]
+}
