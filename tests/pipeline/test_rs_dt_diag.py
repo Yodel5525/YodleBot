@@ -3,7 +3,8 @@
 * headroom in whole ticks of regeneration, by rs_elixir's law, rounded down, with the cost of
   the side's own plays in flight;
 * rows: which rows count (trusted Hog 2.6 plays of a priced card, the bar not at the cap), the
-  waits with an own play in flight (press rows are no waits), and the lines it prints;
+  waits with an own play in flight (press rows are no waits), and the lines it prints (the
+  share below TAP_FLOOR only for decision-time rows);
 * manifest.json's decision counts, and rows at execution (no own_pending column);
 * ghost: the last rs_eval --pro line without a delay against the last one at --delay D, match by
   match.
@@ -127,6 +128,10 @@ def test_report_lines(tmp_path):
     assert ("headroom: 4 trusted (legacy) Hog 2.6 play rows, 1 of them with an own play in "
             "flight; 1 more at the cap left out") in text
     assert "< 0: 0.250  < 6: 0.500  < 15: 0.500  < 21: 0.500  (min -14, median 10 ticks)" in text
+    # decision-time rows (an own_pending column): the tick test, only row 2 (-14) is below -7
+    assert DD.TAP_FLOOR == -7
+    assert ("headroom: < -7: 0.250 of the play rows (decision-time rows: about 0 if the "
+            "recorded tick is the tick a play ran, a large share if it is the tap)") in text
     assert "headroom at 1x: 3 rows, < 0: 0.000, < 21: 0.333" in text
     assert "headroom at 2x: 1 rows, < 0: 1.000, < 21: 1.000" in text
     assert "at 3x" not in text
@@ -146,6 +151,7 @@ def test_rows_at_execution(tmp_path, capsys):
     assert DD.main(["rows", str(root)]) == 0
     out = capsys.readouterr().out
     assert "pending waits: no own_pending column (rows at execution)" in out
+    assert "headroom: < -7" not in out          # the tick test is for decision-time rows only
     assert "manifest: none in" in out
 
 

@@ -772,37 +772,43 @@ The third model reads `own_pending`, so it should not have this problem. These c
 
 After `git pull`, run the tests of section 12 first. The new tests are `tests\pipeline\test_drop_pending_waits.py` and `tests\pipeline\test_rs_dt_diag.py`.
 
-**One script runs the checks, about 75 minutes.** Close MuMu and the browser first. It writes `reports\dt_diagnose_<time>.log`, goes on to the next check when one fails, and ends with a summary of the result lines:
+**One script runs the checks, about 85 minutes.** Close MuMu and the browser first. It writes `reports\dt_diagnose_<time>.log`, goes on to the next check when one fails, and ends with a summary of the result lines:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\dt_diagnose.ps1
 ```
 
-The two optional checks take about 30 minutes more: add `-Steps trust,ticks` (or `-Steps all` for everything). `-Steps ablation` runs one check alone; `-Workers 6` uses less RAM.
+The optional checks are `fullablation` (about 50 minutes), `trust` and `ticks` (about 30 minutes together): add for example `-Steps fullablation`, or `-Steps all` for everything (about 2.5 hours). `-Steps ablation` runs one check alone; `-Workers 6` uses less RAM.
 
 | Check | What it runs | Time | What the result means |
 |---|---|---|---|
-| headroom | `tools\rs_dt_diag.py rows` on `data\rs_rows_dt`, then on `data\rs_rows_live` | a few min | `pending waits:` is the share of wait rows with an own play in flight; expect about 15-20%. On `rs_rows_live`, the `headroom:` shares say what the recorded tick is. A floor near 15-21 ticks, with few rows below it, means the tick a play ran, as assumed. Many rows below 6, with counts from 0, mean the tap. On `rs_rows_dt`, `< 0` is the share of play labels the evaluation masks at the tap for lack of elixir (they turn into waits or a cheaper card): the larger it is, the more of B's loss comes from the elixir rather than from the waits. |
-| waitbias | `dt_big_hog` with `wait_keep` 0.5 and 1.0 (copies in `runs\tokens\dt_big_hog_wk050`, `_wk100`), `--delay 21` | 16 min | Plays per match up to 33-38 and wins clearly above 29.3%: the gate is too lazy. Plays up but wins flat: the play rate is not the cause. |
+| headroom | `tools\rs_dt_diag.py rows` on `data\rs_rows_dt` (with `--trust v2`, the rows the second model trained on), then on `data\rs_rows_live` | a few min | `pending waits:` is the share of wait rows with an own play in flight; expect about 15-20%. **What the recorded tick is**, read two ways. On `rs_rows_dt`, the `headroom: < -7` line: about 0 means the tick a play ran, as assumed; a large share (tenths) means the tap. On `rs_rows_live` (skipped with a note if the folder is gone), the `headroom:` shares: a floor near 15-21 ticks, with few rows below it, means the tick a play ran; many rows below 6, with counts from 0, mean the tap. Also on `rs_rows_dt`, `< 0` is the share of play labels below the full bar that the evaluation masks at the tap for lack of elixir (they turn into waits or a cheaper card): the larger it is, the more of B's loss comes from the elixir rather than from the waits. |
+| waitbias | `dt_big_hog` with `wait_keep` 0.5 and 1.0 (copies in `runs\tokens\dt_big_hog_wk050`, `_wk100`), and `live_big_hog` with 1.0 as the control (`runs\tokens\live_big_hog_wk100`), all at `--delay 21` | 25 min | Compare each with its own model at the normal bias: `dt_big_hog` 29.3% (28.7 plays), `live_big_hog` 46.0% (33.3 plays). `dt_big_hog` gains clearly more than the control, with plays up to 33-38: its gate is lazy, as the explanation says. Both gain about as much: the wait bias is simply too high at this delay for either model, which the third model would not fix; send the log back. Plays up but wins flat: the play rate is not the cause. |
 | live | `live_big_hog` and `dt_big_hog` at `--delay 21 --decide live` (the live runner's rule: no wait at a full bar, no second tap of a card in flight) | 18 min | Compare these two with each other only: both seats change rule. If `dt_big_hog` gains clearly more than `live_big_hog`, decisions lost around its own plays in flight are part of the cause. These are also the numbers closest to live play. |
 | offset | `dt_big_hog` at `--delay 24` | 8 min | Within about 3 points of 29.3%: the 24-tick lead it was trained for against the 21-tick delay is not the cause. |
-| ablation | the Hog 2.6 fine-tune again with `--drop-pending-waits` (`runs\tokens\dt_big_hog_np`), then `--delay 21` | 20 min | The decisive check. 40% or more, with more plays: the explanation holds, and the third model should fix it. Near 29%: the cause is elsewhere. |
+| ablation | the Hog 2.6 fine-tune again with `--drop-pending-waits` (`runs\tokens\dt_big_hog_np`), then `--delay 21` | 20 min | 40% or more, with more plays: the explanation holds, and the third model should fix it. Near 29% is **not** conclusive on its own: the fine-tune starts from `dt_big`, which learnt from those waits too, and its lazy gate can survive three epochs. Run `fullablation` before deciding. |
+| fullablation (optional) | the general model and its Hog 2.6 fine-tune again, both with `--drop-pending-waits` (`runs\tokens\dt_big_np`, `runs\tokens\dt_big_np_hog`), then `--delay 21` | 50 min | The decisive check when `ablation` stays near 29%. 40% or more: the explanation holds. Near 29% here too: the cause is elsewhere. |
 | trust (optional) | the Hog 2.6 fine-tune again with `--trust legacy` (`runs\tokens\dt_big_hog_tl`), then `--delay 21` | 20 min | Within about 5 points of 29.3%: trust v2's smaller training set is not the cause. |
 | ticks (optional) | `rs_eval --pro` (the recorded plays, no model) with and without `--delay 21`, then `tools\rs_dt_diag.py ghost` | 10 min | A second check of the tick meaning. The same result on nearly every match (a few percent differ either way, from plays in the first seconds): the tick a play ran. Many matches differing: the tap. |
 
-The ablation's training prints `--drop-pending-waits: N wait rows with an own play in flight left out`. Its validation uses the same rows as `dt_big_hog`'s, waits in flight included, so its `gate` figure may read lower. Card and tile compare directly. Judge it by its `rs_eval` line.
+The ablations' trainings print `--drop-pending-waits: N wait rows with an own play in flight left out`. Their validation uses the same rows as `dt_big`'s and `dt_big_hog`'s, waits in flight included, so their `gate` figures may read lower. Card and tile compare directly. Judge them by their `rs_eval` lines.
+
+Even 40% is strong evidence rather than proof. The ablated model still decides under the old rule, which may now try to tap again while its first play is in flight (the evaluation refuses or masks those taps). The third model learns that from `own_pending` instead.
 
 The same checks one by one, in the shorthand at the top of this file (the wait-bias copies are easiest with `-Steps waitbias`):
 
 ```powershell
 $OPP = 'runs\tokens\live_big\ep01.pt'
-& $RG tools\rs_dt_diag.py rows data\rs_rows_dt
+& $RG tools\rs_dt_diag.py rows data\rs_rows_dt --trust v2
 & $RG tools\rs_dt_diag.py rows data\rs_rows_live
 & $RG tools\rs_eval.py --ckpt runs\tokens\live_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
 & $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21 --decide live
 & $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 24
 & $BB -m sim.train_tokens --name dt_big_hog_np --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\dt_big\best.pt --trust v2 --drop-pending-waits
 & $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_np\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
+& $BB -m sim.train_tokens --name dt_big_np --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --trust v2 --drop-pending-waits
+& $BB -m sim.train_tokens --name dt_big_np_hog --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\dt_big_np\best.pt --trust v2 --drop-pending-waits
+& $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_np_hog\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
 & $BB -m sim.train_tokens --name dt_big_hog_tl --data data\rs_rows_dt --wait-keep 0.25 --epochs 3 --d 256 --layers 6 --heads 8 --finetune-hog --init runs\tokens\dt_big\best.pt --trust legacy
 & $RG tools\rs_eval.py --ckpt runs\tokens\dt_big_hog_tl\best.pt --opponent-ckpt $OPP --matches 300 --workers 8 --delay 21
 & $RG tools\rs_eval.py --pro --matches 300 --workers 8
@@ -811,9 +817,12 @@ $OPP = 'runs\tokens\live_big\ep01.pt'
 ```
 
 **What to do next:**
-- `headroom` on `rs_rows_live` has many rows near 0 (the tick is the tap): do not run section 20. Send the log back. The rows then need a re-drive with the delay first.
-- `ablation` (or `waitbias`) lifts `dt_big_hog` clearly, to about 40% or more: run section 20. Start with `-Others 20000`, which is the second model's corpus size, about 3-4 hours instead of a night (add `-SkipDiskCheck` if `C:` has less than the 90 GB the full run needs). Run the whole corpus only once `v2_hog` beats `live_big_hog`.
-- Neither moves it: hold section 20, run `-Steps trust`, and send the log back.
+- `headroom` says the tick is the tap (a large `headroom: < -7` share on `rs_rows_dt`, or many rows near 0 on `rs_rows_live`): do not run section 20. Send the log back. The rows then need a re-drive with the delay first.
+- `ablation` or `fullablation` lifts the model clearly, to about 40% or more, or `waitbias` lifts `dt_big_hog` clearly more than its `live_big_hog` control: run section 20, in two steps.
+  1. The second model's corpus size first, about 3-4 hours instead of a night: `third_model.ps1 -Others 20000 -Tag 20k` (add `-SkipDiskCheck` if `C:` has less than the 90 GB the full run checks for). Its model is `v2_hog_20k`.
+  2. Only once `v2_hog_20k` beats `live_big_hog` (its league score against it above 50%; a PASS needs at least 551 of 1,000): the whole corpus, `third_model.ps1` with no `-Tag`. Its model is `v2_hog`; the 20k run's files stay as they were. Free the disk first (section 20, "Disk").
+- `ablation` stays near 29%: run `-Steps fullablation` before deciding anything.
+- Neither ablation moves it, and `waitbias` lifts both models alike or neither: hold section 20, run `-Steps trust`, and send the log back.
 
 Keep `live_big_hog` in the live runner meanwhile.
 
@@ -859,11 +868,14 @@ The champion used to be section 19's `dt_big_hog`. At 29.3% against `live_big_ho
 
 After `git pull`, run the tests of section 12 first. None of this batch's code (v2 rows, compaction, `--memmap`, the v2 model) has run on the PC yet. Paste any failure back before you start the script.
 
-**One script runs everything unattended.** It stops at the first failure and writes everything to `reports\third_model_<time>.log`:
+**One script runs everything unattended.** It stops at the first failure, except in the evaluation runs: a failed `rs_eval` run is logged, the league still runs, and the script lists the failures and exits with an error at the end. Everything goes to `reports\third_model_<time>.log`. Run it twice, as section 19's "What to do next" says: first on the second model's corpus size, then, once that model beats `live_big_hog`, on the whole corpus:
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1 -Others 20000 -Tag 20k
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1
 ```
+
+`-Tag 20k` gives the first run its own files: `data\rs_rows_v2_20k`, `data\rs_cols_v2_20k`, `runs\tokens\v2_big_20k`, `runs\tokens\v2_hog_20k`, and the league player `v2_hog_20k`. The run without `-Tag` uses the names in the table below. Both share the league log `runs\league\third_model.jsonl`, so `live_big_hog`'s 400 games against `live_big` are played once and reused. The league refuses a player name whose games it already holds when the checkpoint has changed. So the script stops at the start, not after hours, when it would train a model whose name already has games in the log: use another `-Tag`, or move the log away. The first run takes about 3-4 hours.
 
 | Step | What it runs | Time (estimated) |
 |---|---|---|
@@ -902,7 +914,8 @@ Options:
 - `-Epochs 1` (or 3) changes the general model's epochs. The Hog 2.6 fine-tune always runs 3.
 - `-MaxRows 15000000` trains on a sample of that many rows, which halves the general step if training runs long.
 - `-Noise <profile.json>` uses another noise profile, such as one fitted by `tools\fit_noise_profile.py`, for both the rows and the league.
-- `-From compact` (or `general`, `hog`, `eval`, `league`) restarts at a later step. The script refuses to start from `rows` while `data\rs_rows_v2` holds finished rows: use `-From compact`, or delete the folder to build them again.
+- `-From compact` (or `general`, `hog`, `eval`, `league`) restarts at a later step. Give it the same `-Tag` as the run it continues. The script refuses to start from `rows` while `data\rs_rows_v2` (`data\rs_rows_v2_<tag>` with `-Tag`) holds finished rows: use `-From compact`, or delete the folder to build them again.
+- `-Tag <name>` names this run's files, as above. Letters, digits, `_` and `-` only.
 
 **Disk.** These sizes are estimated: about 40 million rows of about 1.27 KB each.
 
@@ -916,6 +929,11 @@ The script stops before it starts if `C:` has less than 90 GB free (60 GB with `
 
 If space runs short:
 - After the compact step, `data\rs_rows_v2` is read only to rebuild the store (`-From compact`). Deleting it gives back 15-20 GB.
+- Before the whole-corpus run, delete the `-Tag 20k` run's rows and store once its league is done. The models in `runs\tokens\v2_big_20k` and `v2_hog_20k` stay, and no evaluation reads the rows:
+
+  ```powershell
+  Remove-Item -Recurse -Force C:\hcr\data\rs_rows_v2_20k, C:\hcr\data\rs_cols_v2_20k
+  ```
 - `data\rs_rows_live` and `data\rs_rows_dt` are needed only to retrain the first or second model. No evaluation reads them.
 
 **Reading the result.**
@@ -923,13 +941,13 @@ If space runs short:
   - **no delay** and **24-tick delay**: a model trained for the 24-tick lead should do best at 21-24 ticks and worse without a delay, as `dt_big_hog` did (21.0% without one). If v2_hog does much better without a delay than at 21, its timing is off.
   - **live rule**: the two `decide live` lines compare only with each other, because both seats change rule. v2_hog should be at least level with `live_big_hog` there, since these are the numbers closest to live play. The `plays/match` figures show a lazy gate directly: the pros play about 35-40 cards a match.
 - **league** is the real test. It plays at a 24-tick delay with perception noise on every seat, from both seats, on deck pairings and seeds that are the same for every player. Against the champion, each pairing is also played with the decks exchanged. Its `gate:` lines give the decision for `v2_hog`:
-  - **PASS**: v2_hog beats `live_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `live_big_hog` against `live_big`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
+  - **PASS**: v2_hog beats `live_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `live_big_hog` against `live_big`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` (`runs\tokens\v2_hog_20k\best.pt` for the `-Tag 20k` run) to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
   - **FAIL**, **CYCLE** or **INCOMPLETE**: keep the live model you have.
 
   The `paired` lines show v2_hog's score minus live_big_hog's against the same opponent on the same positions, with an interval.
-- The report is also written to `runs\league\third_model.report.json`.
+- The report is also written to `runs\league\third_model.report.json`. Each run overwrites it; its text is in the run's log too. In the whole-corpus run's report, `v2_hog_20k` appears among the other players.
 
-If the league step fails, the trained models are kept. Send the log back, and after the fix restart with `-From league`. The league log resumes: games already played are not played again.
+If the league step fails, the trained models are kept. Send the log back, and after the fix restart with `-From league` (and the same `-Tag`). The league log resumes: games already played are not played again. If an evaluation run failed, `-From eval` runs the evaluations again and then the league, which plays only the games it lacks.
 
 At the start the script also checks that the league can play a v2 checkpoint (`tools\rs_match.py` must build v2 rows). If it cannot, a yellow `warning:` line says so. The other steps still run, and the script stops before the league step instead of failing in it. Run `git pull`, then `-From league`.
 
@@ -954,7 +972,7 @@ Send back the log, `reports\third_model_<time>.log`. Each step's `==` line has i
 This is Phase 7 of `docs/SPARRING_PLAN.md`: reinforcement learning in the simulator, to play better than the pros it copied without learning tricks that only work in RoyaleSim. It is pure simulation. Nothing here starts, touches or taps MuMu, so the emulator is not needed.
 
 It needs:
-- section 20's `runs\tokens\v2_hog\best.pt`. This is the start model, the first champion and the model the training stays close to (the KL pull). The script checks for it.
+- section 20's `runs\tokens\v2_hog\best.pt`. This is the start model, the first champion and the model the training stays close to (the KL pull). The script checks for it. If only section 20's `-Tag 20k` run has been done, pass `-Start runs\tokens\v2_hog_20k\best.pt`.
 - the imitation models `runs\tokens\dt_big_hog\best.pt` (section 19) and `runs\tokens\live_big_hog\best.pt` (section 14) as anchors. A missing one is skipped with a warning.
 - IL_Replay (section 11). It supplies the opponents' decks and the gate's held-out pairings.
 

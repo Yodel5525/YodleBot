@@ -2,7 +2,7 @@ r"""Read-only checks for the decision-time diagnosis (2026-10-30, docs/SPARRING_
 19): what the rows on disk and rs_eval's log say about why dt_big_hog lost to live_big_hog.
 numpy and tools/rs_elixir.py only: no engine, no model, nothing written.
 
-    .venvs\royalegym\Scripts\python.exe tools\rs_dt_diag.py rows data\rs_rows_dt
+    .venvs\royalegym\Scripts\python.exe tools\rs_dt_diag.py rows data\rs_rows_dt --trust v2
     .venvs\royalegym\Scripts\python.exe tools\rs_dt_diag.py rows data\rs_rows_live --shards 30
     .venvs\royalegym\Scripts\python.exe tools\rs_dt_diag.py ghost --delay 21
 
@@ -19,7 +19,10 @@ rows FOLDER: one rows folder of tools/rs_rows.py.
      when the rows have it), less the played card's cost (HOG_COSTS), in ticks of regeneration
      at the row's tick (rs_elixir's law: 56 ticks an elixir at 1x, 28 at 2x, 18.6 at 3x),
      rounded down. Rows whose bar is at the cap (>= CAP_MILLI) say nothing and are counted
-     apart. A histogram in 5-tick bins, the shares below 0, 6, 15 and 21 ticks, and per rate.
+     apart. A histogram in 5-tick bins, the shares below 0, 6, 15 and 21 ticks, and per rate;
+     for decision-time rows also the share below TAP_FLOOR (-7) ticks. Every share is of the
+     rows below the cap. --trust v2 picks the rows the decision-time models trained on
+     (sim/train_tokens.py --trust v2); rows built with --trust legacy have no such column.
 
   How to read 3 (the meaning of IL_Replay's play tick, docs/SPARRING_PLAN.md):
   * rows at execution (data\rs_rows_live): if the recorded tick is the tick the play RAN, its
@@ -29,10 +32,14 @@ rows FOLDER: one rows folder of tools/rs_rows.py.
     just above it.
   * decision-time rows (data\rs_rows_dt): each row sits 24 +- 3 ticks before the recorded
     tick, so the floor moves down by that much: about -6 if the recorded tick is the one the
-    play ran (the row is then 0-6 ticks before the real tap), about -27 if it is the tap.
-    "share < 0" is the share of play labels whose card rs_eval's decide masks at the tap
-    (spendable elixir below the cost, tools/rs_decide.py): those labels push the model's
-    probability into waits or a cheaper card.
+    play ran (the row is then 0-6 ticks before the real tap), about -27 if it is the tap. So
+    these rows answer the tick question too, without rows at execution: the "< -7" line is
+    about 0 (a few rows at a rate change) if the recorded tick is the tick a play ran, and a
+    large share (every play made within about 1 s of affording it) if it is the tap.
+    "share < 0" is the share of play labels (below the cap; a capped row is short only with
+    about 6 elixir of plays in flight) whose card rs_eval's decide masks at the tap (spendable
+    elixir below the cost, tools/rs_decide.py): those labels push the model's probability into
+    waits or a cheaper card.
 
 ghost: rs_eval --pro (the recorded plays of both seats, no model) writes one line of
 reports\rs_ghost.jsonl per run. Under --delay D it sends every recorded play D ticks early, so
@@ -67,6 +74,10 @@ HOG_COSTS = {"HogRider": 4, "Musketeer": 4, "Cannon": 3, "Fireball": 4, "IceGole
 CAP_MILLI = 9900
 #: The thresholds the shares are printed for, in ticks of regeneration.
 THRESHOLDS = (0, 6, 15, 21)
+#: Decision-time rows: a play row more ticks short than this says the recorded tick is the tap
+#: (module doc, How to read 3). With execution ticks the floor is about -6: the row is at most
+#: 27 - 21 ticks before the real tap.
+TAP_FLOOR = -7
 #: Histogram bins: 5 ticks wide from LOW to HIGH, plus one bin below and one above.
 BIN, LOW, HIGH = 5, -30, 60
 DEFAULT_SHARDS = 30
@@ -277,6 +288,10 @@ def report(root, s: Scan, trust: str) -> list:
         lines.append("headroom: " + "  ".join(f"< {v}: {share_below(head, v):.3f}"
                                                 for v in THRESHOLDS)
                      + f"  (min {int(head.min())}, median {int(np.median(head))} ticks)")
+        if s.has_pending:
+            lines.append(f"headroom: < {TAP_FLOOR}: {share_below(head, TAP_FLOOR):.3f} of the "
+                         "play rows (decision-time rows: about 0 if the recorded tick is the "
+                         "tick a play ran, a large share if it is the tap)")
         for r in (1, 2, 3):
             sub = head[rate == r]
             if len(sub):

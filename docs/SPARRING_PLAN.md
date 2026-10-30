@@ -105,7 +105,12 @@ The next lever is delay: decision-time rows (E11), which predict the play about 
 
 What not to do: do not add "pay and cycle the hand when sent" to `rs_eval` or the rows (RoyaleSim already matches the client, and that would create the skew), and do not retune `--obs-delay`, the wait bias, the decision cadence or the dt/20 wait exponent; they are correct for both models.
 
-Gate for the third model: the `ablation` check (the Hog fine-tune again with `sim/train_tokens.py --drop-pending-waits`) or the `waitbias` check lifts `dt_big_hog` to about 40% or more at the 21-tick delay, and `headroom` shows execution ticks. Then `scripts/third_model.ps1` runs, first with `-Others 20000`. Its league now uses `live_big_hog` as the champion and `live_big` epoch 1 as the anchor, and its evaluation adds no-delay, 24-tick and live-rule runs.
+Gate for the third model: `headroom` shows execution ticks (on the decision-time rows' own floor, or on the rows at execution), and one of these lifts the model to about 40% or more at the 21-tick delay:
+- the `ablation` check (the Hog fine-tune again with `sim/train_tokens.py --drop-pending-waits`);
+- the `fullablation` check (the general model and the fine-tune both without those waits). The quick ablation starts from `dt_big`, which learnt from them too, so a quick ablation near 29% is not a refutation until `fullablation` agrees;
+- the `waitbias` check, but only when `dt_big_hog` gains clearly more than its `live_big_hog` control at the same bias. If both gain alike, the bias is too high for any legacy model, and v2 would not fix that.
+
+Then `scripts/third_model.ps1` runs twice. First `-Others 20000 -Tag 20k`: the second model's corpus size, about 3-4 h, with its own rows, models (`v2_big_20k`, `v2_hog_20k`) and league name. Then the whole corpus with no tag, once `v2_hog_20k` beats `live_big_hog`. The two runs share the league log, and the script refuses at the start to retrain a name that already has games in it. Its league uses `live_big_hog` as the champion and `live_big` epoch 1 as the anchor. Its evaluation adds no-delay, 24-tick and live-rule runs, and a failed evaluation no longer stops the run before the league.
 
 ## Phases
 
@@ -188,7 +193,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - V11 rest: `tools/fit_noise_profile.py` writes `data/noise/measured.json`.
 - V06 for v2: presses, own-pending and the critic value in `rs_decide`. The live runner picks legacy or v2 by checkpoint.
 - `rs_selfplay`: engine settings carried to workers, visibility from the checkpoint.
-- Next on the PC: `scripts/third_model.ps1` (runbook section 20), about 7-12 h.
+- Next on the PC: `scripts/dt_diagnose.ps1` (runbook section 19, "Why the second model lost"), then, if its gate passes, `scripts/third_model.ps1 -Others 20000 -Tag 20k` (about 3-4 h) and the whole corpus (runbook section 20, about 7-12 h).
 
 **Batch 6: RL** (code done 2026-10-30, not yet run on the PC; PC steps in `docs/SPARRING_RUNBOOK.md` section 21)
 - `rs_match` and `rs_league_eval` play v2 checkpoints. This covers ability buttons, own pending plays, and the opponent elixir count without refused plays. `--presses` is a switch.

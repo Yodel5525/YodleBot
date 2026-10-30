@@ -18,29 +18,37 @@
         powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\dt_diagnose.ps1
 
     The checks (-Steps, comma-separated, in this order whatever the order given):
-      headroom  tools\rs_dt_diag.py rows on data\rs_rows_dt and data\rs_rows_live: the share of
-                waits with an own play in flight, and the elixir headroom of the Hog 2.6 plays
-                (what the recorded tick means). Read-only, a few minutes.
+      headroom  tools\rs_dt_diag.py rows on data\rs_rows_dt (--trust v2, the rows the second
+                model trained on) and data\rs_rows_live: the share of waits with an own play in
+                flight, and the elixir headroom of the Hog 2.6 plays (what the recorded tick
+                means; the decision-time rows answer that too, in their "< -7" line).
+                Read-only, a few minutes.
       waitbias  dt_big_hog with a smaller wait bias (wait_keep 0.5 and 1.0 instead of 0.25),
-                rs_eval at --delay 21. Copies of best.pt in runs\tokens\dt_big_hog_wk050 and
-                dt_big_hog_wk100. About 16 min.
+                and live_big_hog at 1.0 as the control, rs_eval at --delay 21. Copies of
+                best.pt in runs\tokens\dt_big_hog_wk050, dt_big_hog_wk100 and
+                live_big_hog_wk100. About 25 min.
       live      live_big_hog and dt_big_hog at --delay 21 --decide live (the live runner's
                 decision rule, for both seats). About 18 min.
       offset    dt_big_hog at --delay 24. About 8 min.
       ablation  the Hog 2.6 fine-tune again without the waits with an own play in flight
                 (sim.train_tokens --drop-pending-waits, runs\tokens\dt_big_hog_np), then
-                rs_eval at --delay 21. About 20 min.
+                rs_eval at --delay 21. About 20 min. Its init, dt_big, still learnt from those
+                waits, so a result near 29% is not conclusive: fullablation is.
+      fullablation  the general model and the fine-tune again, both with --drop-pending-waits
+                (runs\tokens\dt_big_np and dt_big_np_hog), then rs_eval at --delay 21.
+                About 50 min.
       trust     the Hog 2.6 fine-tune again with --trust legacy (runs\tokens\dt_big_hog_tl),
                 then rs_eval at --delay 21. About 20 min.
       ticks     rs_eval --pro with and without --delay 21, then tools\rs_dt_diag.py ghost.
                 About 10 min.
-    Default: headroom,waitbias,live,offset,ablation (about 75 min). 'all' runs every check.
+    Default: headroom,waitbias,live,offset,ablation (about 85 min). 'all' runs every check
+    (about 2.5 h).
 
 .PARAMETER Workers
     Processes for rs_eval (default 8). Use 6 if RAM runs short.
 
 .PARAMETER Steps
-    The checks to run, comma-separated (see above), or 'all'. Example: -Steps trust,ticks
+    The checks to run, comma-separated (see above), or 'all'. Example: -Steps fullablation
 #>
 param(
     [ValidateRange(1, 64)][int]$Workers = 8,
@@ -106,7 +114,7 @@ function Invoke-Check([string]$Name, [string]$Python, [string[]]$ArgList) {
     return $true
 }
 
-$known = @('headroom', 'waitbias', 'live', 'offset', 'ablation', 'trust', 'ticks')
+$known = @('headroom', 'waitbias', 'live', 'offset', 'ablation', 'fullablation', 'trust', 'ticks')
 $asked = @()
 # Commas or spaces: -File passes "trust,ticks" as it is, PowerShell itself joins an array
 # given to a [string] parameter with spaces.
@@ -128,19 +136,22 @@ $first = 'runs\tokens\live_big_hog\best.pt'        # the first model (scripts\fi
 $opponent = 'runs\tokens\live_big\ep01.pt'         # the reactive opponent of every evaluation
 $general = 'runs\tokens\dt_big\best.pt'            # the second model (scripts\second_model.ps1)
 $second = 'runs\tokens\dt_big_hog\best.pt'
-# The Hog 2.6 fine-tune of scripts\second_model.ps1, flags for flags; the checks add one each.
-$fineTune = @('-m', 'sim.train_tokens', '--data', $rowsDt, '--wait-keep', '0.25', '--epochs', '3',
-              '--d', '256', '--layers', '6', '--heads', '8', '--finetune-hog', '--init', $general)
+# The trainings of scripts\second_model.ps1, flags for flags (the checks add --name, --trust and
+# their own flag): $train is its general model, $fineTune its Hog 2.6 fine-tune.
+$train = @('-m', 'sim.train_tokens', '--data', $rowsDt, '--wait-keep', '0.25', '--epochs', '3',
+           '--d', '256', '--layers', '6', '--heads', '8')
+$fineTune = $train + @('--finetune-hog', '--init', $general)
+$generalNp = 'runs\tokens\dt_big_np\best.pt'      # fullablation's general model
 $vs = @('--opponent-ckpt', $opponent, '--matches', '300', '--workers', "$Workers")
 
 Write-Both ("dt_diagnose.ps1: checks {0}, workers {1}. Log: {2}" -f ($run -join ', '), $Workers, $log) 'Cyan'
 
 # What the checks read, checked now rather than an hour in.
 $need = @()
-if ($run | Where-Object { @('waitbias', 'live', 'offset', 'ablation', 'trust') -contains $_ }) { $need += $opponent }
+if ($run | Where-Object { @('waitbias', 'live', 'offset', 'ablation', 'fullablation', 'trust') -contains $_ }) { $need += $opponent }
 if ($run | Where-Object { @('waitbias', 'live', 'offset') -contains $_ }) { $need += $second }
-if ($run -contains 'live') { $need += $first }
-if ($run | Where-Object { @('headroom', 'ablation', 'trust') -contains $_ }) { $need += "$rowsDt\manifest.json" }
+if ($run | Where-Object { @('waitbias', 'live') -contains $_ }) { $need += $first }
+if ($run | Where-Object { @('headroom', 'ablation', 'fullablation', 'trust') -contains $_ }) { $need += "$rowsDt\manifest.json" }
 if ($run | Where-Object { @('ablation', 'trust') -contains $_ }) { $need += $general }
 foreach ($f in ($need | Select-Object -Unique)) {
     if (-not (Test-Path (Join-Path $root $f))) {
@@ -149,37 +160,46 @@ foreach ($f in ($need | Select-Object -Unique)) {
 }
 
 if ($run -contains 'headroom') {
-    Invoke-Check 'headroom: decision-time rows' $RG @('tools\rs_dt_diag.py', 'rows', $rowsDt) | Out-Null
+    # --trust v2: the rows dt_big and dt_big_hog trained on. The first model's rows were built
+    # with --trust legacy and may have no trusted_v2 column.
+    Invoke-Check 'headroom: decision-time rows' $RG @('tools\rs_dt_diag.py', 'rows', $rowsDt, '--trust', 'v2') | Out-Null
     if (Test-Path (Join-Path $root "$rowsLive\vocab.json")) {
         Invoke-Check 'headroom: rows at execution (first model)' $RG @('tools\rs_dt_diag.py', 'rows', $rowsLive) | Out-Null
     } else {
-        Write-Both ("note: {0} is not there (deleted to save disk?); the tick check on rows at execution is skipped. -Steps ticks checks the same question another way." -f $rowsLive) 'Yellow'
+        Write-Both ("note: {0} is not there (deleted to save disk?), so the tick check on rows at execution is skipped. The decision-time rows answer it in their 'headroom: < -7' line: about 0 means the tick a play ran, a large share means the tap. -Steps ticks checks it a third way." -f $rowsLive) 'Yellow'
     }
 }
 
-if ($run -contains 'waitbias') {
-    # rs_eval adds log(1 / wait_keep) to the wait logit, wait_keep read from the args.json next
-    # to the checkpoint (tools\rs_decide.py wait_keep_for). A copy of best.pt with another
-    # args.json plays the same model with a smaller wait bias: 0.69 and 0 instead of 1.39.
-    $biases = [ordered]@{ '0.5' = 'dt_big_hog_wk050'; '1.0' = 'dt_big_hog_wk100' }
-    foreach ($k in $biases.Keys) {
-        $dir = Join-Path $root ('runs\tokens\' + $biases[$k])
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        Copy-Item -Force (Join-Path $root $second) (Join-Path $dir 'best.pt')
-        # No byte-order mark: json.loads refuses one, and rs_decide would fall back to 0.35.
-        [System.IO.File]::WriteAllText((Join-Path $dir 'args.json'), ('{"wait_keep": "' + $k + '"}'), (New-Object System.Text.UTF8Encoding($false)))
-        $ck = Join-Path $dir 'best.pt'
-        # No double quotes in the probe: PowerShell 5.1 passes them to python unescaped.
-        $probe = 'import sys; sys.path[:0] = [''tools'']; import rs_decide; print(rs_decide.wait_keep_for(sys.argv[1]))'
-        $got = "$(& $RG -c $probe $ck 2>&1 | Select-Object -Last 1)".Trim()
-        # A string comparison: python prints 0.5 and 1.0, whatever Windows' decimal separator.
-        if ($got -eq $k) {
-            Write-Both ("{0}: rs_eval reads wait_keep {1}" -f $ck, $got)
-        } else {
-            Write-Both ("warning: {0}: rs_decide.wait_keep_for read '{1}', not {2}; this run's bias is not the one asked for." -f $ck, $got, $k) 'Yellow'
-        }
-        Invoke-Check ("wait bias: dt_big_hog, wait_keep {0}, 21-tick delay" -f $k) $RG (@('tools\rs_eval.py', '--ckpt', $ck) + $vs + @('--delay', '21')) | Out-Null
+# rs_eval adds log(1 / wait_keep) to the wait logit, wait_keep read from the args.json next to
+# the checkpoint (tools\rs_decide.py wait_keep_for). A copy of best.pt with another args.json
+# plays the same model with a smaller wait bias: 0.69 (wait_keep 0.5) and 0 (1.0) instead of
+# 1.39 (0.25, what both models trained with).
+function Invoke-WaitBias([string]$Label, [string]$Source, [string]$DirName, [string]$Keep) {
+    $dir = Join-Path $root ('runs\tokens\' + $DirName)
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Copy-Item -Force (Join-Path $root $Source) (Join-Path $dir 'best.pt')
+    # No byte-order mark: json.loads refuses one, and rs_decide would fall back to 0.35.
+    [System.IO.File]::WriteAllText((Join-Path $dir 'args.json'), ('{"wait_keep": "' + $Keep + '"}'), (New-Object System.Text.UTF8Encoding($false)))
+    $ck = Join-Path $dir 'best.pt'
+    # No double quotes in the probe: PowerShell 5.1 passes them to python unescaped.
+    $probe = 'import sys; sys.path[:0] = [''tools'']; import rs_decide; print(rs_decide.wait_keep_for(sys.argv[1]))'
+    $got = "$(& $RG -c $probe $ck 2>&1 | Select-Object -Last 1)".Trim()
+    # A string comparison: python prints 0.5 and 1.0, whatever Windows' decimal separator.
+    if ($got -eq $Keep) {
+        Write-Both ("{0}: rs_eval reads wait_keep {1}" -f $ck, $got)
+    } else {
+        Write-Both ("warning: {0}: rs_decide.wait_keep_for read '{1}', not {2}; this run's bias is not the one asked for." -f $ck, $got, $Keep) 'Yellow'
     }
+    Invoke-Check ("wait bias: {0}, wait_keep {1}, 21-tick delay" -f $Label, $Keep) $RG (@('tools\rs_eval.py', '--ckpt', $ck) + $vs + @('--delay', '21')) | Out-Null
+}
+
+if ($run -contains 'waitbias') {
+    Invoke-WaitBias 'dt_big_hog' $second 'dt_big_hog_wk050' '0.5'
+    Invoke-WaitBias 'dt_big_hog' $second 'dt_big_hog_wk100' '1.0'
+    # The control: if live_big_hog gains as much from a zero bias, the bias is simply too high
+    # at this delay for any legacy model, which v2 would not fix; H3 predicts dt_big_hog gains
+    # clearly more.
+    Invoke-WaitBias 'live_big_hog (control)' $first 'live_big_hog_wk100' '1.0'
 }
 
 if ($run -contains 'live') {
@@ -196,6 +216,18 @@ if ($run -contains 'ablation') {
     $ok = Invoke-Check 'ablation: fine-tune without the waits with a play in flight' $BB ($fineTune + @('--name', 'dt_big_hog_np', '--trust', 'v2', '--drop-pending-waits'))
     if ($ok) {
         Invoke-Check 'ablation: dt_big_hog_np, 21-tick delay' $RG (@('tools\rs_eval.py', '--ckpt', 'runs\tokens\dt_big_hog_np\best.pt') + $vs + @('--delay', '21')) | Out-Null
+    }
+}
+
+if ($run -contains 'fullablation') {
+    # The ablation's init, dt_big, still learnt from the waits with a play in flight; here the
+    # general model does without them too, so a lazy gate learnt there cannot survive.
+    $ok = Invoke-Check 'full ablation: general model without the waits with a play in flight' $BB ($train + @('--name', 'dt_big_np', '--trust', 'v2', '--drop-pending-waits'))
+    if ($ok) {
+        $ok = Invoke-Check 'full ablation: its Hog 2.6 fine-tune, the same way' $BB ($train + @('--name', 'dt_big_np_hog', '--trust', 'v2', '--drop-pending-waits', '--finetune-hog', '--init', $generalNp))
+    }
+    if ($ok) {
+        Invoke-Check 'full ablation: dt_big_np_hog, 21-tick delay' $RG (@('tools\rs_eval.py', '--ckpt', 'runs\tokens\dt_big_np_hog\best.pt') + $vs + @('--delay', '21')) | Out-Null
     }
 }
 
