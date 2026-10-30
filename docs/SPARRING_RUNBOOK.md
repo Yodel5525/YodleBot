@@ -35,6 +35,7 @@ $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, roy
 | 15-18: detector, calibration, dry run, first friendly with taps | to do |
 | 19: second model (decision-time rows) | to do |
 | 20: third model (v2 rows, the whole corpus) | to do, after 19 |
+| 21: RL fine-tuning (bench, then days of training) | to do, after 20 |
 
 ## 1. GPU driver
 
@@ -842,6 +843,160 @@ Send back the log, `reports\third_model_<time>.log`. Each step's `==` line has i
   - everything from `league evaluation:` to `best:`;
   - the `report:` line.
 
+## 21. RL fine-tuning: the bench, then days of training
+
+This is Phase 7 of `docs/SPARRING_PLAN.md`: reinforcement learning in the simulator, to play better than the pros it copied without learning tricks that only work in RoyaleSim. It is pure simulation. Nothing here starts, touches or taps MuMu, so the emulator is not needed.
+
+It needs:
+- section 20's `runs\tokens\v2_hog\best.pt`. This is the start model, the first champion and the model the training stays close to (the KL pull). The script checks for it.
+- the imitation models `runs\tokens\dt_big_hog\best.pt` (section 19) and `runs\tokens\live_big_hog\best.pt` (section 14) as anchors. A missing one is skipped with a warning.
+- IL_Replay (section 11). It supplies the opponents' decks and the gate's held-out pairings.
+
+After `git pull`, run these tests first. None of the RL code has run on the PC yet. Paste any failure back before you start.
+
+```powershell
+& $RG -m pytest tests/pipeline/test_train_loop.py tests/pipeline/test_rollout.py tests/pipeline/test_ppo.py tests/pipeline/test_league_pool.py tests/pipeline/test_league_eval.py -q
+& $BB -m pytest tests/pipeline/test_ppo.py -q
+```
+
+**What one iteration does** (`tools\rl\train_loop.py`):
+
+1. **Collect.** It plays `-Matches` battles (default 400) in the engine venv, on `-Workers` processes.
+   - The learner plays Hog 2.6 in base forms, every card and tower at level 11, as in a friendly.
+   - Every command lands 24 ticks after the decision, as live.
+   - The bot sees the board through the perception-noise profile: `data\noise\measured.json` once you have fitted one (section 20 explains the fit), else the prior.
+   - Opponents:
+     - 50%: the learner itself, on both seats;
+     - 35%: earlier snapshots of the learner (one joins the pool every 5 iterations);
+     - 15%: the imitation models.
+
+     Within each group, the opponents that still beat the learner are drawn more often.
+   - The opponents' decks are drawn from the IL_Replay train split, as often as they are played there.
+2. **Update.** One PPO update runs in the GPU venv. The learner moves toward what won, and an adaptive pull keeps it within about 0.075 nats per decision of v2_hog. A second pull keeps its play rate near v2_hog's, so it plays about as many cards as the pros.
+3. **Record.** The league files the learner's results and the run moves to the next iteration. Each step is saved as it ends, so a crash repeats at most the step that was running.
+
+**The gate** runs every 10 iterations (`-GateEvery`). It is the same test as section 20's league:
+- the newest checkpoint against the champion: 1,000 games on the dev split's frozen pairings, both seats, at the 24-tick delay with the run's noise;
+- 400 games against each anchor;
+- **PASS**: the Wilson lower bound against the champion is above 52%, and the score against no anchor drops more than 2 points below the champion's. The checkpoint becomes the champion and is copied to `runs\rl\hog_rl1\champion.pt`.
+- **FAIL** (or a gate that could not run): the champion stays.
+
+The first champion is v2_hog. After a pass, v2_hog becomes an anchor too.
+
+### Step 1: the bench (about 15 minutes)
+
+Close MuMu and the browser. The bench measures what fits in memory, so it must run with them closed.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Bench
+```
+
+The first time, the script first builds the opponents' deck field (`tools\deck_stats.py --top 2000`, a few minutes) if `data\deck_stats.json` is missing. Then it plays for about 10 minutes at 1, then about half, then all the workers that RAM and CPU allow, and times one PPO update. It prints:
+- `workers N: ... matches/hour, ... RAM per worker ... MB at peak` for each count;
+- `RAM per worker` and `recommended: --workers N`, with the reason;
+- how long an iteration of 400 matches takes, collection and update;
+- a last line with the command to start: `rl_train.ps1 -Workers N -Hours 48`.
+
+Options: `-BenchMinutes 20` measures longer. The bench writes `runs\rl\hog_rl1\bench-<time>\bench.json` and trains nothing.
+
+### Step 2: the long run (days, MuMu closed)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -Workers 8 -Hours 48
+```
+
+Use the bench's `-Workers`. Before every collection, the driver lowers the count when free memory is short, and it learns the real memory per worker from the previous collection.
+
+How long (estimated; the bench measures the collection part):
+- One iteration is the collection (400 matches at the bench's matches/hour) plus the update (the bench's time).
+- One gate is 1,000 games against the champion, plus 400 against each anchor only when the candidate beat the champion. Each game takes about 10-13 s of one core, on 6 workers: about 35-60 minutes. The first time a candidate beats the champion, the champion also plays both anchors once (800 more games); later gates reuse those games.
+- Plan 2-7 days in all. The gate's 52% bar is strict, so many gates fail before one passes. That is expected.
+
+Other options:
+- `-Iterations 200` stops after 200 iterations in all.
+- `-Matches 800` makes larger iterations (the update needs more memory and time).
+- `-GateEvery 20` runs fewer gates (more training time). Use `0` for none.
+- `-Noise <profile.json>` (new run only) sets the noise profile.
+- `-Name hog_rl2` starts a second, separate run.
+
+Disk: each iteration keeps one checkpoint, about as big as `runs\tokens\v2_hog\best.pt` (check with `(Get-Item runs\tokens\v2_hog\best.pt).Length / 1MB`). 200 iterations take 200 times that. The rollout files are deleted after each update. Do not delete `itNNNN.pt` files while the run uses them: the league plays its snapshots from them.
+
+### Stop and resume
+
+- **Stop cleanly:** from a second PowerShell window:
+
+  ```powershell
+  New-Item -ItemType File -Force C:\hcr\runs\rl\hog_rl1\STOP
+  ```
+
+  The step that is running (a collection, an update, or a gate, which can take an hour) finishes, then the run stops. `C:\hcr\STOP`, the live runner's stop file, stops it too. **Delete the file before you resume:** `Remove-Item C:\hcr\runs\rl\hog_rl1\STOP`. The script refuses to start while either file exists.
+- **Stop now:** Ctrl+C. The interrupted step runs again on resume.
+- **Resume:**
+
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\rl_train.ps1 -From resume -Workers 8 -Hours 24
+  ```
+
+  The run keeps the settings it started with: start model, anchors, delay, noise, decks, mix and gate. If `data\engine.json`, the card table or a checkpoint file changed, the resume is refused (exit 1 or 2). Start a new `-Name` instead. `-Workers`, `-Matches`, `-Hours`, `-Iterations` and `-GateEvery` can change on every launch.
+- **Go back:** `-From 40` resumes from iteration 40. Later checkpoints move to `runs\rl\hog_rl1\rollback-<time>\`, and the league and champion return to their state at iteration 40. Use it when a run went wrong after some iteration.
+- **See where it is**, also while it runs:
+
+  ```powershell
+  & $RG tools\rl\train_loop.py status --name hog_rl1
+  ```
+
+  It prints the iteration, the champion, every gate and the last five iterations.
+
+### Reading the output
+
+Every iteration prints four lines:
+- `it 0012 -> it0013.pt: 400 matches in 7.5 min (3200/h, peak 900 MB a worker), ... rows`;
+- `learner score: anchors 0.55 (60), pool 0.48 (140)`: its mean score per opponent group, over the non-mirror games. Near 0.5 against the pool is normal: the pool is its own recent self. Plays per seat are the learner's cards per match (pros: 35-40).
+- `ppo ...`:
+  - `kl` should stay near its 0.075 budget. The coefficient after it rises when the policy pulls away, and falls when it stays close.
+  - `q_play` is the learner's play rate and `ref` v2_hog's. They should stay close.
+  - `explained var` (the critic's fit) should rise above 0 within the first iterations.
+- `league: ... active, admitted snap:it0015, ...`.
+
+Every gate prints its decision and a line per condition, as in section 20. The files:
+- each gate's report: `runs\rl\hog_rl1\gates\itNNNN.report.json`;
+- each step's full output: `runs\rl\hog_rl1\logs\`;
+- one record per iteration and gate: `runs\rl\hog_rl1\log.jsonl`.
+
+Warning signs to send back:
+- `warning: N opponent decks` in the header: `data\deck_stats.json` holds fewer than the plan's 1,000 decks (an older file built with `--top 500`). Stop, delete the file, and start a new run with another `-Name`: the script rebuilds it with 2,000;
+- `q_play` far from `ref`;
+- `kl` many times its budget for several iterations;
+- `errors` above 0 in many iterations;
+- refused plays per seat that keep growing.
+
+### When a checkpoint passes the gate
+
+`champion.pt` is the new champion. It plays with v2_hog's wait setting: the run folder's `args.json` carries it, so keep the file next to `champion.pt`.
+
+Try it live (sections 17 and 18) with `--ckpt runs\rl\hog_rl1\champion.pt`. The plan's last check is real friendlies, alternating it with v2_hog match by match, at least 40 per arm. It must do no worse than v2_hog, with plays per match and elixir leak inside human ranges.
+
+Exit codes of the script:
+- 0: done (time or iterations reached, or STOP);
+- 1: a step failed;
+- 2: refused at the start (bad settings or files);
+- 3: done, but a gate could not run;
+- 130: interrupted.
+
+Send back the log, `reports\rl_train_<time>.log`. If it is too big, send:
+- from the bench:
+  - every `workers N:` line;
+  - the `ppo:` line;
+  - the `RAM per worker`, `recommended` and `at --workers` lines;
+- from a run:
+  - the `train_loop: run ...` header (8 lines);
+  - the four lines of the first 3 and the last 3 iterations;
+  - every gate block (`gate at iteration ...` and the lines under it);
+  - the `stopped:` line;
+  - the `status` output at the end;
+- `runs\rl\hog_rl1\log.jsonl` (small) and `runs\rl\hog_rl1\gates\*.report.json`;
+- any `error:` or `warning:` line, with the matching file under `runs\rl\hog_rl1\logs\`.
+
 ## If something breaks
 
 Paste these back to the cloud session:
@@ -860,4 +1015,4 @@ These need code that is not on the branch yet. Each one gets exact commands here
 | 4. Decision-time models, v2 | the decision-time model is section 19 and the v2 model (perception noise in the rows, the ability head, memory-mapped training) section 20. Still to come: v2 rows on the vision class list (`--units vision`) | the simulator's evaluators and RL workers reading `--units vision` rows |
 | 5. Screen perception, second pass | label frames from our own friendlies for the cards and forms the KataCR dataset lacks, then score the detector on them (`tools/vision_replay.py --labels`); fit the perception-noise profile used in training (`tools/fit_noise_profile.py`) | V11 (rest), E17 |
 | 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows (section 19's, or section 20's v2 model) and the measured delay D | the results of sections 19 and 20 |
-| 7. RL fine-tuning | the RL driver with gating and resume (`tools/rl/train_loop.py`); runs for days with MuMu closed | R01-R05 |
+| 7. RL fine-tuning, the live check | the driver is section 21. Still to come: the promoted model against the imitation champion in real friendlies, match by match in turn; the optional search teacher (R05) as a second arm | the first champion from section 21 |

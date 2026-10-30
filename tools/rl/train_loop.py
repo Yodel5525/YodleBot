@@ -228,13 +228,26 @@ def _jsonable(x: Any) -> Any:
     return str(x)
 
 
+def replace_file(src: Any, dst: Any, tries: int = 20) -> None:
+    """os.replace, retried for a few seconds on Windows' PermissionError: a reader (`status`, an
+    editor, a virus scan) that holds `dst` open makes the move fail until it closes it."""
+    for k in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if k == tries - 1:
+                raise
+            time.sleep(min(0.05 * 2 ** k, 1.0))
+
+
 def write_json(path: Any, data: Any) -> Path:
-    """`data` as JSON at `path`, atomically (a .tmp file, then os.replace)."""
+    """`data` as JSON at `path`, atomically (a .tmp file, then replace_file)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1, default=_jsonable), encoding="utf-8")
-    os.replace(tmp, path)
+    replace_file(tmp, path)
     return path
 
 
@@ -265,7 +278,7 @@ def copy_atomic(src: Any, dst: Any) -> Path:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".tmp")
     shutil.copyfile(src, tmp)
-    os.replace(tmp, dst)
+    replace_file(tmp, dst)
     return dst
 
 
@@ -949,7 +962,7 @@ def stamp_start(src: Any, dst: Any, stamp: Mapping[str, Any]) -> Path:
     dst = Path(dst)
     tmp = dst.with_name(dst.name + ".tmp")
     torch.save(blob, tmp)
-    os.replace(tmp, dst)
+    replace_file(tmp, dst)
     return dst
 
 
@@ -1904,8 +1917,12 @@ def make_steps(args: argparse.Namespace) -> Steps:
     update in this process when this interpreter is py_train)."""
     if args.inline:
         return InlineSteps()
-    from hastycr import machine
-    py_engine, py_train = machine.py_engine(), machine.py_train()
+    try:
+        from hastycr import machine
+        py_engine, py_train = machine.py_engine(), machine.py_train()
+    except Exception as exc:                # a broken machine.json, say
+        raise Refusal(f"machine settings (src/hastycr/machine.py): {type(exc).__name__}: "
+                      f"{exc}") from None
     for what, py in (("engine", py_engine), ("GPU", py_train)):
         if not Path(py).is_file():
             raise Refusal(f"the {what} venv's python {py} is missing: run "
