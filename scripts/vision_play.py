@@ -38,8 +38,14 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      ends on the end screen, a stopped clock (2.5 s), a clock reset or 8 s off the battle screen
   -> PublicMemory (an opponent play recorded at the tick perception first saw it; view(now, 0))
   -> tools/public_state (the state obs_row reads) -> tools/rs_rows.obs_row with the checkpoint's
-     row schema (rs_rows/legacy; --live-compat rows for live_big_hog)
-  -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard)
+     row schema, picked by its meta "schema" (row_plan): rs_rows/legacy (--live-compat rows for
+     live_big_hog) exactly as before; rs_rows/v2 (E14) also gets a public_state.LiveObserver
+     per battle, fed every frame's opponent plays and our landings and each tap sent, whose
+     inputs (the opponent's elixir counted from the plays seen, our taps still in flight
+     until they land, at the checkpoint's --obs-delay) ride in the state to obs_row, and the
+     spell tracks as spells in flight
+  -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard;
+     a v2 model's ability buttons stay masked: our deck has none and the HUD reads none)
   -> ControlState.suggest / should_tap -> ScreenGuard (the NEWEST captured frame, taken after the
      one decided on, must still show the battle screen: no tap lands on an end screen whose OK
      button covers hand slot 1) -> AdbTapper: ONE persistent `adb -s SERIAL shell`, a play is
@@ -91,6 +97,7 @@ for _p in (ROOT / "src", ROOT / "tools", ROOT):          # hastycr, the tools, s
 
 import rs_decide as RD  # noqa: E402
 import rs_memory  # noqa: E402
+import rs_schema  # noqa: E402  (standard library only: the row schema names)
 from scripts.vision import control as CT  # noqa: E402
 from scripts.vision import events as EV  # noqa: E402
 from scripts.vision import hpbars  # noqa: E402
@@ -325,6 +332,7 @@ class BattleContext:
     opp_plays: int = 0
     own_plays: int = 0
     last_hud: Hud | None = None
+    observer: Any = None              # v2 rows: the battle's public_state.LiveObserver
 
 
 class ResultBook:
@@ -730,12 +738,15 @@ class Decider:
 
     state_fn(vf, ctx) -> the state dict (tools/public_state); row_fn(state, mem_view, tick)
     -> the obs_row (tools/rs_rows); policy / legality / config / rng as rs_decide.decide
-    takes them. Our pending taps are pruned against the HUD's hand first (rs_decide)."""
+    takes them. Our pending taps are pruned against the HUD's hand first (rs_decide).
+    observer(ctx) -> a new battle's public_state.LiveObserver (v2 rows; make_observer), None
+    for legacy rows: the runner keeps it in ctx.observer (observer_for)."""
 
     def __init__(self, *, policy: Any, legality: Any, config: Any,
                  state_fn: Callable[[VisionFrame, BattleContext], dict],
                  row_fn: Callable[[dict, dict, int], Mapping[str, Any]], rng: Any = None,
-                 team: int = OWN_TEAM, sub: int = RD.SUBTILE_PER_MILLITILE):
+                 team: int = OWN_TEAM, sub: int = RD.SUBTILE_PER_MILLITILE,
+                 observer: Callable[[BattleContext], Any] | None = None):
         self.policy = RD.as_policy(policy)
         self.legality = legality
         self.config = config
@@ -744,6 +755,11 @@ class Decider:
         self.rng = rng if rng is not None else np.random.default_rng()
         self.team = int(team)
         self.sub = int(sub)
+        self.observer = observer
+
+    def observer_for(self, ctx: BattleContext) -> Any:
+        """The battle's LiveObserver (v2 rows), None for legacy rows."""
+        return None if self.observer is None else self.observer(ctx)
 
     def decide(self, vf: VisionFrame, ctx: BattleContext) -> tuple[Any, dict]:
         now_tick = int(vf.tick)
@@ -756,6 +772,88 @@ class Decider:
         ctx.last_decision_tick = now_tick
         ctx.decisions += 1
         return d, state
+
+
+# ---------------------------------------------------------------------------
+# the checkpoint's rows: legacy or v2
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RowPlan:
+    """Which rows the runner builds for a checkpoint (row_plan): its meta "schema" (legacy:
+    rs_rows/legacy or absent; v2: rs_rows/v2) and, for v2, the tap-to-run delay its rows
+    were built with (rs_decide.obs_delay_ticks: own_pending's clock; 0 shows no pending)."""
+    schema: str
+    v2: bool = False
+    obs_delay: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {"schema": self.schema, "v2": self.v2, "obs_delay": self.obs_delay}
+
+
+def row_plan(meta: Mapping[str, Any] | None) -> RowPlan:
+    """The RowPlan of a checkpoint meta. No "schema" (every checkpoint before E14) or
+    rs_rows/legacy: the legacy rows, built exactly as before. rs_rows/v2 (or "v2",
+    rs_decide.is_v2_meta): v2 rows. ValueError for any other schema."""
+    meta = meta or {}
+    schema = meta.get("schema", rs_schema.SCHEMA_LEGACY)
+    if RD.is_v2_meta(meta):
+        return RowPlan(rs_schema.SCHEMA_V2, True, RD.obs_delay_ticks(meta))
+    if schema != rs_schema.SCHEMA_LEGACY:
+        raise ValueError(f"the checkpoint wants rows of schema {schema!r}; this runner builds "
+                         f"{rs_schema.SCHEMA_LEGACY!r} or {rs_schema.SCHEMA_V2!r}")
+    return RowPlan(rs_schema.SCHEMA_LEGACY)
+
+
+def make_state_fn(builder: Any, perception: Any, plan: RowPlan
+                  ) -> Callable[[VisionFrame, BattleContext], dict]:
+    """Decider's state_fn: builder.state (public_state.PublicStateBuilder) of the frame with
+    the opponent cards seen, the creating card of each track and the elixir of our taps in
+    flight; for v2 rows also the battle's observer (ctx.observer)."""
+    def state_fn(vf: VisionFrame, ctx: BattleContext) -> dict:
+        kw = {"observer": ctx.observer} if plan.v2 else {}
+        return builder.state(vf, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
+                             pending_cost=sum(max(0, int(p.cost)) for p in ctx.pending), **kw)
+    return state_fn
+
+
+def make_row_fn(obs_row: Callable[..., Mapping[str, Any]], sub: int, plan: RowPlan, *,
+                live_compat: bool, units: str,
+                row_inputs: Callable[[Mapping[str, Any]], dict] | None = None
+                ) -> Callable[[dict, dict, int], Mapping[str, Any]]:
+    """Decider's row_fn: obs_row (tools/rs_rows.obs_row) of our side (OWN_TEAM) with the
+    checkpoint's unit tokens; for v2 rows also row_inputs(state) (public_state.row_inputs:
+    schema, opp_elixir and pending from the state's observer block)."""
+    if not plan.v2:
+        def row_fn(state: dict, view: dict, tick: int) -> Mapping[str, Any]:
+            return obs_row(state, OWN_TEAM, sub, view, tick, live=live_compat,
+                           units=None if live_compat else units)
+        return row_fn
+    if row_inputs is None:
+        import public_state
+        row_inputs = public_state.row_inputs
+
+    def row_fn_v2(state: dict, view: dict, tick: int) -> Mapping[str, Any]:
+        return obs_row(state, OWN_TEAM, sub, view, tick, live=live_compat,
+                       units=None if live_compat else units, **row_inputs(state))
+    return row_fn_v2
+
+
+def make_observer(catalogue: Sequence[Sequence[Any]], plan: RowPlan, *,
+                  fields: Sequence[str] | None = None, law: Any = None, blind: bool = False,
+                  observer_cls: Any = None) -> Callable[[BattleContext], Any] | None:
+    """Decider's observer: for v2 rows, ctx -> a public_state.LiveObserver for the battle
+    (delay plan.obs_delay, watching from the battle's start tick; blind: no detector, so no
+    play is seen and the count is never exact); None for legacy rows."""
+    if not plan.v2:
+        return None
+    if observer_cls is None:
+        import public_state
+        observer_cls = public_state.LiveObserver
+
+    def observer(ctx: BattleContext) -> Any:
+        return observer_cls(catalogue, delay=plan.obs_delay, fields=fields, law=law,
+                            start_tick=ctx.start_tick, blind=blind)
+    return observer
 
 
 # ---------------------------------------------------------------------------
@@ -959,6 +1057,8 @@ class VisionPlay:
                     ctx.opp_cards.append(int(p.card))
         if vf.events.own_landings:
             ctx.own_plays += sum(1 for x in vf.events.own_landings if x.land_tick is not None)
+        if ctx.observer is not None:                   # v2 rows: the count and our taps in flight
+            ctx.observer.events(vf.events)
         if vf.tick is not None or vf.events.own_landings:
             self.control.attribute(vf.events.own_landings, tick=vf.tick)
         if not self.can_decide(vf):
@@ -1026,8 +1126,17 @@ class VisionPlay:
                                              t=self.clock())
             except Exception as exc:
                 self._error("note_tap_error", exc, tick=vf.tick)
+            if ctx.observer is not None:               # v2 rows: in own_pending until it lands
+                try:
+                    ctx.observer.sent(d.card, int(vf.tick), slot=d.slot, cost=d.cost)
+                except Exception as exc:
+                    self._error("observer_error", exc, tick=vf.tick)
         extra: dict[str, Any] = {"battle": ctx.number, "px": px, "ms": dict(ms),
                                  "elixir": state["players"][OWN_TEAM].get("elixir_milli")}
+        seen = state.get("observer")
+        if seen is not None:                           # v2 rows: what the row was given
+            extra["opp_elixir"] = list(seen.get("opp_elixir") or ())
+            extra["own_pending"] = [list(p) for p in seen.get("own_pending") or ()]
         if why:
             extra["why"] = why
         rec = self.control.note_decision(s, tapped=tapped, **extra)
@@ -1045,6 +1154,12 @@ class VisionPlay:
         self.last_decision = None
         self._log("battle_start", battle=n, tick=vf.tick, mode=self.control.mode)
         self.out(f"battle {n} started (tick {vf.tick}, mode {self.control.mode.upper()})")
+        make = getattr(self.decider, "observer_for", None)
+        if make is not None:
+            try:
+                self.ctx.observer = make(self.ctx)
+            except Exception as exc:                   # v2 rows then fail: no decision, no tap
+                self._error("observer_error", exc, tick=vf.tick)
 
     def _end_battle(self, vf: VisionFrame) -> None:
         ctx = self.ctx
@@ -1247,10 +1362,12 @@ def _main(args: argparse.Namespace) -> int:
     import torch
     blob = torch.load(str(ckpt), map_location="cpu")
     meta = blob["meta"]
-    schema = meta.get("schema", RR.SCHEMA)
-    if schema != RR.SCHEMA:
-        print(f"{ckpt} wants rows of schema {schema!r}; this runner builds {RR.SCHEMA!r}")
+    try:
+        plan = row_plan(meta)                           # legacy rows, or v2 (E14) rows
+    except ValueError as exc:
+        print(f"{ckpt}: {exc}")
         return 2
+    schema = plan.schema
     live_compat = bool(meta.get("live_compat"))
     units = meta.get("units_mode") or RR.UNITS_TYPES
     if units == RR.UNITS_VISION and not live_compat:
@@ -1291,19 +1408,19 @@ def _main(args: argparse.Namespace) -> int:
     deriver = EV.EventDeriver(tables, own_deck=deck_ids)
     perception = LivePerception(hud_reader=hud_reader, tracker=tracker, deriver=deriver,
                                 geometry=geometry, detector=detector)
+    # v2 rows (E14) also show the spells in flight: spell tracks become "spells" rows in the
+    # engine's SPELL_FIELDS layout (rs_rows.SF, filled by _setup). Legacy: as before.
+    spell_kw = {"spell_fields": RR.SF} if plan.v2 else {}
     builder = PS.PublicStateBuilder(table, spawn, deck=deck_ids, levels=args.level, catalogue=cat,
-                                    fields=RR.F, sub=sub)
-
-    def state_fn(vf: VisionFrame, ctx: BattleContext) -> dict:
-        return builder.state(vf, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
-                             pending_cost=sum(max(0, int(p.cost)) for p in ctx.pending))
-
-    def row_fn(state: dict, view: dict, tick: int) -> Mapping[str, Any]:
-        return RR.obs_row(state, OWN_TEAM, sub, view, tick, live=live_compat,
-                          units=None if live_compat else units)
-
-    decider = Decider(policy=policy, legality=legality, config=dcfg, state_fn=state_fn, row_fn=row_fn,
-                      rng=np.random.default_rng(args.seed), sub=sub)
+                                    fields=RR.F, sub=sub, **spell_kw)
+    observer = make_observer(cat, plan, fields=list(getattr(royalesim, "CATALOGUE_FIELDS", ()) or ())
+                             or None, law=RR.elixir_law(eng) if plan.v2 else None,
+                             blind=detector is None, observer_cls=PS.LiveObserver)
+    decider = Decider(policy=policy, legality=legality, config=dcfg,
+                      state_fn=make_state_fn(builder, perception, plan),
+                      row_fn=make_row_fn(RR.obs_row, sub, plan, live_compat=live_compat, units=units,
+                                         row_inputs=PS.row_inputs),
+                      rng=np.random.default_rng(args.seed), sub=sub, observer=observer)
 
     # --- taps: only with --tap, a live source, a detector, and a verified emulator -------------
     replay = args.source not in ("auto", "printwindow", "adb")
@@ -1346,6 +1463,9 @@ def _main(args: argparse.Namespace) -> int:
                  f"  source     {args.source}; device {serial} ({instance})",
                  "  taps       " + ("ON (verified Clash Royale instance)" if tapper is not None else
                                      f"off ({refusal or 'dry run: no --tap'})")]
+        if plan.v2:
+            lines.append(f"  v2 rows    opponent elixir counted from the plays seen; our taps in flight "
+                         f"until they land (--obs-delay {plan.obs_delay} ticks); spells in flight")
         if detector is None:
             lines.append("  no detector: the board stays empty for the model and taps are refused")
         if not hud_reader.clock_reader.ready:
@@ -1358,7 +1478,8 @@ def _main(args: argparse.Namespace) -> int:
                      geometry=geometry.name, source=args.source, serial=serial, taps=tapper is not None,
                      tap_refusal=refusal, start_mode=args.start_mode, decide=dcfg.name,
                      engine=eng.to_json(), vocab_drift=list(loaded.drift),
-                     clock_templates=bool(hud_reader.clock_reader.ready))
+                     clock_templates=bool(hud_reader.clock_reader.ready),
+                     **({"rows": plan.to_json()} if plan.v2 else {}))
         if detector is None:
             recorder.log("no_detector", error=det_error)
         for name, state in ctl.start(**CT.start_kwargs(args)).items():
