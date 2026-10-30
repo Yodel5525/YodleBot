@@ -916,6 +916,12 @@ def test_legacy_obs_row_is_the_obs_row_before(v2rr, rs, flags):
         for team in (0, 1):
             for tick in (4800, 300):
                 want = frozen_obs_row(rr, state, team, SUB, MEM, tick, **flags)
+                # E17 (b4455d7) floors opp_last_age at 0, the one change since fe0bd18: only
+                # a memory holding a play after the row's tick (a clock read early) has a
+                # negative age; a view never does. MEM's plays at 4000-4790 do at tick 300.
+                if tick < 4790:
+                    assert want["opp_last_age"].min() < 0
+                want["opp_last_age"] = np.maximum(want["opp_last_age"], np.float16(0))
                 same_row(rr.obs_row(state, team, SUB, MEM, tick, **flags), want)
                 same_row(rr.obs_row(state, team, SUB, MEM, tick, schema="legacy", **flags), want)
                 same_row(rr.obs_row(state, team, SUB, MEM, tick, schema=rs.LEGACY,

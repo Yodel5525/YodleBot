@@ -38,8 +38,13 @@ np.concatenate and the loader do), except:
     (each shard's distinct tags, sorted, in shard order).
 So every value comes back exactly (CompactRows.shard, verify), unit_feats of a shard stored
 wider than float16 as the trainer reads it. The first pass reads only the .npy headers inside
-the shards and the small columns that may be compacted; the second writes each shard's columns
-into the open files (np.lib.format.open_memmap).
+the shards and the small columns that may be compacted; the second appends each shard's columns
+to the column files, front to back (_ColumnFile: np.save's header for the whole column, then the
+rows with ndarray.tofile, as np.save writes them; the files are then what np.save of the whole
+column would write). Not through a writable memory map: on Windows a writable map of a file
+tens of GB long has NTFS zero-fill the whole file first and read each page back before it is
+written, and its dirty pages are not throttled the way buffered writes are, which can take most
+of a 16 GB PC's memory.
 
 Pure numpy and the standard library (and tools/rs_schema.py), so both venvs run it and the trainer
 imports CompactRows from here.
@@ -48,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import hashlib
 import json
 import math
@@ -193,7 +199,9 @@ def plan(rows) -> dict:
                                    f"{sorted(CODE_COLUMNS)} may be")
             dtype[c], how[c] = np.dtype(CODE_COLUMNS[c]), "codes"
             continue
-        widest = np.result_type(*[h[c][0] for h in heads])
+        # np.promote_types pairwise: np.result_type's dtypes, without one argument a shard
+        # (about a thousand for the whole corpus)
+        widest = functools.reduce(np.promote_types, [h[c][0] for h in heads])
         if c in HALF_COLS:
             dtype[c], how[c] = np.dtype(np.float16), (
                 "as stored" if widest == np.float16 else "float16 as the trainer loads it")
@@ -239,6 +247,39 @@ class _Codes:
         return table[np.asarray(inv).reshape(-1)]
 
 
+class _ColumnFile:
+    """columns/<name>.npy written front to back (module doc, pass 2): np.save's header (format
+    1.0) for the whole column, `shape` = (all rows, per-row shape), then each shard's rows as
+    they come, at `dtype`, with ndarray.tofile (what np.save does for a C-contiguous array)."""
+
+    def __init__(self, path: Path, dtype, shape: tuple):
+        self.path, self.dtype = Path(path), np.dtype(dtype)
+        self.shape = tuple(int(d) for d in shape)
+        self.rows = 0
+        self.f = open(self.path, "wb")
+        npformat.write_array_header_1_0(self.f, {"descr": npformat.dtype_to_descr(self.dtype),
+                                                 "fortran_order": False, "shape": self.shape})
+        self.data_start = self.f.tell()
+
+    def write(self, arr: np.ndarray) -> None:
+        """Appends rows `arr` (cast to the column's dtype)."""
+        arr = np.ascontiguousarray(np.asarray(arr).astype(self.dtype, copy=False))
+        if arr.shape[1:] != self.shape[1:] or self.rows + len(arr) > self.shape[0]:
+            raise CompactError(f"{self.path.name}: rows of shape {arr.shape} after {self.rows:,} "
+                               f"rows, the planned column is {self.shape}")
+        arr.tofile(self.f)
+        self.rows += len(arr)
+
+    def finish(self) -> None:
+        """Closes the file; CompactError unless it holds exactly the rows its header says."""
+        self.f.close()
+        want = self.data_start + math.prod(self.shape) * self.dtype.itemsize
+        size = self.path.stat().st_size
+        if self.rows != self.shape[0] or size != want:
+            raise CompactError(f"{self.path.name}: {self.rows:,} rows and {size:,} bytes written, "
+                               f"the header says {self.shape[0]:,} rows ({want:,} bytes)")
+
+
 def _sha1(path: Path) -> str | None:
     return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
 
@@ -268,19 +309,18 @@ def compact(rows, out=None, *, force: bool = False, log=print) -> dict:
     (out / INDEX_DIR).mkdir(parents=True, exist_ok=True)
     log(f"compact: {len(p['paths'])} shards, {total:,} rows, {len(p['names'])} columns -> {out}")
     files = {}
-    for c in p["names"]:
-        shape = (total,) + p["shape"][c]
-        path = out / COLUMNS_DIR / f"{c}.npy"
-        if math.prod(shape) == 0:
-            np.save(path, np.zeros(shape, dtype=p["dtype"][c]))     # nothing to map
-        else:
-            files[c] = npformat.open_memmap(path, mode="w+", dtype=p["dtype"][c],
-                                                 shape=shape)
     codes = {c: _Codes(c) for c in p["names"] if p["how"][c] == "codes"}
     index: dict = {}
     filters = [c for c in INDEX_FILTERS if c in p["names"]]
     shards, start = [], 0
     try:
+        for c in p["names"]:
+            shape = (total,) + p["shape"][c]
+            path = out / COLUMNS_DIR / f"{c}.npy"
+            if math.prod(shape) == 0:
+                np.save(path, np.zeros(shape, dtype=p["dtype"][c]))     # nothing to map
+            else:
+                files[c] = _ColumnFile(path, p["dtype"][c], shape)
         for k, (path, n) in enumerate(zip(p["paths"], p["rows"])):
             with np.load(path) as z:
                 for c in p["names"]:
@@ -290,7 +330,7 @@ def compact(rows, out=None, *, force: bool = False, log=print) -> dict:
                     else:
                         arr = arr.astype(p["dtype"][c], copy=False)
                     if c in files:
-                        files[c][start:start + n] = arr
+                        files[c].write(arr)
                     if c == "split":
                         for code in np.unique(arr).tolist():
                             name = f"split_{codes['split'].names[code]}"
@@ -303,9 +343,11 @@ def compact(rows, out=None, *, force: bool = False, log=print) -> dict:
             if (k + 1) % 50 == 0 or k + 1 == len(p["paths"]):
                 log(f"  {k + 1}/{len(p['paths'])} shards ({time.time() - t0:.0f}s)")
         for f in files.values():
-            f.flush()
+            f.finish()                      # every row written: the sizes the headers say
     finally:
-        files.clear()                       # unmapped, so Windows lets the files go
+        for f in files.values():
+            f.f.close()                     # (again after finish: a no-op) on an error too
+        files.clear()
     names = [f"split_{s}" for s in (codes["split"].names if "split" in codes else ())]
     counts = {}
     for name in names + filters:
