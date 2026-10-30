@@ -603,20 +603,34 @@ Then, on this recording:
 - `battle 1 over (end screen) at tick 44..` (overtime), then `battle 1: WIN 1-0 (end screen + hud); record 1-0-0 (W-L-D)`;
 - `stopped: the frame source ended; 4414 frames, 0 taps, results {'win': 1}, errors -`.
 
-Then run it once in real time (about 6.5 minutes, the length of the recording). The frame rate and the frames it skips are then those of a live run:
+Then run it once in real time (about 6.5 minutes, the length of the recording):
 
 ```powershell
 & $BB scripts\vision_play.py --source $REC --no-window --hotkey none --seed 1
 & $BB tools\latency_probe.py reports\vision_play\replays --last 1
 ```
 
+The recording kept an image of every 5th captured frame, so the replay has about 11 frames a second, against about 57 live. Its frame rate in the latency probe is not the live figure. Rules that count frames (the hand's 3 votes, the 3 clock readings before the hand and the towers start, the battle start's 3 frames) also take longer here than live. Use this run for the time of each stage per frame (perceive, decide).
+
 Send back the setup lines, the battle, result and `stopped:` lines of both runs, and the latency probe output. `errors` other than `-` on the `stopped:` line, or a traceback, means something in the chain is broken: send the whole output.
+
+**Once the detector is pinned** (section 15), run the fast rehearsal once more before the live friendly. The `detector` line must then name the pin. This is the first run of the detector, the tracker, the events and the board in the model's state on real frames. The `stopped:` line must again end in `errors -`, without `detect_error`. Your plays in the recording are now seen on the board, so the log gets `human_play` records, and each should carry what the bot would have played:
+
+```powershell
+& $BB scripts\vision_play.py --source $REC --replay-fast --no-window --hotkey none --seed 1
+$S = (Get-ChildItem C:\hcr\reports\vision_play\replays -Directory | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+& $BB -c "import json,sys; h=[r['data'] for r in map(json.loads, open(sys.argv[1], encoding='utf-8')) if r.get('kind')=='human_play']; print(len(h), 'human plays,', sum(1 for d in h if d.get('would')), 'with would')" "$S\frames.jsonl"
+```
+
+Expect a count close to the number of cards you played in that battle (the HUD saw about 47), nearly all `with would`. Send back that line and the `stopped:` line.
 
 **3. The dry-run friendly.** Start the runner in the lobby, then start a friendly yourself and play it with the mouse as usual:
 
 ```powershell
 & $BB scripts\vision_play.py --seconds 600
 ```
+
+**Do not click or select text in the PowerShell window while the runner runs.** With QuickEdit on (the default), a selection pauses the console, and the runner then stops reading the screen until the selection ends. Switch modes with F8 or the control window. Copy the lines to send back from the window after the `stopped:` line, or read them from the session's `frames.jsonl`.
 
 It first prints its setup. Check these lines:
 - `decide     live; wait_keep 0.25 ...`, with no `WARNING`.
@@ -647,12 +661,14 @@ Then it prints a status line every second, for example:
 During the battle:
 - Check that the hand, the elixir and the clock match the screen. After you play two cards quickly, both slots must show the right new cards within about a second.
 - Press F8 once. The status shows `AUTO(dry)` and the decisions become `[dry]`. Nothing is tapped. Press F8 again to go back to `MANUAL`.
-- The control window shows the bot's suggestion while you play, and `would play ...` while it waits. Each of your plays is logged (`human_play`) next to the bot's suggestion at that moment and the newest play it would have made (`would`, `would_same_card`, `would_tile_dist`).
-- A `battle 1 over (clock reset)` line in the middle of the battle means a misread clock. Note when it happened.
+- The control window shows the bot's suggestion while you play, and `would play ...` while it waits. Each of your plays is logged (`human_play`) next to the bot's suggestion at that moment and the newest play it would have made with your card still in its hand (`would`, `would_same_card`, `would_tile_dist`). The card's slot empties as soon as you start dragging, so a would-play made during the drag could not have chosen your card and is passed over.
+- A `battle 1 over (clock reset)` line in the middle of the battle means a misread clock. Note when it happened. About a second later the runner follows the same battle again (`battle 2 started ...; joined in the middle`), with the towers it had read.
 
 At the end it prints `battle 1 over (end screen) at tick ...` and then `battle 1: WIN 2-1 (...); record 1-0-0 (W-L-D)`. After 600 s it stops with `stopped: 600 s; ... frames, 0 taps, ...`. Ctrl+C stops it earlier.
 
 Everything goes to `reports\vision_play\vision_play_<date>_<time>\frames.jsonl`, with an image every 20 recorded frames.
+
+Optional, on a second dry run: `--decide legacy` logs the decision rule the simulator's 46% was measured with. It differs live while one of your cards is in flight: the simulator kept the card in its slot and the bot waited, while live the slot is empty from your drag until the refill (about 1.5 s) and legacy plays its next-best card. `--tap` refuses `--decide legacy`.
 
 **4. Latency.** It reads the log only; MuMu is not needed:
 
@@ -683,6 +699,8 @@ You need:
 ```powershell
 & $BB scripts\vision_play.py --tap --battles 1
 ```
+
+As in section 17, do not click or select text in the runner's PowerShell window: with QuickEdit on, a selection stops the whole loop, perception and taps, until it ends. Use F8, the control window or the STOP file.
 
 Before it opens the adb shell, `scripts\emulator.py` must confirm that the serial is the Clash Royale instance. The setup must then show `taps       ON (verified Clash Royale instance)`. If it prints `refusing to tap: ...`, nothing is tapped: send that line back.
 

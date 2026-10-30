@@ -50,6 +50,12 @@ Semantics
   NON-wait suggestion within PAIR_MAX_AGE_TICKS ("would"): a play the bot
   suggested, or a would-play suggestion (note_would: what the bot would play
   if it played now, made on its waits; never tapped, not in suggestions()).
+  A suggestion made with a hand that did not hold the played card (extra
+  "hand", HAND_KEY) is passed over for an older one that did: the HUD slot
+  empties when the drag starts, about 8 ticks before the card is placed, and
+  the bot cannot choose a card it does not see in hand, so a would-play made
+  during the drag was never a choice between the human's card and another.
+  When no suggestion in the window held the card, the newest is taken.
 * Every logged decision records the mode it was made in ("mode") and the
   mode at logging time ("mode_now").
 
@@ -143,6 +149,7 @@ ACTION_SKIPPED = "skipped"    # AUTO and allowed, but the runner did not tap (it
 ACTIONS = (ACTION_TAP, ACTION_WAIT, ACTION_MANUAL, ACTION_DRY, ACTION_DROPPED,
            ACTION_STOPPED, ACTION_SKIPPED)
 WOULD = "would"               # a would-play suggestion's reason (note_would)
+HAND_KEY = "hand"             # a suggestion's extra: the hand it was decided with
 
 DEFAULT_LAG_TICKS = 26        # live_play.LEAD: tap -> first sighting, until measured
 MAX_LAG_TICKS = 60            # live_play.PENDING_TICKS: a play unseen after 3 s is lost
@@ -357,7 +364,8 @@ class PlayAttribution:
     suggestion is the bot's suggestion at that tick, or None when it had none
     within PAIR_MAX_AGE_TICKS; would is the newest play the bot suggested or
     would have played (ControlState.note_would) at or before that tick, within
-    PAIR_MAX_AGE_TICKS, or None.
+    PAIR_MAX_AGE_TICKS, whose hand held the played card (the newest one when
+    none did, or when the suggestions carry no hand), or None.
     """
     who: str
     card: int
@@ -414,6 +422,17 @@ class PlayAttribution:
                         "would_same_card": self.would_same_card,
                         "would_tile_dist": None if wd is None else round(wd, 2)})
         return rec
+
+
+def _held(s: Suggestion, card: int) -> bool:
+    """Whether suggestion `s` was decided with `card` in hand (True when it carries no hand)."""
+    hand = s.extra.get(HAND_KEY) if s.extra else None
+    if hand is None:
+        return True
+    try:
+        return int(card) in {int(c) for c in hand}
+    except (TypeError, ValueError):
+        return True
 
 
 def _tile_dist(s: Suggestion | None, x_mt: float | None, y_mt: float | None) -> float | None:
@@ -491,7 +510,7 @@ class PlayAttributor:
 
     def classify(self, play: OwnPlay, *, mode: str,
                  lookup: Callable[[int], Suggestion | None],
-                 would: Callable[[int], Suggestion | None] | None = None) -> PlayAttribution:
+                 would: Callable[..., Suggestion | None] | None = None) -> PlayAttribution:
         if play.tap_tick is not None:                       # matched upstream: a bot play
             tap = self._take(play.card, play.tick, play.tap_tick) or self._take(play.card, play.tick)
             lag = play.tick - play.tap_tick
@@ -509,11 +528,13 @@ class PlayAttributor:
 
     def human(self, play: OwnPlay, *, mode: str,
               lookup: Callable[[int], Suggestion | None],
-              would: Callable[[int], Suggestion | None] | None = None) -> PlayAttribution:
+              would: Callable[..., Suggestion | None] | None = None) -> PlayAttribution:
+        """A human play. would(tick, card) -> the would-play to compare it with."""
         lag = self.lag_estimate()
         est = play.tick - lag
         return PlayAttribution(HUMAN, play.card, play.tick, mode, est, lag, play.x_mt, play.y_mt,
-                               play.uid, lookup(est), would=None if would is None else would(est))
+                               play.uid, lookup(est),
+                               would=None if would is None else would(est, play.card))
 
     def expire(self, tick: int | None) -> list[BotTap]:
         """Drop and return the taps not seen within max_lag_ticks of `tick`."""
@@ -1402,23 +1423,35 @@ class ControlState:
                 return None if tick - s.tick > self.pair_max_age_ticks else s
         return None
 
-    def _would_at_locked(self, tick: int) -> Suggestion | None:
+    def _would_at_locked(self, tick: int, card: int | None = None) -> Suggestion | None:
         """The newest play suggestion or would-play at or before `tick`, within
-        pair_max_age_ticks (the later of the two kinds; a suggestion on a tie)."""
+        pair_max_age_ticks (the later of the two kinds; a suggestion on a tie). With `card`:
+        the newest one whose hand (extra HAND_KEY) held `card`, or that carries no hand; the
+        newest of all when none did (module doc: the drag empties the slot first)."""
         best: Suggestion | None = None
+        newest: Suggestion | None = None
         for source in (self._history, self._would):
+            first: Suggestion | None = None
             for s in reversed(source):
                 if s.tick is None or s.is_wait or s.tick > tick:
                     continue
-                if tick - s.tick <= self.pair_max_age_ticks and (best is None or s.tick > best.tick):
-                    best = s
-                break
-        return best
+                if tick - s.tick > self.pair_max_age_ticks:
+                    break
+                if first is None:
+                    first = s
+                if card is None or _held(s, card):
+                    if best is None or s.tick > best.tick:
+                        best = s
+                    break
+            if first is not None and (newest is None or first.tick > newest.tick):
+                newest = first
+        return best if best is not None else newest
 
-    def would_at(self, tick: int) -> Suggestion | None:
-        """The newest play the bot suggested or would have played at or before `tick`."""
+    def would_at(self, tick: int, card: int | None = None) -> Suggestion | None:
+        """The newest play the bot suggested or would have played at or before `tick` (with
+        `card`: preferring one whose hand held it, _would_at_locked)."""
         with self._lock:
-            return self._would_at_locked(int(tick))
+            return self._would_at_locked(int(tick), None if card is None else int(card))
 
     def suggestion_at(self, tick: int) -> Suggestion | None:
         """The latest suggestion made at or before `tick` (None if older than pair_max_age_ticks)."""

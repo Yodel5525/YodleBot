@@ -108,6 +108,7 @@ class FakePerception:
         self.seen = []
         self.new_battles = 0
         self.end_battles = 0
+        self.kept_towers = []
         self.own_taps = []
 
     def perceive(self, frame):
@@ -120,8 +121,9 @@ class FakePerception:
     def new_battle(self):
         self.new_battles += 1
 
-    def end_battle(self):
+    def end_battle(self, *, keep_towers=False):
         self.end_battles += 1
+        self.kept_towers.append(keep_towers)
 
     def note_own_tap(self, card, tick, *, slot, aim_mt, t):
         self.own_taps.append((card, tick, slot, tuple(aim_mt)))
@@ -518,6 +520,40 @@ def test_human_plays_are_compared_with_what_the_bot_would_play(tmp_path):
     assert any("| would Log -> (13, 22) @" in line for line in res.lines)
 
 
+def drag_script(land_tick=126):
+    """standard_script's battle stretched to tick 140: from tick 98 the Log's slot (0) reads
+    empty, the human dragging it, and the Log lands at `land_tick` (est. tap 26 ticks before)."""
+    log = OwnLanding(card=7, slot=-1, tap_tick=land_tick, land_tick=land_tick, x_mt=4500.0,
+                     y_mt=25000.0, uid=9)
+    items = [menu_vf(t_of(0)), menu_vf(t_of(1))]
+    for k in range(36):
+        i, tick = 2 + k, 70 + 2 * k
+        vf = battle_vf(t_of(i), tick, own=[log] if tick == land_tick else ())
+        if tick >= 98:
+            vf.hud.hand = [VP.EMPTY_CARD, 2, 6, 4]
+        items.append(vf)
+    items += [end_vf(t_of(38 + k), tick=142) for k in range(5)]
+    items += [menu_vf(t_of(43 + k)) for k in range(3)]
+    return [(t_of(i), item) for i, item in enumerate(items)]
+
+
+def test_a_human_play_is_compared_with_a_would_play_that_could_choose_its_card(tmp_path):
+    """The HUD slot empties when the drag starts, before the card is placed: the would-play
+    made during the drag (tick 100, the Log's slot masked: it would play the Hog) never had
+    the Log to choose. The human Log is compared with the newest would-play whose hand still
+    held it (tick 90: the Log), which each would-play keeps in its extra."""
+    res = run_script(tmp_path, drag_script(), mode=CT.MANUAL, taps=True, play_ticks=())
+    would = {f["extra"]["decision"]["tick"]: f["extra"]["would"] for f in res.records["frame"]
+             if "would" in f.get("extra", {})}
+    assert sorted(would)[:3] == [90, 100, 110]
+    assert (would[90]["card"], would[90]["extra"]["hand"]) == (7, [7, 2, 6, 4])
+    assert (would[100]["card"], would[100]["extra"]["hand"]) == (2, [VP.EMPTY_CARD, 2, 6, 4])
+    [human] = res.records["human_play"]
+    assert (human["card"], human["tap_tick"], human["bot"]["card"]) == (7, 100, -1)
+    assert (human["would"]["tick"], human["would"]["card"], human["would_age_ticks"]) == (90, 7, 10)
+    assert human["would_same_card"] is True
+
+
 def test_the_start_frames_events_are_not_recorded_twice(tmp_path):
     """The frame a battle starts on carries what the deriver reported BEFORE the start reset
     it; the fresh deriver reports what is still on the board again, so that frame's events are
@@ -733,6 +769,86 @@ def test_live_perception_survives_a_failing_detector():
     vf = p.perceive(Frame(1.0, battle_image(), 0.0))
     assert vf.screen == SCREEN_BATTLE and vf.tick == 100 and vf.hud.hand == HAND and vf.tracks == []
     assert p.detect_errors == 1 and str(p.last_detect_error) == "CUDA out of memory"
+
+
+def test_live_perception_survives_a_failing_board_chain():
+    """Not only detect(): the HP bars, the ground points, the tracker and the events run on
+    the detector's output and have never run on the pinned detector's real frames. A failure
+    there costs the frame its units and events; its HUD and tick still count."""
+
+    class BrokenTracker:
+        def update(self, obs, tick):
+            raise ValueError("bad box")
+
+        def tracks(self):
+            return []
+
+        def reset(self):
+            pass
+
+    size = (225, 400)
+    gx, gy = GEOMETRY.world_to_px(9000.0, 10000.0, size)
+    knight = Detection("Knight", 0.9, 0.9, (gx - 10.0, gy - 30.0, gx + 10.0, gy), (float(gx), float(gy)))
+    p = VP.LivePerception(hud_reader=FakeHudReader([100]), tracker=BrokenTracker(),
+                          deriver=EV.EventDeriver(EV.EventTables({}), own_deck=range(8)),
+                          geometry=GEOMETRY, detector=FakeDetector([knight], size))
+    vf = p.perceive(Frame(1.0, battle_image(size), 0.0))
+    assert vf.screen == SCREEN_BATTLE and vf.tick == 100 and vf.hud.hand == HAND
+    assert vf.tracks == [] and vf.events.opp_plays == [] and vf.events.own_landings == []
+    assert (p.detect_errors, str(p.last_detect_error), p.detect_frames) == (1, "bad box", 0)
+
+
+class TowerKeepingHud(FakeHudReader):
+    """FakeHudReader with HudReader's reset(keep_towers=) and reset_towers()."""
+
+    def __init__(self, ticks):
+        super().__init__(ticks)
+        self.calls = []
+
+    def reset(self, *, keep_towers=False):
+        self.resets += 1
+        self.calls.append("keep" if keep_towers else "all")
+
+    def reset_towers(self):
+        self.calls.append("towers")
+
+
+def test_a_battle_lost_without_its_end_screen_keeps_its_towers_until_a_new_one_starts():
+    """A battle that ended on a misread clock, a stopped clock or 8 s off the battle screen
+    may come back: the HUD is reset but for the towers (a destroyed tower would read full
+    again), also by the gap reset; a battle joined in the middle is that battle and keeps them,
+    a clean start is a new battle and starts them again. The end screen resets everything."""
+    hud = TowerKeepingHud([2000, 2100, 100])
+    p = VP.LivePerception(hud_reader=hud, tracker=None, deriver=None, geometry=GEOMETRY, detector=None)
+    p.perceive(Frame(1.0, battle_image(), 0.0))            # tick 2000
+    p.new_battle()
+    p.end_battle(keep_towers=True)                         # e.g. a misread clock jumped back
+    assert hud.calls == ["keep"] and p.towers_kept
+    p.perceive(Frame(10.0, battle_image(), 0.0))           # back after 9 s (tick 2100): the gap reset
+    assert hud.calls == ["keep", "keep"]
+    p.new_battle()                                         # joined at 2100: the same battle
+    assert hud.calls == ["keep", "keep"] and not p.towers_kept and p.primed_until == 2110
+    p.end_battle(keep_towers=True)
+    p.perceive(Frame(11.0, battle_image(), 0.0))           # tick 100: a clean start, a new battle
+    p.new_battle()
+    assert hud.calls == ["keep", "keep", "keep", "towers"] and p.primed_until is None
+    p.end_battle()                                         # the end screen: everything
+    assert hud.calls[-1] == "all" and not p.towers_kept
+    plain = FakeHudReader([100])                           # no reset_towers: reset whole
+    q = VP.LivePerception(hud_reader=plain, tracker=None, deriver=None, geometry=GEOMETRY, detector=None)
+    q.end_battle(keep_towers=True)
+    assert plain.resets == 1 and not q.towers_kept
+    reasons = ("end screen", "overtime over", "clock reset", "clock stopped", "left the battle screen")
+    assert [VP.keeps_towers(r) for r in reasons] == [False, False, True, True, True]
+
+
+def test_the_runner_keeps_the_towers_only_when_the_end_screen_was_not_seen(tmp_path):
+    res = run_script(tmp_path / "a", standard_script())
+    assert res.records["battle_end"][0]["reason"] == "end screen" and res.perception.kept_towers == [False]
+    items = [vf for _, vf in standard_script()[:28]] + [menu_vf(t_of(28 + k)) for k in range(95)]
+    res = run_script(tmp_path / "b", [(t_of(i), vf) for i, vf in enumerate(items)])
+    assert res.records["battle_end"][0]["reason"] == "left the battle screen"
+    assert res.perception.kept_towers == [True] and "perception_error" not in res.records
 
 
 def test_the_rows_hand_shows_the_card_in_flight_and_never_token_1():
@@ -1181,6 +1297,32 @@ def test_main_refuses_a_bad_combination_before_anything_starts(tmp_path, monkeyp
     assert VP.main(["--tap", "--decide", "legacy"]) == 2
     assert "--decide legacy is for dry runs" in capsys.readouterr().out
     assert calls == {} and not (tmp_path / "reports").exists()
+
+
+def test_a_dry_run_over_adb_verifies_the_device_before_its_first_screencap(tmp_path, monkeypatch, capsys):
+    """--source adb without --tap reads the device by screencap: emulator.verify runs first
+    (no other MuMu instance is touched), and its refusal stops the runner before any frame
+    source is opened."""
+    calls = {}
+    ckpt = rehearsal_env(tmp_path, monkeypatch, calls)
+    mods = fake_live_modules(calls)
+
+    def refuse(serial, adb):
+        calls["verify"] = (serial, adb)
+        raise SystemExit(f"refusing to run: {serial} is the CLASH OF CLANS instance.")
+
+    mods["scripts.emulator"] = SimpleNamespace(verify=refuse)
+    monkeypatch.setattr(VP, "import_live_modules", lambda: mods)
+    opened = []
+    monkeypatch.setattr(mods["scripts.vision.capture"], "open_source",
+                        lambda *a, **kw: opened.append((a, kw)))
+    rc = VP.main(["--source", "adb", "--no-window", "--hotkey", "none", "--manual-file", "none",
+                  "--ckpt", str(ckpt), "--record-images", "0"])
+    out = capsys.readouterr().out
+    assert rc == 2, out
+    assert "--source adb reads the device over adb, and emulator.verify refused it" in out
+    assert "CLASH OF CLANS" in out and "verify" in calls and opened == []
+    assert not lock_left(tmp_path)
 
 
 # ---------------------------------------------------------------------------

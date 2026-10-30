@@ -423,8 +423,10 @@ class ReplayPerception:
     recorded=True takes the recording's detections (step(recorded=VisionFrame)) instead of
     running the detector. step(detect=True) runs the detector on a battle-screen image even
     without a tick (a labelled image is scored either way). As live (LivePerception): the HUD
-    is never reset inside a battle (only at its end, or outside one after a gap), and a battle
-    joined in the middle primes the tracks on the board."""
+    is never reset inside a battle (only at its end, or outside one after a gap), a battle that
+    ended without its end screen keeps its towers until the next start shows a new battle
+    (end_battle(keep_towers=True), vision_play.keeps_towers), and a battle joined in the middle
+    primes the tracks on the board."""
 
     def __init__(self, *, hud_reader: Any, tracker: Any, deriver: Any, geometry: Any,
                  detector: Any = None, names: Names | None = None, ticks: str = TICKS_CLOCK,
@@ -446,6 +448,7 @@ class ReplayPerception:
         self._t_origin: float | None = None
         self.in_battle = False
         self.primed_until: int | None = None
+        self.towers_kept = False
         self._last_tick: int | None = None
 
     def new_battle(self) -> None:
@@ -453,19 +456,30 @@ class ReplayPerception:
         tick = self._last_tick if self.ticks == TICKS_CLOCK else None    # time ticks: no battle clock
         self.primed_until = (tick + VP.PRIME_TICKS if tick is not None and tick > VP.CLEAN_START_TICK
                              else None)
+        if self.towers_kept:
+            if self.primed_until is None:              # a clean start: a new battle, new towers
+                self.hud_reader.reset_towers()
+            self.towers_kept = False
         self.tracker.reset()
         if self.primed_until is None:
             self.deriver.reset()
         else:
             self.deriver.reset(prime_until_tick=self.primed_until)
 
-    def end_battle(self) -> None:
+    def end_battle(self, *, keep_towers: bool = False) -> None:
         self.in_battle = False
         self.primed_until = None
-        self.hud_reader.reset()
+        self.towers_kept = bool(keep_towers) and callable(getattr(self.hud_reader, "reset_towers", None))
+        self._reset_hud()
         self.tracker.reset()
         self.deriver.reset()
         self._anchor = None
+
+    def _reset_hud(self) -> None:
+        if self.towers_kept:
+            self.hud_reader.reset(keep_towers=True)
+        else:
+            self.hud_reader.reset()
 
     def start_clock(self, t: float) -> None:
         """Time ticks count from the first image (call before its taps are replayed)."""
@@ -537,7 +551,7 @@ class ReplayPerception:
         vf.screen = SCREEN_BATTLE
         if (not self.in_battle and self._last_panel_t is not None
                 and t - self._last_panel_t > self.hud_reset_gap_s):
-            self.hud_reader.reset()                 # back on a battle screen after a while
+            self._reset_hud()                       # back on a battle screen after a while
         self._last_panel_t = t
         vf.hud = self.hud_reader.read(img, t)
         report = getattr(self.hud_reader, "report", None)
@@ -906,7 +920,10 @@ class Replay:
         events = self.battle.update(step.battle_vf)
         if "end" in events:
             self._keep_unknown_tracks()                # the deriver forgets them at a reset
-            self.perception.end_battle()
+            if VP.keeps_towers(self.battle.ended_reason):
+                self.perception.end_battle(keep_towers=True)
+            else:
+                self.perception.end_battle()
             self.segment += 1
         if "start" in events:
             self._keep_unknown_tracks()

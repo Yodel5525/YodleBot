@@ -516,6 +516,25 @@ def test_would_play_suggestions_are_compared_and_never_tapped():
     assert ctl.current_would is None and ctl.would_at(120) is None
 
 
+def test_a_human_play_pairs_with_a_suggestion_whose_hand_held_its_card():
+    """The HUD slot empties when the drag starts, before the card is placed: a suggestion or
+    would-play made with the dragged card's slot empty never had that card to choose. A human
+    play is compared with the newest one whose hand (extra "hand") held the card; when none in
+    the window did, with the newest."""
+    ctl = make_ctl(C.MANUAL, names=NAMES)
+    held = ctl.note_would(2, slot=1, tile=(13, 22), tick=90, hand=[7, 2, 6, 4])
+    ctl.note_would(7, slot=0, tile=(4, 20), tick=100, hand=[7, -1, 6, 4])     # the Hog dragged
+    s = ctl.suggest(6, slot=2, tile=(8, 26), tick=102, hand=[7, -1, 6, 4])
+    assert ctl.would_at(104) is s and ctl.would_at(104, 2) is held
+    [a] = ctl.attribute([C.OwnPlay(2, 130, 13500.0, 22500.0)], tick=130)       # est. tap 104
+    assert (a.who, a.tap_tick, a.would is held, a.would_same_card) == (C.HUMAN, 104, True, True)
+    rec = [d for k, d in ctl.drain_log() if k == "human_play"][0]
+    assert (rec["would"]["tick"], rec["would"]["extra"]["hand"], rec["would_age_ticks"]) == (
+        90, [7, 2, 6, 4], 14)
+    assert ctl.would_at(104, 5) is s                  # no suggestion held card 5: the newest
+    assert ctl.would_at(200, 2) is None
+
+
 def test_note_human_play_pairs_with_a_recent_suggestion_only():
     ctl = make_ctl(C.MANUAL, names=NAMES)
     ctl.suggest(2, slot=0, tile=(3, 15), tick=100)

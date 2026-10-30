@@ -360,6 +360,8 @@ def test_v2_rows_add_the_observer_inputs():
     obs = make(ctx)
     assert isinstance(obs, PS.LiveObserver) and obs.delay == 24
     assert obs.opp.start_tick == 120 and obs.opp.late          # started after the lockout
+    # a first clock reading of 2:55 (tick 110: 2:56 was missed) is still in time
+    assert not make(VP.BattleContext(4, 0.0, 110)).opp.late and make(VP.BattleContext(5, 0.0, 111)).opp.late
     assert obs.inputs(300)["opp_elixir"] == [10_000, False]    # full from tick 224
     blind = VP.make_observer(CATALOGUE, plan, law=LAW, blind=True,
                              observer_cls=PS.LiveObserver)(VP.BattleContext(2, 0.0, 30))

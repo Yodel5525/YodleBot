@@ -13,9 +13,10 @@ the battle clock is read and running, the bottom HUD panel is there and the end 
 It never reads the game's memory (scripts/gamestate is not imported) and it never starts or
 restarts the emulator.
 
-DRY RUN BY DEFAULT. Decisions are made, shown and logged, nothing is tapped, and no adb is opened
-(--source auto is PrintWindow alone then; its adb fallback comes only with --tap, after
-emulator.verify). --tap enables taps; use it only while you watch. Before the first tap scripts/emulator.verify() must pass (the serial
+DRY RUN BY DEFAULT. Decisions are made, shown and logged, nothing is tapped, and with --source
+auto (the default) or printwindow no adb is opened (auto is PrintWindow alone then; its adb
+fallback comes only with --tap, after emulator.verify; an explicit --source adb runs
+emulator.verify before its first screencap). --tap enables taps; use it only while you watch. Before the first tap scripts/emulator.verify() must pass (the serial
 is the Clash Royale instance) and `adb shell wm size` must report 1080x1920. A file named STOP in
 the repo root ends the runner in any mode (it refuses to start while STOP exists). One runner at a
 time: reports/vision_play/vision_play.lock is held by the running process (the OS releases it if
@@ -72,7 +73,10 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      spell tracks as spells in flight
   -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard;
      a v2 model's ability buttons stay masked: our deck has none and the HUD reads none), or
-     with --decide legacy the rule rs_eval measured (dry runs only)
+     with --decide legacy the rule rs_eval measured (dry runs only). Live, legacy is not quite
+     that rule while a card is in flight: under rs_eval --delay the card stays in its slot and
+     an argmax on it finds no legal tile (a wait); live, its HUD slot is empty from the drag to
+     the refill (about 1.5 s) and masked, so legacy plays the next-best card instead
   -> ControlState.suggest / should_tap -> ScreenGuard (the NEWEST captured frame, taken after the
      one decided on, must still show the battle screen: no tap lands on an end screen whose OK
      button covers hand slot 1) -> AdbTapper: ONE persistent `adb -s SERIAL shell`, a play is
@@ -686,6 +690,18 @@ class InstanceLock:
 CLEAN_START_TICK = 300
 #: ... tracks first seen within this many ticks of such a start are primed (events.py).
 PRIME_TICKS = 10
+#: BattleState end reasons after which the game is over: the next battle is a new one.
+FINAL_END_REASONS = frozenset({"end screen", "overtime over"})
+
+
+def keeps_towers(reason: str | None) -> bool:
+    """Whether a battle that ended for `reason` keeps its tower readings until the next start
+    (LivePerception.end_battle): any end but the end screen or overtime's 0:00 (a misread
+    clock jumping back, a stopped clock, 8 s off the battle screen) may be the same battle
+    coming back, where a destroyed tower must stay destroyed."""
+    return reason not in FINAL_END_REASONS
+
+
 #: obs_row's hand token is card + 2: a slot written as -2 is token 0 (pad, left out of the
 #: model's attention), never token 1 ("unknown card"), which no training hand ever held.
 ROW_PAD_CARD = -2
@@ -706,10 +722,17 @@ class LivePerception:
     end_battle): a destroyed tower reads as rubble, no digits and no bar, which a fresh tower
     filter takes for occlusion of a full tower, so a reset there would bring the tower back
     for the rest of the battle (the clock and elixir filters bridge a gap by themselves).
+    end_battle(keep_towers=True) (a battle that ended without its end screen or overtime's
+    0:00, keeps_towers: a misread clock jumping back, a stopped clock, 8 s off the battle
+    screen) keeps the tower tracker through those resets until the next battle starts: a
+    battle joined in the middle is the same battle coming back and keeps it; a clean start is
+    a new battle and starts the towers again (a HUD reader without reset_towers is reset
+    whole, as before).
     new_battle resets the tracker and the deriver; a battle joined in the middle (its first
     tick above CLEAN_START_TICK) primes what is on the board (the deriver's prime_until_tick).
-    A failing detector (DetectorError, CUDA out of memory) costs the frame its units only:
-    the HUD, the tick and the coasting tracks are still returned, `detect_errors` counts the
+    A failing board chain (the detector: DetectorError, CUDA out of memory; or the HP bars,
+    the tracker or the events on its output) costs the frame its units and events only: the
+    HUD, the tick and the coasting tracks are still returned, `detect_errors` counts the
     failures and `last_detect_error` keeps the last one.
     """
 
@@ -729,11 +752,16 @@ class LivePerception:
         self.last_detect_error: BaseException | None = None
         self.in_battle = False
         self.primed_until: int | None = None
+        self.towers_kept = False
 
     def new_battle(self) -> None:
         self.in_battle = True
         tick = None if self._anchor is None else int(self._anchor[0])
         self.primed_until = tick + PRIME_TICKS if tick is not None and tick > CLEAN_START_TICK else None
+        if self.towers_kept:
+            if self.primed_until is None:              # a clean start: a new battle, new towers
+                self.hud_reader.reset_towers()
+            self.towers_kept = False
         if self.tracker is not None:
             self.tracker.reset()
         if self.deriver is not None:
@@ -742,15 +770,22 @@ class LivePerception:
             else:
                 self.deriver.reset(prime_until_tick=self.primed_until)
 
-    def end_battle(self) -> None:
+    def end_battle(self, *, keep_towers: bool = False) -> None:
         self.in_battle = False
         self.primed_until = None
-        self.hud_reader.reset()
+        self.towers_kept = bool(keep_towers) and callable(getattr(self.hud_reader, "reset_towers", None))
+        self._reset_hud()
         if self.tracker is not None:
             self.tracker.reset()
         if self.deriver is not None:
             self.deriver.reset()
         self._anchor = None
+
+    def _reset_hud(self) -> None:
+        if self.towers_kept:
+            self.hud_reader.reset(keep_towers=True)
+        else:
+            self.hud_reader.reset()
 
     def row_hand(self, hand: Sequence[int]) -> list[int]:
         """The hand as the model's row shows it (the state decide() reads keeps -1, so the slot
@@ -804,28 +839,36 @@ class LivePerception:
         vf.screen = SCREEN_BATTLE
         if (not self.in_battle and self._last_panel_t is not None
                 and t - self._last_panel_t > self.hud_reset_gap_s):
-            self.hud_reader.reset()                  # back on a battle screen after a while
+            self._reset_hud()                        # back on a battle screen after a while
         self._last_panel_t = t
         vf.hud = self.hud_reader.read(rgb, t)
         vf.tick = vf.hud.clock_tick
         tick = self._track_tick(vf.tick, t)
         if tick is None or self.detector is None:
             return vf
+        # The whole board chain is guarded, not only detect(): HP bars, ground points, the
+        # tracker and the events have never run on the pinned detector's real output, and the
+        # detector runs on exactly the frames that start a battle (a tick to track on). An
+        # exception here costs the frame its units and events; its HUD and tick still reach
+        # BattleState and the decision.
         try:
             res = self.detector.detect(rgb)
+            units, spells, bars = res.units(), res.spells(), res.bars()
+            reads = hpbars.read_unit_hp(rgb, [d.box for d in units], [b.box for b in bars])
+            obs = observations_from_detections(list(units) + list(spells), self.geometry, res.frame_size)
+            hpbars.annotate_observations(obs[:len(units)], reads)
+            vf.tracks = self.tracker.update(obs, tick)
+            vf.detections = list(res.detections)
+            vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker)
         except Exception as exc:                     # no units this frame; the HUD still counts
             self.detect_errors += 1
             self.last_detect_error = exc
-            if self.tracker is not None:
-                vf.tracks = list(self.tracker.tracks())
+            vf.events = Events()
+            try:
+                vf.tracks = [] if self.tracker is None else list(self.tracker.tracks())
+            except Exception:
+                vf.tracks = []
             return vf
-        units, spells, bars = res.units(), res.spells(), res.bars()
-        reads = hpbars.read_unit_hp(rgb, [d.box for d in units], [b.box for b in bars])
-        obs = observations_from_detections(list(units) + list(spells), self.geometry, res.frame_size)
-        hpbars.annotate_observations(obs[:len(units)], reads)
-        vf.tracks = self.tracker.update(obs, tick)
-        vf.detections = list(res.detections)
-        vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker)
         self.detect_frames += 1
         return vf
 
@@ -1274,7 +1317,10 @@ class VisionPlay:
         t0 = self.clock()
         d, state = self.decider.decide(vf, ctx)
         ms["decide"] = round((self.clock() - t0) * 1000.0, 2)
-        s = self.control.suggest(**d.suggest_kwargs())
+        kw = d.suggest_kwargs()
+        if d.is_play:                                  # the hand it chose from (human-play pairing)
+            kw[CT.HAND_KEY] = [int(c) for c in vf.hud.hand]
+        s = self.control.suggest(**kw)
         px = None
         if d.is_play:
             px = {"card": list(self.geometry.card_slot_px(d.slot, size=self.device_size)),
@@ -1357,7 +1403,11 @@ class VisionPlay:
             ms["would"] = round((self.clock() - t0) * 1000.0, 2)
         if w is None:
             return None
-        self._would = self.control.note_would(**w.suggest_kwargs())
+        # The hand it was decided with: a human play is compared with the newest would-play
+        # whose hand still held the played card (the slot empties when the drag starts).
+        kw = w.suggest_kwargs()
+        kw[CT.HAND_KEY] = [int(c) for c in vf.hud.hand]
+        self._would = self.control.note_would(**kw)
         return self._would
 
     def _say_frame_size(self, vf: VisionFrame) -> None:
@@ -1418,7 +1468,10 @@ class VisionPlay:
                   hud_crowns=list(hud.crowns), towers=towers, **stats)
         self.out(f"battle {n} over ({self.battle.ended_reason}) at tick {self.battle.last_tick}")
         try:
-            self.perception.end_battle()
+            if keeps_towers(self.battle.ended_reason):   # perhaps the same battle coming back
+                self.perception.end_battle(keep_towers=True)
+            else:
+                self.perception.end_battle()
         except Exception as exc:
             self._error("perception_error", exc)
         self.ctx = None
@@ -1546,7 +1599,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--source", default="auto",
                     help="auto | printwindow | adb | a recorded session to replay (taps refused). "
                          "auto: PrintWindow, with the adb fallback only under --tap (after "
-                         "emulator.verify); a dry run never opens adb")
+                         "emulator.verify); with auto or printwindow a dry run opens no adb; "
+                         "adb runs emulator.verify before its first screencap")
     ap.add_argument("--replay-fast", action="store_true",
                     help="with a recorded --source: every image once, as fast as the chain runs "
                          "(default: in real time, newer images replace ones the loop was too slow for)")
@@ -1557,8 +1611,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=None, help="seed of the decision rng")
     ap.add_argument("--decide", choices=(RD.MODE_LIVE, RD.MODE_LEGACY), default=RD.MODE_LIVE,
                     help="the decision rule: live (default: pending-slot mask, fallback, cap rule, "
-                         "lane guard) or legacy (the rule rs_eval measured the 46%% with; dry runs "
-                         "only: it re-taps a card in flight, so --tap refuses it)")
+                         "lane guard) or legacy (the rule rs_eval measured the 46%% with, but for "
+                         "the time a card is in flight: its empty HUD slot is masked, so legacy "
+                         "plays the next-best card where rs_eval waited; dry runs only: it re-taps "
+                         "a card in flight, so --tap refuses it)")
     ap.add_argument("--would-every", type=int, default=10, metavar="TICKS",
                     help="while the bot does not tap, what it would play now is worked out on a wait "
                          "at most once per this many ticks, for the human-versus-bot record (0: never)")
@@ -1810,6 +1866,20 @@ def _main(args: argparse.Namespace) -> int:
         kind = args.source
         if kind == "auto" and tapper is None and sys.platform == "win32":
             kind = "printwindow"
+        if not replay and tapper is None and kind in ("adb", "auto"):
+            # An adb frame source in a dry run (--source adb, or auto off Windows): screencap
+            # reads that device, so the serial must first be shown to be the Clash Royale
+            # instance, as before a tap (no other MuMu instance is touched).
+            try:
+                mods["scripts.emulator"].verify(serial, adb)
+            except SystemExit as exc:
+                print(f"refusing to start: --source {args.source} reads the device over adb, and "
+                      f"emulator.verify refused it: {exc}")
+                return 2
+            except OSError as exc:                     # adb itself would not start
+                print(f"refusing to start: --source {args.source} reads the device over adb, and "
+                      f"emulator.verify failed: {_short(exc)}")
+                return 2
         try:
             if replay:
                 source = CAP.FileReplaySource(Path(args.source), realtime=not args.replay_fast,

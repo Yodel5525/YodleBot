@@ -1269,6 +1269,10 @@ class HandState:
     swaps: int = 0                      # slot pairs swapped (rule 4)
 
 
+#: HandTracker._dealt's mark for a card in hand at the tracker's start (nothing left the cycle).
+_AT_START = (-1, None)
+
+
 class HandTracker:
     """Hand readings over time -> 4 distinct cards, empty slots, the next card.
 
@@ -1302,9 +1306,12 @@ class HandTracker:
     6. A slot unknown so far (empty at the first frame with a card: the deal,
        or never read) that reads empty stays unknown and takes the first card
        it reads, without the prior: a slot that was never seen holding a card
-       was not played. A frame on which no slot shows a card and two or more
-       cards would leave the hand at once is a deal or a covered panel, not
-       plays: it is held.
+       was not played. That first card counts as the slot's refill for rule 4:
+       a card still animating in, misread and then voted to another card
+       within `refill_fix_s`, is re-dealt in place (the cycle as if the right
+       card had been read first; no play logged). A frame on which no slot
+       shows a card and two or more cards would leave the hand at once is a
+       deal or a covered panel, not plays: it is held.
     """
 
     def __init__(self, deck: Sequence[int] | None = None, *, prior_min_score: float = 0.25,
@@ -1329,6 +1336,7 @@ class HandTracker:
         self._votes: dict[int, tuple[int, int]] = {}
         self._swap_votes: dict[tuple[int, int], int] = {}
         self._refilled: dict[int, tuple[float, int, int | None]] = {}   # slot -> (t, card, cycle index)
+        self._dealt: dict[int, tuple[int, int | None] | None] = {}      # slot -> what its deal took from the cycle
         self.started = False
         self.plays: list[tuple[float, int, int]] = []       # (t, slot, card) seen played
         self.corrections = 0
@@ -1383,6 +1391,10 @@ class HandTracker:
         if nxt is not None and nxt not in raw:
             self.next = nxt
             self.cycle[0] = nxt
+        for slot, c in enumerate(self.hand):       # the start's cards are dealt cards (rule 6)
+            if c is not None:
+                self._refilled[slot] = (float(t), int(c), None)
+                self._dealt[slot] = _AT_START
         self._infer()
 
     def _play(self, slot: int, card: int, t: float) -> None:
@@ -1393,6 +1405,7 @@ class HandTracker:
         self.plays.append((t, slot, card))
         self._votes.pop(slot, None)
         self._refilled.pop(slot, None)
+        self._dealt.pop(slot, None)
 
     def _refill(self, slot: int, card: int, t: float | None = None) -> None:
         self.hand[slot] = card
@@ -1408,9 +1421,29 @@ class HandTracker:
             self.cycle.pop(k)
         elif self.deck:                                   # inconsistent: rebuild from the deck
             self.cycle = [c for c in self.deck if c not in self.hand]
+        self._dealt.pop(slot, None)
         if t is not None:
             self._refilled[slot] = (float(t), int(card), k)
         self._infer()
+
+    def _take_unknown(self, card: int) -> tuple[int, int | None] | None:
+        """An unknown slot's card leaves the cycle: the card itself when the cycle knows it,
+        else one unknown place (never the last one). Returns (index, what was taken), None."""
+        if card in self.cycle:
+            k = self.cycle.index(card)
+            self.cycle.pop(k)
+            return k, card
+        if None in self.cycle and len(self.cycle) > 1:
+            k = self.cycle.index(None)
+            self.cycle.pop(k)
+            return k, None
+        return None
+
+    def _deal(self, slot: int, card: int, t: float) -> None:
+        """Rule 6: an unknown slot takes the first card it reads, as its refill for rule 4."""
+        self.hand[slot] = card
+        self._dealt[slot] = self._take_unknown(card)
+        self._refilled[slot] = (float(t), int(card), None)
 
     def _recent_refill(self, slot: int, t: float) -> bool:
         e = self._refilled.get(slot)
@@ -1418,10 +1451,21 @@ class HandTracker:
 
     def _fix_refill(self, slot: int, card: int) -> None:
         """The refill of `slot` was misread: it is `card`. The misread card goes back into the
-        cycle where the refill took it from, and `card` leaves the cycle; no play is logged."""
+        cycle where the refill took it from, and `card` leaves the cycle; no play is logged.
+        A misread deal (rule 6, or a card in hand at the start) is dealt again: the cycle as if
+        `card` had been read first."""
         _, wrong, k = self._refilled.pop(slot)
         self.hand[slot] = card
         self._votes.pop(slot, None)
+        if slot in self._dealt:                           # a misread deal: dealt again
+            took = self._dealt.pop(slot)
+            if took is not _AT_START:                     # (the start's cycle left room for it)
+                if took is not None:
+                    self.cycle.insert(min(took[0], len(self.cycle)), took[1])
+                self._take_unknown(card)
+            self.fixes += 1
+            self._infer()
+            return
         if k is not None:
             self.cycle.insert(min(k, len(self.cycle)), wrong)
         if card in self.cycle:
@@ -1456,6 +1500,7 @@ class HandTracker:
             for s in (slot, j):
                 self._votes.pop(s, None)
                 self._refilled.pop(s, None)
+                self._dealt.pop(s, None)
             self.swaps += 1
 
     def _prefer(self, expected: int | None, r: int, sr: SlotRead) -> int:
@@ -1516,11 +1561,7 @@ class HandTracker:
                 self._swap(slot, raw, counted)
                 continue
             if prev is None:
-                self.hand[slot] = r
-                if r in self.cycle:
-                    self.cycle.remove(r)
-                elif None in self.cycle and len(self.cycle) > 1:
-                    self.cycle.remove(None)
+                self._deal(slot, r, t)
                 continue
             if r == prev:
                 self._votes.pop(slot, None)
@@ -1709,14 +1750,24 @@ class HudReader:
             self._clock_reads += 1
         return self._clock_reads >= self.towers_clock_reads
 
-    def reset(self) -> None:
-        self._clock_reads = 0
+    def reset(self, *, keep_towers: bool = False) -> None:
+        """Start every filter again. keep_towers=True keeps the tower tracker (and its clock
+        confirmation): the caller lost a battle that may come back (vision_play: a battle that
+        ended without its end screen), and a fresh tower filter would take a destroyed tower's
+        rubble (no digits, no bar) for occlusion of a full one; reset_towers() ends it once
+        the battle turns out to be a new one."""
         self._hand_clock_reads = 0
         self._hand_restarted = False
         self.clock.reset()
         self.elixir.reset()
-        self.towers.reset()
         self.hand.reset()
+        if not keep_towers:
+            self.reset_towers()
+
+    def reset_towers(self) -> None:
+        """Start the tower tracker (and the clock confirmation it waits for) again."""
+        self._clock_reads = 0
+        self.towers.reset()
 
     def _run(self, rep: HudReport, name: str, fn) -> Any:
         t0 = time.perf_counter()

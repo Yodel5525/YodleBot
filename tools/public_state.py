@@ -169,7 +169,7 @@ __all__ = ["OWN_TEAM", "ENEMY_TEAM", "SUBTILE_PER_MILLITILE", "REQUIRED_FIELDS",
            "PublicStateBuilder", "rs_state_from_vision", "sanitize_for_rebuild", "rebuild_card",
            "card_hitpoints", "off_water", "into_arena", "team_levels", "load_classes",
            "load_spawn_table", "default_fields", "OpponentElixir", "OwnTaps", "LiveObserver",
-           "row_inputs", "DEPLOY_LOCKOUT_TICKS", "TAP_MAX_AGE"]
+           "row_inputs", "DEPLOY_LOCKOUT_TICKS", "LATE_MARGIN_TICKS", "TAP_MAX_AGE"]
 
 #: royalesim.SUBTILE_PER_MILLITILE (18 sub-tiles per millitile); pass the engine's as `sub`.
 SUBTILE_PER_MILLITILE = 18
@@ -202,6 +202,11 @@ UNKNOWN_TEAM_POLICIES = ("half", "drop")
 #: RoyaleSim takes no play before this tick (match.DEPLOY_LOCKOUT_TICKS): a count that was
 #: watching by then has had the chance to see every play of the battle.
 DEPLOY_LOCKOUT_TICKS = 90
+#: ... and a watch that started within one displayed second after it is still in time: the
+#: runner's start tick is its first accepted clock reading, base + 10 of the second shown (2:56
+#: is tick 90, 2:55 tick 110), and a play made in that second is still a unit on the board when
+#: the detector starts (deploy times are 1 s or more), so the deriver reports it.
+LATE_MARGIN_TICKS = 20
 #: A sent tap not seen landing after this many ticks is assumed lost (rs_decide.PENDING_TICKS,
 #: live_play's 3 s).
 TAP_MAX_AGE = rs_decide.PENDING_TICKS
@@ -776,8 +781,10 @@ class OpponentElixir:
 
     @property
     def late(self) -> bool:
-        """Whether the bot started watching after the deploy lockout (plays may be unseen)."""
-        return self.start_tick > DEPLOY_LOCKOUT_TICKS
+        """Whether the bot started watching after the deploy lockout and one more displayed
+        second (LATE_MARGIN_TICKS: a first clock reading of 2:55 is in time): plays may be
+        unseen."""
+        return self.start_tick > DEPLOY_LOCKOUT_TICKS + LATE_MARGIN_TICKS
 
     @property
     def exact(self) -> bool:

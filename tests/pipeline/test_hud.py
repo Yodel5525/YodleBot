@@ -867,14 +867,16 @@ def test_hand_duplicates_resolved_by_the_weaker_slot():
 
 
 def test_hand_change_without_an_empty_frame():
+    # (more than refill_fix_s after the start: within it, the start's cards may still be
+    # misread deals, test_a_misread_deal_is_dealt_again_not_played)
     tr = H.HandTracker(deck=DECK)
     tr.update(reading([100, 101, 102, 103], 104), 0.0)
-    st = tr.update(reading([100, 101, 104, 103], 105), 0.5)      # slot 2 already shows the next card
+    st = tr.update(reading([100, 101, 104, 103], 105), 1.5)      # slot 2 already shows the next card
     assert (st.hand, st.next, st.cycle) == ((100, 101, 104, 103), 105, (105, None, None, 102))
-    assert tr.plays == [(0.5, 2, 102)]
-    assert tr.update(reading([106, 101, 104, 103], 105), 0.75).hand[0] == 100    # flicker: held
-    tr.update(reading([100, 101, 104, 103], 105), 1.0)
-    got = [tr.update(reading([106, 101, 104, 103], 105), t).hand[0] for t in (1.25, 1.5, 1.75)]
+    assert tr.plays == [(1.5, 2, 102)]
+    assert tr.update(reading([106, 101, 104, 103], 105), 1.75).hand[0] == 100    # flicker: held
+    tr.update(reading([100, 101, 104, 103], 105), 2.0)
+    got = [tr.update(reading([106, 101, 104, 103], 105), t).hand[0] for t in (2.25, 2.5, 2.75)]
     assert got == [100, 100, 106]              # three agreeing frames: accepted as a play
     assert tr.state().cycle == (105, 107, 102, 100)      # the one unseen deck card is inferred
 
@@ -944,6 +946,44 @@ def test_hand_slots_empty_at_the_start_are_dealt_without_the_prior():
     assert st.hand == (100, 101, 102, 103) and tr.plays == []
     tr.update(reading([VT.EMPTY_CARD, 101, 102, 103], 104), 1.0)     # one card leaves: a play
     assert tr.plays == [(1.0, 0, 100)]
+
+
+def test_a_misread_deal_is_dealt_again_not_played():
+    """A dealt card still animating in is misread (105 for 101), then read right for three
+    frames within refill_fix_s: the slot is dealt again in place, the cycle as if 101 had been
+    read first, and no phantom play of 105 (which would also have put 105 at the back of the
+    cycle). The same for a card in hand at the tracker's start; after refill_fix_s a change
+    by votes is a play again."""
+    tr = H.HandTracker(deck=DECK)
+    tr.update(reading([100, VT.EMPTY_CARD, VT.EMPTY_CARD, VT.EMPTY_CARD], 104), 0.0)
+    assert tr.cycle == [104] + [None] * 6
+    st = tr.update(reading([100, 105, VT.EMPTY_CARD, VT.EMPTY_CARD], 104), 0.25)    # misread deal
+    assert st.hand[1] == 105 and tr.cycle == [104] + [None] * 5
+    got = [tr.update(reading([100, 101, VT.EMPTY_CARD, VT.EMPTY_CARD], 104), t).hand[1]
+           for t in (0.3, 0.35, 0.4)]
+    assert got == [105, 105, 101]
+    st = tr.state()
+    assert (st.fixes, tr.plays, tr.cycle) == (1, [], [104] + [None] * 5)
+    # a misread deal of the next card: the next card goes back to the front of the cycle
+    nx = H.HandTracker(deck=DECK)
+    nx.update(reading([100, VT.EMPTY_CARD, VT.EMPTY_CARD, VT.EMPTY_CARD], 104), 0.0)
+    nx.update(H.HandReading((slot(100), slot(104), slot(VT.EMPTY_CARD), slot(VT.EMPTY_CARD)),
+                            slot(None)), 0.2)
+    assert nx.hand[1] == 104 and nx.cycle == [None] * 6
+    for t in (0.3, 0.35, 0.4):
+        nx.update(reading([100, 101, VT.EMPTY_CARD, VT.EMPTY_CARD], None), t)
+    assert nx.hand[1] == 101 and nx.cycle == [104] + [None] * 5 and nx.plays == []
+    # a card in hand at the start, misread: fixed in place; the start's cycle is kept
+    at = H.HandTracker(deck=DECK)
+    at.update(reading([100, 105, 102, 103], 104), 0.0)
+    for t in (0.1, 0.2, 0.3):
+        at.update(reading([100, 101, 102, 103], 104), t)
+    assert at.hand == [100, 101, 102, 103] and at.plays == [] and at.fixes == 1
+    assert at.cycle == [104, None, None, None]
+    # after refill_fix_s: a play by votes, as before
+    for t in (1.5, 1.6, 1.7):
+        at.update(reading([106, 101, 102, 103], 104), t)
+    assert at.hand[0] == 106 and at.plays == [(1.7, 0, 100)]
 
 
 def test_hand_slots_read_the_wrong_way_round_are_swapped():
@@ -1077,6 +1117,24 @@ def test_hud_reader_restarts_the_hand_once_the_clock_runs():
     for i, f in enumerate((hud_frame(), intro, hud_frame())):
         off.read(f, 0.25 * i)
     assert off.hand.plays == [(0.25, 1, 101)]
+
+
+def test_hud_reader_reset_can_keep_the_towers():
+    """vision_play keeps the towers of a battle that ended without its end screen (it may come
+    back, and a fresh tower filter takes a destroyed tower's rubble for a full tower):
+    reset(keep_towers=True) starts the clock, elixir and hand again and keeps the tower tracker
+    and its clock confirmation; reset_towers() starts those again."""
+    reader = H.HudReader(full_store(), CARD_IDS, regions=regions())
+    reader.read(hud_frame(), 0.0)
+    reader.towers.started, reader.towers.frac["enemy_left"], reader._clock_reads = True, 0.0, 5
+    reader.reset(keep_towers=True)
+    assert (reader.towers.started, reader.towers.frac["enemy_left"], reader._clock_reads) == (True, 0.0, 5)
+    assert reader.clock.tick is None and not reader.hand.started
+    reader.reset_towers()
+    assert (reader.towers.started, reader.towers.frac["enemy_left"], reader._clock_reads) == (False, None, 0)
+    reader.towers.started = True
+    reader.reset()
+    assert not reader.towers.started
 
 
 def test_hud_reader_reads_the_elixir_count_through_the_bar_line():
