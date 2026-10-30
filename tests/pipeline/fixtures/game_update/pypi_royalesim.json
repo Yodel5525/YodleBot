@@ -1,0 +1,74 @@
+{
+  "info": {
+    "name": "royalesim",
+    "version": "0.1.43",
+    "summary": "RoyaleSim",
+    "requires_python": ">=3.10",
+    "yanked": false,
+    "yanked_reason": null
+  },
+  "last_serial": 42700000,
+  "releases": {
+    "0.1.10": [
+      {"filename": "royalesim-0.1.10-cp310-abi3-win_amd64.whl", "packagetype": "bdist_wheel",
+       "python_version": "cp310", "requires_python": ">=3.10", "size": 4000000,
+       "digests": {"sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+       "url": "https://files.pythonhosted.org/packages/aa/aa/royalesim-0.1.10-cp310-abi3-win_amd64.whl",
+       "upload_time": "2026-10-04T06:51:25", "upload_time_iso_8601": "2026-10-04T06:51:25.120037Z",
+       "yanked": false, "yanked_reason": null}
+    ],
+    "0.1.41": [
+      {"filename": "royalesim-0.1.41.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "requires_python": ">=3.10", "size": 4030000,
+       "digests": {"sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+       "url": "https://files.pythonhosted.org/packages/bb/bb/royalesim-0.1.41.tar.gz",
+       "upload_time": "2026-10-22T02:31:19", "upload_time_iso_8601": "2026-10-22T02:31:19.258957Z",
+       "yanked": false, "yanked_reason": null}
+    ],
+    "0.1.42": [
+      {"filename": "royalesim-0.1.42-cp310-abi3-win_amd64.whl", "packagetype": "bdist_wheel",
+       "python_version": "cp310", "requires_python": ">=3.10", "size": 4803142,
+       "digests": {"md5": "94ec23ec77ed81416947ba7c3b6ee4bf",
+                   "sha256": "04c6f9ca056de33f5bb3e8dd416b192036fadd4b9f84aa60da1474f415394519"},
+       "url": "https://files.pythonhosted.org/packages/3c/6c/765d098bf85d25958904419b8dcd3a712e0fa13e0470fdea595877862cb6/royalesim-0.1.42-cp310-abi3-win_amd64.whl",
+       "upload_time": "2026-10-23T04:16:26", "upload_time_iso_8601": "2026-10-23T04:16:26.705517Z",
+       "yanked": false, "yanked_reason": null},
+      {"filename": "royalesim-0.1.42.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "requires_python": ">=3.10", "size": 4032061,
+       "digests": {"md5": "1d9ec1e01b5926ea4496309497a1bfb3",
+                   "sha256": "e7a5b4d85e81763e865ceee0671034e2e487899d5a4608a68c0cdf6580268ce8"},
+       "url": "https://files.pythonhosted.org/packages/ba/bb/0d0d91fc676246b89c55ca57b3d1cc36b52360a7296d8869ca2f70b2962d/royalesim-0.1.42.tar.gz",
+       "upload_time": "2026-10-23T04:16:28", "upload_time_iso_8601": "2026-10-23T04:16:28.314454Z",
+       "yanked": false, "yanked_reason": null}
+    ],
+    "0.1.43": [
+      {"filename": "royalesim-0.1.43-cp310-abi3-win_amd64.whl", "packagetype": "bdist_wheel",
+       "python_version": "cp310", "requires_python": ">=3.10", "size": 4810000,
+       "digests": {"sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+       "url": "https://files.pythonhosted.org/packages/cc/cc/royalesim-0.1.43-cp310-abi3-win_amd64.whl",
+       "upload_time": "2026-11-02T20:10:00", "upload_time_iso_8601": "2026-11-02T20:10:00.000000Z",
+       "yanked": false, "yanked_reason": null},
+      {"filename": "royalesim-0.1.43.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "requires_python": ">=3.10", "size": 4040000,
+       "digests": {"sha256": "FIXTURE"},
+       "url": "https://files.pythonhosted.org/packages/dd/dd/royalesim-0.1.43.tar.gz",
+       "upload_time": "2026-11-02T20:10:02", "upload_time_iso_8601": "2026-11-02T20:10:02.000000Z",
+       "yanked": false, "yanked_reason": null}
+    ],
+    "0.1.44rc1": [
+      {"filename": "royalesim-0.1.44rc1.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "requires_python": ">=3.10", "size": 4040000,
+       "digests": {"sha256": "FIXTURE"},
+       "url": "https://files.pythonhosted.org/packages/ee/ee/royalesim-0.1.44rc1.tar.gz",
+       "upload_time": "2026-11-03T01:00:00", "upload_time_iso_8601": "2026-11-03T01:00:00.000000Z",
+       "yanked": false, "yanked_reason": null}
+    ]
+  },
+  "urls": [
+    {"filename": "royalesim-0.1.43.tar.gz", "packagetype": "sdist", "python_version": "source",
+     "digests": {"sha256": "FIXTURE"},
+     "url": "https://files.pythonhosted.org/packages/dd/dd/royalesim-0.1.43.tar.gz",
+     "upload_time_iso_8601": "2026-11-02T20:10:02.000000Z", "yanked": false, "yanked_reason": null}
+  ],
+  "vulnerabilities": []
+}

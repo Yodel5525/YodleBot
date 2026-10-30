@@ -1,0 +1,19 @@
+{
+  "_id": "000000000000000000000000",
+  "id": "VanguardX101/IL_Replay",
+  "author": "VanguardX101",
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lastModified": "2026-09-30T12:00:00.000Z",
+  "createdAt": "2026-08-01T10:00:00.000Z",
+  "private": false,
+  "gated": false,
+  "disabled": false,
+  "downloads": 10,
+  "likes": 1,
+  "tags": ["size_categories:100K<n<1M"],
+  "siblings": [
+    {"rfilename": "README.md"},
+    {"rfilename": "replays/part-0000.parquet"},
+    {"rfilename": "actions/part-0000.parquet"}
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "info": {
+    "name": "royaleimitate",
+    "version": "0.2.16",
+    "summary": "RoyaleImitate: imitation learning for RoyaleLearn, as an optional add-on",
+    "requires_python": ">=3.10",
+    "yanked": false,
+    "yanked_reason": null
+  },
+  "last_serial": 42700001,
+  "releases": {
+    "0.2.15": [
+      {"filename": "royaleimitate-0.2.15-py3-none-any.whl", "packagetype": "bdist_wheel",
+       "python_version": "py3", "size": 65748,
+       "digests": {"sha256": "c31aa38da380423b83130a12f86a7a7ffcbfbf8e7daf70b154d81d5b7bdf9923"},
+       "url": "https://files.pythonhosted.org/packages/c2/b3/ffdcdad735acbb2b8d0e5e4f1826abd140b60d20803c8d4b30ef309182ec/royaleimitate-0.2.15-py3-none-any.whl",
+       "upload_time_iso_8601": "2026-10-27T07:18:42.961343Z", "yanked": false, "yanked_reason": null},
+      {"filename": "royaleimitate-0.2.15.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "size": 104793,
+       "digests": {"sha256": "16fa903f19e881c4a8d56bc68da6e1a6455d0aaf8b18b017d9cabab66cec0bb7"},
+       "url": "https://files.pythonhosted.org/packages/9c/20/19f5bb5e6be2badb84723490279e405fc5cdf09424967f846a7e3ec39374/royaleimitate-0.2.15.tar.gz",
+       "upload_time_iso_8601": "2026-10-27T07:18:44.442152Z", "yanked": false, "yanked_reason": null}
+    ],
+    "0.2.16": [
+      {"filename": "royaleimitate-0.2.16-py3-none-any.whl", "packagetype": "bdist_wheel",
+       "python_version": "py3", "size": 66000,
+       "digests": {"sha256": "FIXTURE"},
+       "url": "https://files.pythonhosted.org/packages/ff/ff/royaleimitate-0.2.16-py3-none-any.whl",
+       "upload_time_iso_8601": "2026-11-01T09:00:00.000000Z", "yanked": false, "yanked_reason": null},
+      {"filename": "royaleimitate-0.2.16.tar.gz", "packagetype": "sdist", "python_version": "source",
+       "size": 105000,
+       "digests": {"sha256": "FIXTURE"},
+       "url": "https://files.pythonhosted.org/packages/ff/fe/royaleimitate-0.2.16.tar.gz",
+       "upload_time_iso_8601": "2026-11-01T09:00:02.000000Z", "yanked": false, "yanked_reason": null}
+    ]
+  },
+  "urls": [],
+  "vulnerabilities": []
+}

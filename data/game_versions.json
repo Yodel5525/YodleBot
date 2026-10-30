@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "The game-version ledger (U04 of docs/SEASON_UPDATES.md): the pinned simulator, the card tables it carries, the client builds known and accepted, the season rule and the dated content events. tools/game_versions.py reads it; tools/game_update.py check compares PyPI, the official API's /v1/cards and the device's client build against it.",
+    "pin: the royalesim release and cards.CARD_TABLE arm every tool runs (requirements/engine.txt, requirements/gpu.txt, pyproject.toml and data/engine.json say the same; tests/pipeline/test_game_versions.py checks it). Promote (U12) moves it and appends to pin_history.",
+    "royalesim.<version>: read from that release's PyPI sdist (data/calibration.json cards.CARD_TABLE and every data/derived/cards-*.json). fnv1a64 is FNV-1a 64 of the table file's bytes, which is what Battle.card_table_fnv1a64() reports (docs/SEASON_UPDATES.md 3.3: a table's name is not its identity). client_build and content are the table's own provenance text (MANIFEST.json build and content_version).",
+    "clients: client builds by versionCode (encoding MM mmmm bbb: 160635001 = 16.635.1). accepted is the date a build was judged fine to play against the pinned table; basis is table (the pinned table's own build), owner (scripts/game_update.ps1 -AcceptClient -Note) or history (seen, never accepted). A build the daily check records by itself (basis auto) goes to <runs>/updates/clients.json, not here, so the scheduled task never dirties the tree.",
+    "seasons: a season starts on the first Monday of each month; observed lists the 2026 starts the rule must reproduce. content_events: dated balance updates, new cards and new forms. table names the arm that carries an event's content (null: no table has it yet). Dates are UTC days. Facts marked confirmed false come from search snippets (docs/SEASON_UPDATES.md 14.11): re-check them on the PC.",
+    "il_replay: the Hugging Face dataset the imitation rows come from. revision null means not recorded yet: the first check that reaches the Hugging Face API records the latest revision in <runs>/updates/state.json and reports later changes."
+  ],
+  "schema": 1,
+  "pin": {
+    "royalesim": "0.1.42",
+    "card_table": "client160402017_20261019",
+    "since": "2026-10-29",
+    "basis": "docs/SPARRING_PLAN.md: the 16.402.22 table is the target; the owner judged that nothing major changed for the bot since the 2026-10-19 balance update"
+  },
+  "pin_history": [
+    {"royalesim": "0.1.42", "card_table": "client160402017_20261019", "since": "2026-10-29",
+     "note": "first pin of the sparring fork (batch 2: engine factory and data/engine.json)"}
+  ],
+  "royalesim": {
+    "0.1.42": {
+      "uploaded": "2026-10-23T04:16:28Z",
+      "sdist": "royalesim-0.1.42.tar.gz",
+      "sdist_sha256": "e7a5b4d85e81763e865ceee0671034e2e487899d5a4608a68c0cdf6580268ce8",
+      "default_arm": "client15535",
+      "arms": ["client15535", "client160402017_20261006", "client160402017", "client160402017_20261019"],
+      "tables": {
+        "client15535": {
+          "version": "cards-15535.1",
+          "files": ["data/derived/cards-15.535.json", "data/derived/cards.json"],
+          "client": "15.535.29", "client_build": null, "content": "15.535.29", "content_date": null,
+          "fnv1a64": "803ec02c7eac9fd3",
+          "sha256": "6cdc78a82d2be466cb528952e234c51753f51d8a4f38851bd0d3df58e9b9d5fa",
+          "roster": {"cards": 145, "evolutions": 42, "hero_forms": 16, "towers": 2, "units": 335},
+          "in_wheel": true
+        },
+        "client160402017_20261006": {
+          "version": "cards-160402017-20261006.1",
+          "files": ["data/derived/cards-160402017-20261006.json"],
+          "client": "16.402.17", "client_build": 160402017, "content": "16.402.19", "content_date": "2026-10-06",
+          "fnv1a64": "87cca9def6207621",
+          "sha256": "153019dd47c31c3ee43e6d693001f6182ca7a64950b4def83654cd1ba38bfb20",
+          "roster": {"cards": 145, "evolutions": 43, "hero_forms": 18, "towers": 2, "units": 320},
+          "in_wheel": true
+        },
+        "client160402017": {
+          "version": "cards-160402017.1",
+          "files": ["data/derived/cards-160402017.json"],
+          "client": "16.402.17", "client_build": 160402017, "content": "16.402.2", "content_date": null,
+          "fnv1a64": "bfa901668f922c80",
+          "sha256": "5e4f0fa6539253bc4045187ae77d9603f701ee7014c9abf0a3073c3c1e7d6dc0",
+          "roster": {"cards": 145, "evolutions": 43, "hero_forms": 18, "towers": 2, "units": 319},
+          "in_wheel": false,
+          "note": "the install-time pack; read from a checkout only, a wheel carries no copy of it"
+        },
+        "client160402017_20261019": {
+          "version": "cards-160402017-20261019.1",
+          "files": ["data/derived/cards-160402017-20261019.json"],
+          "client": "16.402.20", "client_build": 160402020, "content": "16.402.22", "content_date": "2026-10-19",
+          "fnv1a64": "15bb4e60e69d05f3",
+          "sha256": "813bc904434ec0111adf37ac26378a9f3a6dbca350c45e82d3bd40dbea6ecf95",
+          "roster": {"cards": 145, "evolutions": 43, "hero_forms": 18, "towers": 2, "units": 320},
+          "in_wheel": true,
+          "lacks": ["Giant evolution", "Mirror evolution"]
+        }
+      },
+      "source": "read on 2026-10-30 from the PyPI sdist, whose sha256 matched PyPI's digest. Each table's FNV-1a 64 equals the Battle.card_table_fnv1a64() value docs/SEASON_UPDATES.md 3.3 expects; the engine itself was not run (the stage, U09, probes it)."
+    }
+  },
+  "royaleimitate": {
+    "vendored": "0.2.15",
+    "uploaded": "2026-10-27T07:18:44Z",
+    "file": "data/cards/replay_cards.json",
+    "member": "royaleimitate/replay_cards.json",
+    "sha256": "aeca8fdf8eebafadbe3b1f4dba6eebb6132715e935bfe1db63f5968670c039ee",
+    "keys": 119,
+    "note": "the same file in the 0.2.15 sdist and wheel (tools/rs_cards.py VENDORED_SHA256)"
+  },
+  "clients": [
+    {"version_code": 160402002, "version_name": "16.402.2", "first_seen": "2026-09-01",
+     "accepted": null, "basis": "history", "source": "APKMirror upload date (search snippets)"},
+    {"version_code": 160402012, "version_name": "16.402.12", "first_seen": "2026-09-15",
+     "accepted": null, "basis": "history", "source": "APKMirror upload date (search snippets)",
+     "note": "the original author's build (docs/SPARRING_PLAN.md)"},
+    {"version_code": 160402017, "version_name": "16.402.17", "first_seen": "2026-10-02",
+     "accepted": null, "basis": "history", "source": "APKMirror upload date (search snippets)",
+     "note": "the build the 160402017 tables are named after"},
+    {"version_code": 160402020, "version_name": "16.402.20", "first_seen": "2026-10-07",
+     "accepted": "2026-10-29", "basis": "table", "source": "APKMirror upload date (search snippets)",
+     "note": "the pinned table's own build: cards-160402017-20261019.1 was decoded from client build 160402020, content 16.402.22"},
+    {"version_code": 160635001, "version_name": "16.635.1", "first_seen": "2026-10-27",
+     "accepted": "2026-10-29", "basis": "owner", "source": "measured on the PC by scripts/selfcheck.py on 2026-10-29; APKMirror upload 2026-10-27",
+     "note": "a newer client line than any table (16.635 against 16.402). The owner judged that nothing major changed for the bot since the 2026-10-19 balance update (docs/SPARRING_PLAN.md)."}
+  ],
+  "seasons": {
+    "rule": "first Monday of each month",
+    "anchor": {"season": 89, "start": "2026-11-02"},
+    "observed": ["2026-01-05", "2026-02-02", "2026-03-02", "2026-04-06", "2026-05-04", "2026-06-01",
+                 "2026-07-06", "2026-08-03", "2026-09-07", "2026-10-05", "2026-11-02"],
+    "source": "docs/SEASON_UPDATES.md 3.1 (web research): the rule reproduces all eleven 2026 season starts"
+  },
+  "content_events": [
+    {"date": "2026-07-13", "kind": "card", "what": "Ronin released", "cards": ["Ronin"],
+     "table": "client15535", "confirmed": false, "source": "docs/SEASON_UPDATES.md 3.1"},
+    {"date": "2026-08-26", "kind": "balance", "what": "mid-season balance update",
+     "table": null, "confirmed": false, "source": "docs/SEASON_UPDATES.md 3.1"},
+    {"date": "2026-09-07", "kind": "card", "what": "Minion Giant released", "cards": ["MinionGiant"],
+     "table": "client15535", "confirmed": false, "source": "docs/SEASON_UPDATES.md 2 and 3.1; MinionGiant is in every 0.1.42 table but cards-2018 (catalogue id 132)"},
+    {"date": "2026-09-16", "kind": "balance", "what": "mid-season balance update",
+     "table": null, "confirmed": false, "source": "docs/SEASON_UPDATES.md 3.1"},
+    {"date": "2026-10-06", "kind": "balance", "what": "Season 88 balance update, content 16.402.19",
+     "table": "client160402017_20261006", "confirmed": true,
+     "royalesim": {"first": "0.1.23", "uploaded": "2026-10-09T08:54:16Z"},
+     "source": "the table's own provenance (royalesim 0.1.42 sdist); docs/SEASON_UPDATES.md 3.2"},
+    {"date": "2026-10-19", "time": "16:48Z", "kind": "balance",
+     "what": "Season 88 mid-season balance update, content 16.402.22 (November's changes moved here)",
+     "table": "client160402017_20261019", "confirmed": true,
+     "royalesim": {"first": "0.1.40", "uploaded": "2026-10-20T23:28:51Z"},
+     "source": "the table's own provenance (royalesim 0.1.42 sdist); docs/SEASON_UPDATES.md 2 and 3.2"},
+    {"date": "2026-11-02", "kind": "season", "season": 89,
+     "what": "Season 89: Evo Giant and Evo Mirror; reported without balance changes",
+     "forms": [{"card": "Giant", "form": "evolution"}, {"card": "Mirror", "form": "evolution"}],
+     "table": null, "confirmed": false,
+     "source": ["https://timesaver.gg/blog/clash-royale-season-89-king-vs-king",
+                "https://royaletracker.gg/news/clash-royale-update-november-2026"]}
+  ],
+  "il_replay": {
+    "repo": "VanguardX101/IL_Replay",
+    "revision": null,
+    "last_modified": null,
+    "note": "tools/il_replay_download.py fetches the main branch and records no revision, so the PC's copy has none. The check reads https://huggingface.co/api/datasets/VanguardX101/IL_Replay (sha, lastModified) when it answers."
+  }
+}
