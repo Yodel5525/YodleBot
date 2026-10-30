@@ -206,7 +206,10 @@ DEPLOY_LOCKOUT_TICKS = 90
 #: ... and a watch that started within one displayed second after it is still in time: the
 #: runner's start tick is its first accepted clock reading, base + 10 of the second shown (2:56
 #: is tick 90, 2:55 tick 110), and a play made in that second is still a unit on the board when
-#: the detector starts (deploy times are 1 s or more), so the deriver reports it.
+#: the detector starts (deploy times are 1 s or more), so the deriver reports it. Spells are the
+#: known gap: they have no deploy time, so an instant or short-lived one (a Zap) cast in that
+#: second can be gone before the detector starts and the count still reads exact. That is rare
+#: right at battle start, so it is accepted. tools/rs_public_view.OppElixir keeps the same rule.
 LATE_MARGIN_TICKS = 20
 #: A sent tap not seen landing after this many ticks is assumed lost (rs_decide.PENDING_TICKS,
 #: live_play's 3 s).

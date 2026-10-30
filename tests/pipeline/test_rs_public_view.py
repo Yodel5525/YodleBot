@@ -410,8 +410,11 @@ def test_opp_elixir_flags_a_missed_play_and_is_never_exact_when_blind_or_late():
     assert cyc["public"]["opp_cycle"]["reasons"] == ["missed_play", "repeat"]
     assert cyc["public"]["opp_cycle"]["queue"] == [None, None, None, GIANT]
     empty = rs_memory.empty_view()
-    assert PV.OppElixir(CATALOGUE, law=LAW, start_tick=91).view(1, empty, 100) == (7785, False,
-                                                                                  False, 0)
+    # late: after the deploy lockout and one more displayed second (2:55 reads as tick 110)
+    assert PV.DEPLOY_LOCKOUT_TICKS + PV.LATE_MARGIN_TICKS == 110
+    assert PV.OppElixir(CATALOGUE, law=LAW, start_tick=111).view(1, empty, 100) == (7785, False,
+                                                                                   False, 0)
+    assert PV.OppElixir(CATALOGUE, law=LAW, start_tick=110).view(1, empty, 100).exact
     assert PV.OppElixir(CATALOGUE, law=LAW, start_tick=90).view(1, empty, 100).exact
     assert not PV.OppElixir(CATALOGUE, law=LAW, blind=True).view(1, empty, 100).exact
 
@@ -568,6 +571,7 @@ def test_constants_match_public_state_and_rs_rows(monkeypatch):
     assert PV.ENTITY_DEFAULTS == PS.ENTITY_DEFAULTS
     assert PV.PUBLIC_FIELDS == PS.REQUIRED_FIELDS
     assert PV.DEPLOY_LOCKOUT_TICKS == PS.DEPLOY_LOCKOUT_TICKS
+    assert PV.LATE_MARGIN_TICKS == PS.LATE_MARGIN_TICKS
     assert PV.SPELL_FIELDS_FALLBACK == RR.SPELL_FIELDS_FALLBACK
     assert PV.UNSEEN_STATUS == RR.UNSEEN_STATUS
     assert (PV.STATUS_UNDERGROUND, PV.STATUS_INVISIBLE, PV.STATUS_HIDDEN) == (

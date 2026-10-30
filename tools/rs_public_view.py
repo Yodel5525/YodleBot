@@ -118,9 +118,12 @@ ElixirReading(milli, exact, missed, unaffordable):
                         rule with lag 0 (rs_rows.py:852), fed each play of the memory view once, as
                         RSAgent.opp_elixir feeds it (rs_eval.py:467-495), less `unran`. Exact as
                         public_state.OpponentElixir (public_state.py:683-747): the counter's own
-                        exactness, and not blind, not watching from after the deploy lockout
-                        (start_tick > 90), and no unpriced play; an unknown play (token 1) is an
-                        unpriced one here (RSAgent.opp_elixir skips it silently).
+                        exactness, and not blind, not watching from after the deploy lockout and
+                        one more displayed second (start_tick > 110: DEPLOY_LOCKOUT_TICKS +
+                        LATE_MARGIN_TICKS; ctx.start_tick is the runner's first accepted clock
+                        reading, the same tick public_state's counter gets), and no unpriced play;
+                        an unknown play (token 1) is an unpriced one here (RSAgent.opp_elixir
+                        skips it silently).
 The count is never repaired from the opponent's real bar: that would be the cheat (rs_elixir).
 
 PERMANENCE (plan 4.1). An enemy building that was seen and never seen destroyed stays in the
@@ -189,6 +192,9 @@ UNSEEN_STATUS = STATUS_INVISIBLE | STATUS_HIDDEN
 PUBLIC_STATUS = STATUS_UNDERGROUND | STATUS_EVOLVED | STATUS_HERO | STATUS_CLONE
 #: public_state.DEPLOY_LOCKOUT_TICKS: a count watching from after it may have missed a play.
 DEPLOY_LOCKOUT_TICKS = 90
+#: public_state.LATE_MARGIN_TICKS: one more displayed second is still in time (a first clock
+#: reading of 2:55 is tick 110).
+LATE_MARGIN_TICKS = 20
 
 #: The entity columns a public row keeps: public_state.REQUIRED_FIELDS, what live fills.
 PUBLIC_FIELDS: tuple[str, ...] = (
@@ -640,8 +646,9 @@ class OppElixir:
 
     @property
     def late(self) -> bool:
-        """Watching from after the deploy lockout: a play may have gone unseen."""
-        return self.start_tick > DEPLOY_LOCKOUT_TICKS
+        """Watching from after the deploy lockout and one more displayed second
+        (public_state.OpponentElixir.late's rule): a play may have gone unseen."""
+        return self.start_tick > DEPLOY_LOCKOUT_TICKS + LATE_MARGIN_TICKS
 
     def _restart(self, team: int) -> None:
         self.counter = rs_elixir.ElixirCounter.from_catalogue(self.catalogue, fields=self.fields,
