@@ -30,14 +30,14 @@ LEVELS (plan 4.8; RebuildSettings.level, or spec(level=)):
 
 THE SPEC (RootSpec, build_spec / Rebuilder.spec). Everything a reset needs, decided before any
 engine call but two pure queries (building_placement for the snap; formation_preview for a card's
-members, deploy time and tap point; both asked on a blank board, never on whatever root the
-battle holds, and cached, so a view rebuilt twice gives one spec): seed, both decks in deal order
-(shuffle 0: hand = deck[0:4], queue = deck[4:8]), elixir, tower hp, the spawns (team, card, x, y,
-hp) with each one's view uid and creating card, the recasts, our plays in flight (replays: exec
-tick < B; later: exec tick >= B, for the trials), and the bookkeeping fidelity reads. A frozen
-dataclass of tuples, so it pickles (the procs backend, plan 6.3) and spec.key is the sha1 of its
-canonical JSON: two views that differ only in what no screen shows give one key (the S08 leak
-test).
+members, deploy time and tap point; both asked on a blank board with the view's crown towers
+standing or fallen, standing_towers, never on whatever root the battle holds, and cached, so a
+view rebuilt twice gives one spec): seed, both decks in deal order (shuffle 0: hand =
+deck[0:4], queue = deck[4:8]), elixir, tower hp, the spawns (team, card, x, y, hp) with each
+one's view uid and creating card, the recasts, our plays in flight (replays: exec tick < B;
+later: exec tick >= B, for the trials), and the bookkeeping fidelity reads. A frozen dataclass
+of tuples, so it pickles (the procs backend, plan 6.3) and spec.key is the sha1 of its canonical
+JSON: two views that differ only in what no screen shows give one key (the S08 leak test).
 
 THE DEAL (deal()). Each side's target is its hand H and queue Q at t (CardCycle, S02; the
 opponent's open slots filled from `opp_fill`, a deck prior's draw, then its seen deck padded with
@@ -170,6 +170,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -223,6 +224,12 @@ DEPLOY_GROUP_TICKS = 3
 DEFAULT_DEPLOY_TICKS = 20
 #: The blank board building_placement is asked on: after the deploy lockout (90 ticks).
 BLANK_TICK = 600
+#: The blank board's crown towers when every one stands ([team][king, left, right], as
+#: tower_hp): the reset's own (tower_hp None).
+ALL_STANDING: tuple[tuple[bool, ...], tuple[bool, ...]] = ((True, True, True), (True, True, True))
+#: A standing tower's hp on a blank board where another has fallen: any hp above 0 (the queries
+#: read only which towers stand).
+BLANK_TOWER_HP = 1
 FORMATION_MATCH_MT = 3000.0
 SNAP_CACHE = 4096
 
@@ -941,6 +948,30 @@ def _targets(view: Mapping[str, Any], side: int, F: Mapping[str, int], sub: int
     return out
 
 
+def standing_towers(view: Mapping[str, Any]) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+    """Which crown towers stand in `view`, [team][king, left, right] as tower_hp: a princess at
+    hp 0 (or None) has fallen, as sanitize_for_rebuild resets it; a king always stands (a reset
+    refuses a king at 0), and so does a tower the view does not give (a side without three is
+    refused anyway: REFUSED_TOWERS). The blank board Rebuilder.spec's queries are asked on: a
+    fallen princess opens a pocket, and formation_preview's column clamp (calibration
+    formation.GROUND_Y_CLAMP) is dropped in that lane."""
+    players = view.get("players") or ()
+    out = []
+    for t in (0, 1):
+        p = players[t] if t < len(players) and isinstance(players[t], Mapping) else {}
+        hp = list(p.get("tower_hp") or ())
+        out.append(tuple(k == 0 or k >= len(hp) or int(hp[k] or 0) > 0 for k in range(3)))
+    return out[0], out[1]
+
+
+def _standing(towers: Iterable[Iterable[Any]] | None) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+    """`towers` as standing_towers gives it (None: ALL_STANDING), each king standing."""
+    if towers is None:
+        return ALL_STANDING
+    sides = [tuple(k == 0 or bool(u) for k, u in enumerate(side)) for side in towers]
+    return sides[0], sides[1]
+
+
 def infer_aim(caster: int, x: float, y: float, targets: Sequence[tuple[float, float, int, float]],
               *, radius_mt: float = DEFAULT_RADIUS_MT, cap: int = DEFAULT_DAMAGE_CAP,
               step_mt: float = AIM_STEP_MT, launch: tuple[float, float] | None = None
@@ -1600,10 +1631,10 @@ class Rebuilder:
         self._level = level
         self._battle: Any = None
         self._tables: Tables | None = None
-        self._snaps: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
-        self._taps: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
+        self._snaps: dict[tuple, tuple[int, int] | None] = {}
+        self._taps: dict[tuple, tuple[int, int] | None] = {}
         self._previews: dict[int, tuple | None] = {}
-        self._blank = False
+        self._blank: tuple | None = None        # the standing towers of the blank board held
         self._current: Built | None = None
         self._dirty = True
         self.sightings = SpellSightings(self.SF, sub=self.sub)
@@ -1653,7 +1684,7 @@ class Rebuilder:
         all, before its first reset)."""
         if self._battle is None:
             self._battle = rs_engine.make_battle(self.cfg, self.rs)
-            self._blank = False
+            self._blank = None
         return self._battle
 
     @property
@@ -1679,38 +1710,49 @@ class Rebuilder:
         return self._tables
 
     # ------------------------------------------------------------ cached pure queries
-    def _on_blank(self, accessor: str, unavailable: str) -> Callable[..., Any] | None:
+    def _on_blank(self, accessor: str, unavailable: str,
+                  towers: tuple | None = ALL_STANDING) -> Callable[..., Any] | None:
         """The battle's `accessor` (building_placement, formation_preview) with the battle on the
-        blank board: reset to it first unless it is there already. Every query a spec makes is
-        asked there, never on the board the battle happens to hold (a fresh battle, or the last
-        root with its units, towers and tick), so a spec, and its key, is a function of the view
-        and the settings alone, whichever root was built before it. None without the accessor,
-        or when the engine cannot reset to a blank board (stats[unavailable] counts that)."""
+        blank board whose crown towers stand as `towers` says ([team][king, left, right],
+        standing_towers(view); None: whichever blank board the battle holds, for a query no tower
+        changes, else every tower standing): reset to it first unless it is there already. Every
+        query a spec makes is asked there, never on the board the battle happens to hold (a
+        fresh battle, or the last root with its units, towers and tick), so a spec, and its key,
+        is a function of the view, the settings and the spell sightings so far (SpellSightings,
+        R2), whichever root was built before it. None without the accessor, or when the engine
+        cannot reset to that board (stats[unavailable] counts that)."""
         b = self.battle
         fn = getattr(b, accessor, None)
         if not callable(fn):
             return None
-        if not self._blank:
-            deck = list(dict.fromkeys(self.tables.filler + self.tables.spawnable))[:DECK_SIZE]
-            self._current, self._dirty = None, True
-            try:
-                b.reset(seed=0, decks=[list(deck), list(deck)], shuffle=0, start_tick=BLANK_TICK,
-                        elixir_milli=[ELIXIR_MAX_MILLI, ELIXIR_MAX_MILLI], tower_hp=None,
-                        spawns=[])
-            except Exception:                   # no blank board: no such query on this engine
-                self.stats[unavailable] += 1
-                return None
-            self._blank = True
+        want = None if towers is None else _standing(towers)
+        if self._blank is not None and (want is None or self._blank == want):
+            return fn
+        towers = _standing(want)
+        hp = None if towers == ALL_STANDING else \
+            [[BLANK_TOWER_HP if up else 0 for up in side] for side in towers]
+        deck = list(dict.fromkeys(self.tables.filler + self.tables.spawnable))[:DECK_SIZE]
+        self._blank, self._current, self._dirty = None, None, True
+        try:
+            b.reset(seed=0, decks=[list(deck), list(deck)], shuffle=0, start_tick=BLANK_TICK,
+                    elixir_milli=[ELIXIR_MAX_MILLI, ELIXIR_MAX_MILLI], tower_hp=hp, spawns=[])
+        except Exception:                       # no blank board: no such query on this engine
+            self.stats[unavailable] += 1
+            return None
+        self._blank = towers
         return fn
 
-    def snap(self, team: int, card: int, x: int, y: int) -> tuple[int, int] | None:
+    def snap(self, team: int, card: int, x: int, y: int,
+             towers: tuple | None = None) -> tuple[int, int] | None:
         """Where Battle.building_placement lands a tap of `card` by `team` at (x, y) subtiles, asked
-        on a blank board (other buildings never move it), cached; None without the accessor or
-        when the tap is refused there."""
-        key = (int(team), int(card), int(x), int(y))
+        on a blank board with `towers` standing (standing_towers(view); None: every tower; other
+        buildings never move it, a fallen tower's ground is free), cached; None without the
+        accessor or when the tap is refused there."""
+        towers = _standing(towers)
+        key = (int(team), int(card), int(x), int(y), towers)
         if key in self._snaps:
             return self._snaps[key]
-        fn = self._on_blank("building_placement", "snap_unavailable")
+        fn = self._on_blank("building_placement", "snap_unavailable", towers)
         got = None
         if fn is not None:
             try:
@@ -1725,13 +1767,15 @@ class Rebuilder:
         return got
 
     def _preview(self, card: int) -> tuple | None:
-        """formation_preview's members of a blue play of `card` at the spawn point, asked on the
-        blank board (cached), or None without the accessor or for a card it refuses."""
+        """formation_preview's members of a blue play of `card` at the spawn point, asked on a
+        blank board (cached), or None without the accessor or for a card it refuses. Only the
+        members' units and deploy times are read (members, deploy_total), and no tower changes
+        those, so whichever blank board the battle holds serves."""
         card = int(card)
         if card in self._previews:
             return self._previews[card]
         rows = None
-        fn = (self._on_blank("formation_preview", "preview_unavailable")
+        fn = (self._on_blank("formation_preview", "preview_unavailable", None)
               if 0 <= card < len(self.tables.names) else None)
         if fn is not None:
             sx, sy = rs_spawn_table.spawn_point(self.sub)
@@ -1757,16 +1801,21 @@ class Rebuilder:
         ticks = [t for _, t in self.members(card) or ()]
         return max(1, max(ticks)) if ticks and max(ticks) > 0 else DEFAULT_DEPLOY_TICKS
 
-    def tap_point(self, team: int, card: int, x: int, y: int) -> tuple[int, int] | None:
+    def tap_point(self, team: int, card: int, x: int, y: int,
+                  towers: tuple | None = None) -> tuple[int, int] | None:
         """The tap whose formation_preview members are centred on (x, y) subtiles: (x, y) less
         the offset of the members' centroid from a tap there (one fixed-point step; a building's
-        or a single unit's is (x, y)), asked on the blank board, cached; None without the
-        accessor or when it refuses."""
-        key = (int(team), int(card), int(x), int(y))
+        or a single unit's is (x, y)), asked on a blank board with `towers` standing
+        (standing_towers(view); None: every tower), cached; None without the accessor or when it
+        refuses. The view's towers, because a fallen princess drops the formation's column clamp
+        in its lane: a ground swarm played into the pocket stands where it was tapped there, and
+        is pulled back to the river on a board with that tower standing."""
+        towers = _standing(towers)
+        key = (int(team), int(card), int(x), int(y), towers)
         if key in self._taps:
             return self._taps[key]
         got = None
-        fn = (self._on_blank("formation_preview", "preview_unavailable")
+        fn = (self._on_blank("formation_preview", "preview_unavailable", towers)
               if 0 <= int(card) < len(self.tables.names) else None)
         if fn is not None:
             try:
@@ -1786,17 +1835,21 @@ class Rebuilder:
     # ------------------------------------------------------------ specs
     def spec(self, view: Mapping[str, Any], *, land_tick: int | None = None, seed: int = 0,
              level: str | None = None, opp_fill: Iterable[int] = ()) -> RootSpec:
-        """build_spec with this rebuilder's tables, snap, deploy times and spell sightings."""
+        """build_spec with this rebuilder's tables, snap, deploy times and spell sightings; the
+        snaps and tap points asked on a blank board with the view's crown towers standing
+        (standing_towers)."""
         level = level or self.settings.level
         if level == R2:
             self.sightings.SF, self.sightings.sub = self.SF, self.sub
             self.sightings.update(view)
-        snap = self.snap if self.settings.snap_buildings else None
+        towers = standing_towers(view)
+        snap = functools.partial(self.snap, towers=towers) if self.settings.snap_buildings \
+            else None
         return build_spec(view, self.tables, self.settings, land_tick=land_tick, seed=seed,
                           level=level, fields=self.F, spell_fields=self.SF, sub=self.sub,
                           opp_fill=opp_fill, snap=snap, deploy_total=self.deploy_total,
                           first_sighting=self.sightings.first, members=self.members,
-                          tap_point=self.tap_point)
+                          tap_point=functools.partial(self.tap_point, towers=towers))
 
     def spec_r0(self, state: Mapping[str, Any], team: int, *, sent: Iterable[Sequence[int]] = (),
                 lead: int = 0, public: bool = False) -> RootSpec:
@@ -1813,7 +1866,7 @@ class Rebuilder:
     def _reset(self, spec: RootSpec, flags: list[str]) -> Any:
         """reset from the spec (forms retried without when refused); the engine's error raised."""
         b = self.battle
-        self._blank, self._current, self._dirty = False, None, True
+        self._blank, self._current, self._dirty = None, None, True
         kw = spec.reset_kwargs()
         try:
             b.reset(**kw)
@@ -1984,7 +2037,7 @@ class Rebuilder:
         b = built.battle
         if self._current is not built or self._dirty:
             b.load(built.blob)
-            self._blank = False                 # a root's board: snap() must reset first
+            self._blank = None                  # a root's board: snap() must reset first
             if verify and b.state_json() != built.raw:
                 raise RebuildError("the root's state_json differs after load(): the restore is "
                                    "not exact")

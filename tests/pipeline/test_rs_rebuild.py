@@ -663,6 +663,90 @@ def test_snap_asks_on_a_blank_board_even_after_a_root_was_loaded_back(ps):
     assert b.placed[-1] == (RB.BLANK_TICK, 0)                 # ... and blanked again to ask
 
 
+class PocketBattle(CycleBattle):
+    """CycleBattle with formation_preview: a play's members 500 mt apart in x around the tap,
+    each pulled back to its own side of the river (red y >= 17000 mt, blue <= 15000) unless the
+    enemy princess of the tap's lane has fallen: royalesim drops its column clamp
+    (formation.GROUND_Y_CLAMP) in a pocket. `previews` records (the board's tower_hp, team,
+    name, x, y) per ask."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.previews = []
+
+    def formation_preview(self, team, name, x, y):
+        team, x, y = int(team), int(x), int(y)
+        self.previews.append((copy.deepcopy(self.towers), team, name, x, y))
+        n = CATALOGUE[CID[name]][3]
+        lane = 1 if x < 9000 * SUB else 2
+        if self.towers is None or self.towers[1 - team][lane] > 0:
+            y = max(y, 17000 * SUB) if team == 1 else min(y, 15000 * SUB)
+        return [(PRIMARY[name], x + (j - (n - 1) // 2) * 500 * SUB, y, 1000) for j in range(n)]
+
+
+def pocket_rebuilder():
+    mod = make_fake_royalesim()
+
+    def Battle(*args, **kwargs):
+        b = PocketBattle()
+        mod.battles.append(b)
+        return b
+    mod.Battle = Battle
+    rb = RB.Rebuilder(rs_engine.EngineConfig.legacy(), mod, SPAWN_TABLE,
+                      settings=RB.RebuildSettings(), catalogue=CATALOGUE, fields=FIELD)
+    return rb, mod
+
+
+def test_tap_points_are_asked_on_a_blank_board_with_the_views_towers():
+    """A swarm the opponent played into a pocket (our left princess fell): its tap point is
+    asked on a blank board with that tower down, where the members stand where they were
+    tapped, and cached per tower pattern. On a board with every tower standing they would be
+    pulled back to the river and the tap pushed deeper by as much."""
+    players = [player_dict(0, tower_hp=(KING_HP, 0, PRINCESS_HP)),
+               player_dict(1, tower_hp=(0, None, PRINCESS_HP))]
+    assert RB.standing_towers({"players": players}) == ((True, False, True), (True, False, True))
+    short = [player_dict(0), player_dict(1, tower_hp=(KING_HP, PRINCESS_HP))]
+    assert RB.standing_towers({"players": short}) == RB.ALL_STANDING
+    assert RB.standing_towers({}) == RB.ALL_STANDING
+    rb, mod = pocket_rebuilder()
+    pocket = ((True, False, True), (True, True, True))
+    at = mt(3500, 12000)
+    assert rb.tap_point(1, SKELS, *at, towers=pocket) == at
+    b = mod.battles[0]
+    hp = RB.BLANK_TOWER_HP
+    assert b.towers == [[hp, 0, hp], [hp, hp, hp]] and b.tick == RB.BLANK_TICK and b.ents == []
+    assert rb.tap_point(1, SKELS, *at) == mt(3500, 7000)          # every tower standing
+    assert b.towers is None
+    asked = len(b.previews)
+    assert rb.tap_point(1, SKELS, *at, towers=pocket) == at       # cached, per pattern
+    assert rb.tap_point(1, SKELS, *at) == mt(3500, 7000)
+    assert len(b.previews) == asked and len(b.calls_named("reset")) == 2
+
+
+def test_a_pocket_play_is_recast_where_the_view_shows_it(ps):
+    """Through Rebuilder.spec: the view's fallen princess reaches tap_point's board, so red's
+    Skeletons deploying in that pocket are recast on their centroid, and the spec rebuilt from
+    the same view keeps its key."""
+    rb, mod = pocket_rebuilder()
+    skels = [unit(70 + k, 1, "Skeleton", SKELS, 3000 + 500 * k, 12000, 81, deploy=18)
+             for k in range(3)]
+    me = player_dict(0, elixir_milli=6000, hand=[CANNON, FIREBALL, SKELS, LOG], next_card=MUSK,
+                     deck=list(range(8)), tower_hp=(KING_HP, 0, PRINCESS_HP))
+    mem = memory([(MUSK, 700), (ICEGOLEM, 800), (SPIRITS, 900), (HOG, 950)],
+                 [(GIANT, 600), (VALK, 700), (KNIGHT, 800), (SKELS, T0 - 2)])
+    view = view_of(state_dict(T0, players=[me, player_dict(1)], entities=skels), 0, mem,
+                   opp_elixir=(5000, True))
+    fill = [ARCHER, ARROWS, BABYD, ZAP]
+    spec = rb.spec(view, land_tick=T0 + 24, level=RB.R2, opp_fill=fill)
+    [rec] = spec.recasts
+    assert (rec.team, rec.card, rec.kind, rec.order) == (1, SKELS, "deploy", T0 - 2)
+    assert (rec.x, rec.y) == mt(3500, 12000)
+    hp = RB.BLANK_TOWER_HP
+    assert mod.battles[0].previews[-1] == ([[hp, 0, hp], [hp, hp, hp]], 1, "Skeletons",
+                                           *mt(3500, 12000))
+    assert rb.spec(view, land_tick=T0 + 24, level=RB.R2, opp_fill=fill).key == spec.key
+
+
 def test_two_states_that_differ_only_in_what_no_screen_shows_give_one_spec(ps):
     clean, noised = push_spec(), push_spec(noised=True)
     assert noised == clean and noised.key == clean.key
