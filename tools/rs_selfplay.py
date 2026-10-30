@@ -28,6 +28,20 @@ Update: PPO (clipped ratio) on advantage = result - value, where result is
 moment, plus a KL penalty to the imitation model so it cannot wander off into
 play no pro would recognise. The value head is trained on the results too.
 
+Engine (tools/rs_engine.py): every battle runs under data/engine.json and the HASTYCR_*
+variables, or under the --card-table / --engine-config given to collect or loop; loop hands
+them on to collect and to the evaluation. collect resolves the config once and hands it to
+every worker (the pool initializer rs_engine.set_active, and the engine slot of each match
+task, as rs_eval does), then writes it with the engine's fingerprint into its .npz (ENGINE_KEY).
+train copies that record into the checkpoint it writes (STAMP_KEY), and loop into the run's
+args.json ("engine", "engine_fingerprint", "engine_id"). A run continued under another engine
+is refused: start a new --name.
+
+Visibility (E12): the sampling agent decides on, and records, the rows its checkpoint's rows
+showed (meta "visibility": legacy before E12, else public), as RSAgent does in rs_eval. Only
+checkpoints of the legacy row schema (meta "schema" rs_rows/legacy, or none) are played and
+trained here: KEYS and the update below are that layout's.
+
 Nothing here touches the emulator or the game.
 """
 from __future__ import annotations
@@ -35,9 +49,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +63,17 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tools"), str(ROOT / "src")]
 
 RUNS = ROOT / "runs" / "selfplay"
 KEYS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "opp_seen", "opp_last", "opp_last_age")
+#: The live configuration every self-play and evaluation match runs under: the client's command
+#: delay, and decisions on a board rebuilt from public information 21 ticks ahead (rs_eval --lead).
+DELAY, LEAD = 21, -21
+#: The .npz entry collect writes: the engine record of its rollouts, as JSON text (engine_record).
+ENGINE_KEY = "engine_json"
+#: The checkpoint key train writes that record under (next to "model" and "meta").
+STAMP_KEY = "selfplay"
+#: What the record holds, and what args.json carries of it.
+STAMP_FIELDS = ("engine", "engine_fingerprint", "engine_id")
+#: The row layout KEYS and the update read (rs_rows.SCHEMA before E14's v2).
+LEGACY_SCHEMA = "rs_rows/legacy"
 DECIDE = 10
 TOP_TILES = 8          # tiles sampled among the model's best legal ones
 EXTRA_TILES = 8        # plus this many random legal tiles from anywhere
@@ -68,17 +95,21 @@ def _sampling_agent():
     import rs_rows as RR
 
     class SPAgent(rs_eval.RSAgent):
-        """RSAgent.act with a sampled slot and tile, recording every decision."""
+        """RSAgent.act with a sampled slot and tile, recording every decision. The rows see
+        what the checkpoint's rows saw (RSAgent reads `visibility` from its meta; rs_eval.play
+        sets a --visibility over it)."""
 
         def __init__(self, ckpt, seed=0, wait_keep=0.35):
             super().__init__(ckpt, seed=seed, wait_keep=wait_keep)
+            check_schema(self.meta, ckpt)
             self.records = []
 
         def act(self, battle, state, team, mem, tick, sub, royalesim):
             torch = self.torch
             self._team = team
             view = self.ahead(battle, state)
-            row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live)
+            row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live,
+                             visibility=self.visibility)
             b = self.batch(row)
             with torch.no_grad():
                 gate, _, value = self.model(b, card_ids=b["hand"][:, 0].clamp(min=0))
@@ -145,6 +176,78 @@ def _sampling_agent():
     return SPAgent
 
 
+def check_schema(meta, source="checkpoint"):
+    """ValueError unless `meta` (a checkpoint's) is of the legacy row schema, LEGACY_SCHEMA (or
+    says none, as every checkpoint before E14): the rows recorded here (KEYS) and the update in
+    train are that layout's, and another one would be misread silently."""
+    schema = (meta or {}).get("schema") or LEGACY_SCHEMA
+    if schema not in (LEGACY_SCHEMA, "legacy"):
+        raise ValueError(f"{source}: a checkpoint of row schema {schema!r}; tools/rs_selfplay.py "
+                         f"plays and trains {LEGACY_SCHEMA!r} checkpoints only")
+
+
+# ----------------------------------------------------------------------------
+# the engine (tools/rs_engine.py)
+# ----------------------------------------------------------------------------
+
+def engine_config(args):
+    """The rs_engine.EngineConfig of --card-table / --engine-config (rs_engine.config_from_args;
+    data/engine.json and the HASTYCR_* variables when neither is given). A bad setting or a
+    missing file exits with status 2."""
+    import rs_engine
+    try:
+        return rs_engine.config_from_args(args)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"engine config: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None
+
+
+def engine_argv(args):
+    """--engine-config / --card-table as this command was given them, for its subprocesses."""
+    out = []
+    if getattr(args, "engine_config", None) is not None:
+        out += ["--engine-config", str(args.engine_config)]
+    if getattr(args, "engine_card_table", None) is not None:
+        out += ["--card-table", str(args.engine_card_table)]
+    return out
+
+
+def engine_record(cfg, rs=None):
+    """What the rollouts run on: {"engine": `cfg` with the match delay (to_json),
+    "engine_fingerprint": rs_engine.fingerprint of an undelayed Battle under `cfg` (as rs_eval
+    takes it), "engine_id": its id}. `rs`: the royalesim module (None: import it)."""
+    import rs_engine
+    rs = rs_engine.royalesim_module(rs)
+    fp = rs_engine.fingerprint(rs_engine.make_battle(cfg.undelayed(), rs), rs, cfg)
+    return {"engine": cfg.delayed(DELAY).to_json(), "engine_fingerprint": fp, "engine_id": fp["id"]}
+
+
+def read_engine_record(data):
+    """The engine record a collect wrote (ENGINE_KEY) into its .npz: `data` is the np.load of it
+    or its path. None for an .npz without one (written before it was recorded) or a missing file."""
+    if isinstance(data, (str, os.PathLike)):
+        try:
+            with np.load(data) as d:
+                return read_engine_record(d)
+        except OSError:
+            return None
+    if ENGINE_KEY not in data.files:
+        return None
+    return json.loads(str(data[ENGINE_KEY][()]))
+
+
+def run_engine(args_json):
+    """The engine record (STAMP_FIELDS) a run's args.json holds once a collect reported one; {}
+    for a new run, or one from before the record."""
+    try:
+        known = json.loads(Path(args_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(known, dict) or not known.get("engine_id"):
+        return {}
+    return {k: known.get(k) for k in STAMP_FIELDS}
+
+
 def tile_probs(lg):
     """Tile choice among the candidates: (1 - EXPLORE) x the model's softmax
     + EXPLORE spread evenly, so every candidate keeps a real chance."""
@@ -182,13 +285,14 @@ def _collect_one(task):
     return out["result"], out["crowns"], r, out["records"]
 
 
-def pick_matches(n, seed, split="train"):
-    """Hog 2.6 matches from IL_Replay (train split by default), shuffled by seed."""
+def pick_matches(n, seed, split="train", engine=None):
+    """Hog 2.6 matches from IL_Replay (train split by default), shuffled by seed. Card names
+    from a Battle under `engine` (an rs_engine config; None: rs_engine.active())."""
     import random
     import pyarrow.parquet as pq
     import rs_rows as RR
     from royalesim_redrive import CORPUS, base_key
-    _, names, _, _ = RR._setup()
+    _, names, _, _ = RR._setup(engine)
     parts = sorted((CORPUS / "replays").glob("part-*.parquet"))
     rnd = random.Random(seed)
     rnd.shuffle(parts)
@@ -215,13 +319,23 @@ def pick_matches(n, seed, split="train"):
 
 
 def collect(args):
-    from concurrent.futures import ProcessPoolExecutor
-    picked = pick_matches(args.matches, args.seed)
-    tasks = [(t, args.ckpt, "agent", args.seed * 1000 + k, args.opponent, 21, -21, False, False, False)
+    """--matches battles -> one .npz of decisions, with the engine record (ENGINE_KEY). The
+    engine config is resolved here once and handed to every worker: as the pool initializer
+    (rs_engine.set_active, as rs_eval does) and in each task's engine slot (rs_eval.play
+    args[10]). The tasks are otherwise rs_eval.play's 10-tuple as before: memory lag, decision
+    rule and visibility are play's defaults (the checkpoint's visibility)."""
+    import rs_engine
+    cfg = engine_config(args)
+    rs_engine.set_active(cfg)
+    engine = engine_record(cfg)
+    picked = pick_matches(args.matches, args.seed, engine=cfg)
+    tasks = [(t, args.ckpt, "agent", args.seed * 1000 + k, args.opponent, DELAY, LEAD, False, False,
+              False, cfg.to_json())
              for k, t in enumerate(picked)]
     t0 = time.time()
     recs, results = [], []
-    with ProcessPoolExecutor(args.workers) as pool:
+    with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
+                             initargs=(cfg.to_json(),)) as pool:
         for res in pool.map(_collect_one, tasks):
             if res is None:
                 continue
@@ -231,10 +345,12 @@ def collect(args):
                 row["ret"] = r
                 recs.append(row)
     out = {k: np.stack([x[k] for x in recs]) for k in recs[0]}
+    out[ENGINE_KEY] = np.array(json.dumps(engine, sort_keys=True))
     np.savez_compressed(args.out, **out)
     w = results.count("win") / max(1, len(results))
     print(json.dumps({"matches": len(results), "decisions": len(recs), "win_rate": round(w, 3),
-                      "seconds": round(time.time() - t0)}), flush=True)
+                      "seconds": round(time.time() - t0), "engine_id": engine["engine_id"]}),
+          flush=True)
 
 
 # ----------------------------------------------------------------------------
@@ -250,6 +366,7 @@ def train(args):
     def load(path):
         blob = torch.load(path, map_location="cpu")
         m = blob["meta"]
+        check_schema(m, path)
         net = TokenPolicy(m["n_cards"], m["n_units"], d=m.get("d", 192),
                           layers=m.get("layers", 4), heads=m.get("heads", 6))
         net.load_state_dict(blob["model"])
@@ -263,6 +380,7 @@ def train(args):
     ref.eval()
     wait_bias = math.log(1 / float(args.wait_keep))
     d = np.load(args.data)
+    engine = read_engine_record(d)          # what the rollouts ran on; stamped below
     n = len(d["gate_a"])
     adv_all = d["ret"] - d["v"]
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-6)
@@ -336,10 +454,16 @@ def train(args):
                           (ratio - 1).abs().mean().item()))
     s = np.mean(stats, 0)
     blob["model"] = {k: v.cpu() for k, v in model.state_dict().items()}
+    # The engine these weights last learned in (builtins only, so weights_only loads keep
+    # working); an older .npz has none, and the stamp --ckpt carried is not this update's.
+    blob.pop(STAMP_KEY, None)
+    if engine is not None:
+        blob[STAMP_KEY] = engine
     torch.save(blob, args.out)
     print(json.dumps({"rows": n, "pg": round(s[0], 4), "kl_gate": round(s[1], 4),
                       "kl_tile": round(s[2], 4), "value_bce": round(s[3], 4),
-                      "ratio_dev": round(s[4], 4)}), flush=True)
+                      "ratio_dev": round(s[4], 4),
+                      "engine_id": None if engine is None else engine.get("engine_id")}), flush=True)
 
 
 # ----------------------------------------------------------------------------
@@ -347,9 +471,25 @@ def train(args):
 # ----------------------------------------------------------------------------
 
 def loop(args):
+    """Collect, update, evaluate; resumes from the run's newest it*.pt. The engine flags go to
+    collect and to the evaluation; args.json records the engine (STAMP_FIELDS) once the first
+    collect reports it, and a launch or a collect under another engine is refused."""
     run = RUNS / args.name
     run.mkdir(parents=True, exist_ok=True)
-    (run / "args.json").write_text(json.dumps(vars(args), default=str))
+    args_json = run / "args.json"
+    cfg = engine_config(args)
+    flags = engine_argv(args)
+    want = cfg.delayed(DELAY).to_json()
+    prior = run_engine(args_json)           # what an earlier launch of this run collected under
+    if prior and prior["engine"] != want:
+        print(f"error: run {args.name!r} was collected under engine {json.dumps(prior['engine'])} "
+              f"(id {prior['engine_id']}); this launch resolves {json.dumps(want)}. Give it the "
+              "same --card-table / --engine-config (and HASTYCR_* settings), or start a new "
+              "--name.", file=sys.stderr, flush=True)
+        return 1
+    record = {**vars(args), "engine": want, **prior}
+    args_json.write_text(json.dumps(record, default=str))
+    print(f"engine: {cfg.delayed(DELAY).describe()}", flush=True)
     # Interpreters: HASTYCR_PY_ENGINE / HASTYCR_PY_TRAIN, machine.json, or .venvs/ (hastycr.machine).
     from hastycr import machine
     rg, bb = machine.py_engine(), machine.py_train()
@@ -361,7 +501,8 @@ def loop(args):
     if not ckpt.exists():
         import shutil
         shutil.copy(args.init, ckpt)
-    (run / "args.json").write_text(json.dumps({**vars(args), "wait_keep": wait_keep}, default=str))
+    record["wait_keep"] = wait_keep
+    args_json.write_text(json.dumps(record, default=str))
     log = run / "log.jsonl"
     start = max([int(p.stem[2:]) for p in run.glob("it*.pt")])
     for it in range(start, args.iters):
@@ -370,12 +511,24 @@ def loop(args):
         t0 = time.time()
         c = subprocess.run([str(rg), me, "collect", "--ckpt", str(ckpt), "--opponent", args.opponent,
                             "--matches", str(args.matches), "--workers", str(args.workers),
-                            "--seed", str(it + 1), "--out", str(data)],
+                            "--seed", str(it + 1), "--out", str(data), *flags],
                            capture_output=True, text=True)
         if c.returncode != 0:
             print(c.stderr[-2000:], flush=True)
             return 1
         col = json.loads(c.stdout.strip().splitlines()[-1])
+        engine = read_engine_record(data)
+        if engine is not None:
+            if not record.get("engine_id"):
+                record.update((k, engine.get(k)) for k in STAMP_FIELDS)
+                args_json.write_text(json.dumps(record, default=str))
+            elif (engine.get("engine_id"), engine.get("engine")) != (record["engine_id"],
+                                                                   record["engine"]):
+                print(f"error: iteration {it} was collected under engine id "
+                      f"{engine.get('engine_id')} {json.dumps(engine.get('engine'))}, run "
+                      f"{args.name!r} under {record['engine_id']} {json.dumps(record['engine'])}; "
+                      "start a new --name to change engines.", file=sys.stderr, flush=True)
+                return 1
         nxt = run / f"it{it + 1:03d}.pt"
         t = subprocess.run([str(bb), me, "train", "--ckpt", str(ckpt), "--ref", args.ref or args.init,
                             "--data", str(data), "--out", str(nxt), "--lr", str(args.lr),
@@ -391,7 +544,8 @@ def loop(args):
         if args.eval_every and (it + 1) % args.eval_every == 0:
             e = subprocess.run([str(rg), str(ROOT / "tools" / "rs_eval.py"), "--ckpt", str(nxt),
                                 "--opponent-ckpt", args.eval_opponent, "--matches", str(args.eval_matches),
-                                "--workers", str(args.workers), "--delay", "21", "--lead", "-21"],
+                                "--workers", str(args.workers), "--delay", str(DELAY),
+                                "--lead", str(LEAD), *flags],
                                capture_output=True, text=True)
             line = [l for l in e.stdout.splitlines() if " wins (" in l]
             rec["eval"] = line[-1] if line else e.stderr[-300:]
@@ -411,6 +565,8 @@ def main() -> int:
     c.add_argument("--workers", type=int, default=4)
     c.add_argument("--seed", type=int, default=1)
     c.add_argument("--out", required=True)
+    import rs_engine
+    rs_engine.add_engine_args(c)
     t = sp.add_parser("train")
     t.add_argument("--ckpt", required=True)
     t.add_argument("--ref", required=True)
@@ -440,6 +596,7 @@ def main() -> int:
     lp.add_argument("--eval-opponent", default=str(ROOT / "runs" / "tokens" / "rs_bc" / "ep01.pt"),
                     help="the reference every earlier number was measured against (the model "
                          "after rs_bc's first epoch; sim/train_tokens writes it as ep01.pt)")
+    rs_engine.add_engine_args(lp)
     args = ap.parse_args()
     return {"collect": collect, "train": train, "loop": loop}[args.cmd](args) or 0
 
