@@ -23,10 +23,15 @@ are bound to a single public IP, so a changed address fails every request with
 The HTTP side is `tools/cr_api.py` (U02 of docs/SEASON_UPDATES.md): the shared
 rate, the 429 back-off (a throttled battle log used to be dropped without a
 word), the custom User-Agent and `--base proxy` for RoyaleAPI's proxy. It
-answers with HTTP codes; this tool still stops on a 403, as it always has. The
-default transport stays curl over IPv4. The two output files are unchanged:
-`ladder_battles.csv` and `ladder_meta.json` under `--out`, both gitignored
-because they carry player tags.
+answers with HTTP codes; this tool stops on a 403, as it always has, and also
+on a 429 the back-off could not clear and on a 503 (maintenance): cr_api.STOP.
+A stop in one worker reaches the others, so the rest of the board is not walked
+against a refusing API. Courtesy (docs/SEASON_UPDATES.md 7.7): the rate is
+cr_api.DEFAULT_RATE (2 per second) unless --rate says otherwise, never above
+cr_api.MAX_RATE (5), shared by 2 workers. The default transport stays curl over
+IPv4. The two output files are unchanged: `ladder_battles.csv` and
+`ladder_meta.json` under `--out`, both gitignored because they carry player
+tags.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import collections
 import csv
 import json
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -59,37 +65,46 @@ FORBIDDEN = ("403 from the API. The key is bound to one public IP and this "
              "machine's has probably changed; the response body names the "
              "address it saw. Edit the key at developer.clashroyale.com "
              "rather than making a new one.")
+THROTTLED = ("429 from the API after the client's back-off: the key is being "
+             "throttled. The pull stops rather than keep asking; run it again "
+             "later, at a lower --rate.")
+MAINTENANCE = ("503 from the API: it is in maintenance (common during a game "
+               "update). The pull stops; run it again later.")
+WORKERS = 2
 
 
-def stop_on_403(resp: cr_api.Response | None) -> None:
-    """A 403 fails every later call too, so the pull stops, as it always has."""
-    if resp is not None and resp.status == 403:
-        said = (f" The API said: {resp.reason}: {resp.message}"
-                if resp.reason or resp.message else "")
-        raise SystemExit(FORBIDDEN + said)
+def stop_message(resp: cr_api.Response) -> str:
+    """Why the pull stops on `resp` (a status in cr_api.STOP)."""
+    said = (f" The API said: {resp.reason}: {resp.message}"
+            if resp.reason or resp.message else "")
+    head = {403: FORBIDDEN, 429: THROTTLED}.get(resp.status, MAINTENANCE)
+    return head + said
 
 
-def get(client: cr_api.Client, path: str) -> dict | list | None:
-    """One GET: the parsed body of a 200, else None (a 403 stops the pull)."""
-    resp = client.get(path)
-    stop_on_403(resp)
-    return resp.data if resp.ok else None
+def stop_if_fatal(resp: cr_api.Response | None) -> None:
+    """A 403, a 429 the back-off could not clear or a 503 fails every later
+    call too, so the pull stops (a 403 always did)."""
+    if resp is not None and resp.status in cr_api.STOP:
+        raise SystemExit(stop_message(resp))
 
 
 def leaderboard(client: cr_api.Client, want: int) -> list[dict]:
     """The Path of Legends global top, paged until `want` players."""
     players, last = client.paged("locations/global/pathoflegend/players", want=want)
-    stop_on_403(last)
+    stop_if_fatal(last)
     return players
 
 
-def battles_for(client: cr_api.Client, tag: str) -> list[dict]:
+def battles_for(client: cr_api.Client, tag: str) -> tuple[list[dict], cr_api.Response | None]:
+    """A player's battle log and the response (None for a value that is no tag,
+    which gives no log, as a 404 would)."""
     try:
         path = f"players/{cr_api.tag_path(tag)}/battlelog"
-    except ValueError:                  # not a tag: no log, as a 404 would give
-        return []
-    data = get(client, path)
-    return data if isinstance(data, list) else []
+    except ValueError:
+        return [], None
+    resp = client.get(path)
+    data = resp.data if resp.ok else None
+    return (data if isinstance(data, list) else []), resp
 
 
 def deck_of(side: dict) -> str:
@@ -126,9 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--top", type=int, default=1000,
                     help="how many Path of Legends players to walk")
-    ap.add_argument("--rate", type=float, default=5.0,
-                    help="requests per second ceiling, kept deliberately low")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--rate", type=float, default=cr_api.DEFAULT_RATE,
+                    help=f"requests per second ceiling, kept deliberately low "
+                         f"(default {cr_api.DEFAULT_RATE:g}, at most "
+                         f"{cr_api.MAX_RATE:g})")
+    ap.add_argument("--workers", type=int, default=WORKERS,
+                    help=f"threads sharing that rate (default {WORKERS})")
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "ladder")
     ap.add_argument("--base", default=None,
                     help=f"API base: official (default), proxy ({cr_api.PROXY_BASE}, "
@@ -138,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="curl over IPv4, as before (default), or Python's urllib, "
                          "also over IPv4")
     args = ap.parse_args(argv)
+    if not 0.1 <= args.rate <= cr_api.MAX_RATE:
+        ap.error(f"--rate {args.rate:g}: between 0.1 and {cr_api.MAX_RATE:g} "
+                 "requests per second (courtesy, docs/SEASON_UPDATES.md 7.7)")
+    if not 1 <= args.workers <= 8:
+        ap.error(f"--workers {args.workers}: from 1 to 8")
 
     try:
         token = cr_api.read_token(TOKEN_FILE)
@@ -163,9 +186,20 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: dict = {}
     done = [0]
+    stop = threading.Event()
+    fatal: list[cr_api.Response] = []
 
     def walk(player):
-        for battle in battles_for(client, player["tag"]):
+        # A stop seen by any worker ends the walk for all of them: the queued
+        # players are skipped, not asked against a refusing API.
+        if stop.is_set():
+            return
+        battles, resp = battles_for(client, player["tag"])
+        if resp is not None and resp.status in cr_api.STOP:
+            fatal.append(resp)
+            stop.set()
+            return
+        for battle in battles:
             for row in rows_from(battle, elo):
                 # The same battle is in both players' logs; key it so it lands
                 # once regardless of whose log it came from.
@@ -179,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with ThreadPoolExecutor(args.workers) as pool:
         list(pool.map(walk, players))
+    if fatal:
+        raise SystemExit(stop_message(fatal[0]))
     if not rows:
         raise SystemExit("no ranked battles came back")
 

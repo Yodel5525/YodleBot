@@ -19,8 +19,12 @@ back-off, the custom User-Agent, IPv4, and HTTP codes instead of exits.
 Commands:
   init   writes <data>/opponents/config.json: the clan tag, the owner's main account, Yodle2
          (the bot) and any friends who spar Yodle2 from outside the clan. Run again to change a
-         field; --friend adds and --drop-friend removes. --check looks each tag up (one call
-         each). data/opponents.example.json is the committed template: placeholders only.
+         field; --friend adds and --drop-friend removes; --base, --transport, --rate and
+         --form-rule are saved too (so `init --base proxy` moves every later pull to the
+         proxy). --check looks each tag up (one call each). A tag with a character real tags
+         never use (only 0289PYLQGRJCUV; a typed O is read as 0), or a placeholder such as
+         "#CLANTAG", is refused and nothing is written. data/opponents.example.json is the
+         committed template: placeholders only.
   pull   the daily pull: the clan roster, the battle log of Yodle2, the owner, every member and
          every friend, then /v1/cards. New 1v1 battles go into battles.jsonl.
   meta   the top Path of Legends players and their battle logs; their Path of Legends 1v1
@@ -120,8 +124,15 @@ UNCONFIRMED (here, beyond cr_api.UNCONFIRMED) lists what this module assumes; th
 pull's own counts report on each.
 
 Courtesy (7.7): DEFAULT_RATE 2 requests per second (cr_api.DEFAULT_RATE), a config rate above
-MAX_RATE is refused, a 429 backs off (cr_api), and a 403 or 503 stops the run at once, since
-every later call would fail the same way. The daily pull is about 55 calls.
+MAX_RATE is refused, a 429 backs off (cr_api), and a 403, a 429 the back-off could not clear,
+or a 503 stops the run at once (FATAL, cr_api.STOP), since every later call would fail the
+same way. meta also stops after META_MAX_FAILS_IN_A_ROW failed logs in a row (the network or
+the API is down). The daily pull is about 55 calls.
+
+The lock (pull.lock): pull and meta hold it; it carries a token of its own, its time is
+refreshed after every log (a heartbeat), so only a run that made no progress for LOCK_STALE_S
+looks stale and is taken over; a run removes the lock only while it still holds it, and meta
+stops when another run has taken it over.
 
 Exit codes: 0 ok; 1 the API answered with an error, a log failed, or another pull holds the
 lock; 2 a bad setting (no config, a placeholder tag, no token, a bad deck).
@@ -136,6 +147,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -172,17 +184,19 @@ SCHEMA = 1
 RECORD_VERSION = 1
 EXIT_OK, EXIT_API, EXIT_SETTING = cr_api.EXIT_OK, cr_api.EXIT_API, cr_api.EXIT_SETTING
 
-#: A 403 (key or IP) and a 503 (maintenance) fail every later call too: the run stops.
-FATAL = frozenset({403, 503})
+#: A 403 (key or IP), a 429 still there after the back-off, and a 503 (maintenance) fail every
+#: later call too: the run stops (cr_api.STOP).
+FATAL = cr_api.STOP
 DEFAULT_RATE = cr_api.DEFAULT_RATE
-MAX_RATE = 5.0                  # requests per second; a config asking for more is refused
+MAX_RATE = cr_api.MAX_RATE      # requests per second; a config asking for more is refused
 KEEP_RAW_DAYS = 30
 META_TOP = 1000
 META_WEEKS = 8
 META_DUE_DAYS = 6.5             # meta --if-due runs when the last complete one is older
 META_WORKERS = 2
 META_SEASONS_BACK = 3           # completed seasons tried when the current board gives nothing
-LOCK_STALE_S = 3 * 3600
+META_MAX_FAILS_IN_A_ROW = 20    # meta stops after this many failed logs in a row
+LOCK_STALE_S = 3 * 3600         # a lock whose heartbeat is this old is taken over
 
 DECK_SIZE = 8
 EVO_BIT, HERO_BIT = 1, 2
@@ -201,7 +215,8 @@ TOP_TYPES = frozenset({"pathOfLegend", "pathOfLegendMatch"})
 #: Roles that make Yodle2's opponent a sparring partner.
 PARTNER_ROLES = frozenset({"owner", "member", "friend"})
 KINDS = ("spar", "bot_unknown", "clan", "top", "other")
-#: Real tags use only these characters; another one is warned about, not refused.
+#: Real tags use only these characters (RoyaleAPI's cr-api-docs faq.md: "0289CGJLPQRUVY"); a
+#: config tag with another one is refused.
 TAG_ALPHABET = frozenset("0289PYLQGRJCUV")
 
 BOARD_PATH = "locations/global/pathoflegend/players"
@@ -641,16 +656,29 @@ class Config:
         return {"schema": SCHEMA, **out}
 
 
+#: What a placeholder looks like: the template's "#CLAN_TAG", an instruction's "#CLANTAG" or
+#: "#YODLE2TAG", "#<clan tag>", "#...". No real tag has any of these (T, A, _, <, . are not in
+#: TAG_ALPHABET), so a match is refused with a message that says so.
+_PLACEHOLDER = re.compile(r"TAG|_|<|>|\.\.\.", re.I)
+
+
 def _tag_value(value: Any, where: str) -> str:
+    """A config tag: cr_api.norm_tag, refusing placeholders and characters real tags never use
+    (a typo there would otherwise pull nothing, or someone else, every day)."""
     text = "" if value is None else str(value).strip()
     if not text:
         raise ConfigError(f"{where} is not set: run tools/opponents.py init")
+    if _PLACEHOLDER.search(text):
+        raise ConfigError(f"{where} is {text!r}, a placeholder: put the real tag (from the game: "
+                          "the profile, under the name) in tools/opponents.py init")
     got = clean_tag(text)
     if not got:
-        if "_" in text or "TAG" in text.upper():
-            raise ConfigError(f"{where} is {text!r}, the template's placeholder: set the real tag "
-                              "with tools/opponents.py init")
         raise ConfigError(f"{where}: {text!r} is not a tag")
+    odd = odd_tag_letters(got)
+    if odd:
+        raise ConfigError(f"{where} {got}: real tags never use {odd!r} (only "
+                          f"{''.join(sorted(TAG_ALPHABET))}; a typed O is read as 0); copy the "
+                          "tag from the game")
     return got
 
 
@@ -670,11 +698,6 @@ def parse_config(data: Any, where: str = CONFIG) -> Config:
         raise ConfigError(f"{where} friends must be a list of tags")
     friends = tuple(dict.fromkeys(_tag_value(t, f"{where} friends[{i}]")
                                   for i, t in enumerate(friends_raw)))
-    for name, tag in [*tags.items(), *(("friend", t) for t in friends)]:
-        odd = odd_tag_letters(tag)
-        if odd:
-            warnings.append(f"{where} {name} {tag}: real tags never use {odd!r} (only "
-                            f"{''.join(sorted(TAG_ALPHABET))}); check it")
     if tags["owner"] == tags["bot"]:
         raise ConfigError(f"{where}: owner and bot are the same tag")
     base = str(data.get("base") or "").strip()
@@ -834,11 +857,14 @@ class Store:
 
 
 class Lock:
-    """An exclusive lock file for pull and meta; one older than LOCK_STALE_S is taken over."""
+    """An exclusive lock file for pull and meta. It holds a token of its own; touch() refreshes
+    its time after every log (the heartbeat), so only a lock with no heartbeat for LOCK_STALE_S
+    is taken over; __exit__ removes the file only while it still holds this lock's token."""
 
     def __init__(self, path: Path, *, stale: float = LOCK_STALE_S):
         self.path = Path(path)
         self.stale = stale
+        self.token = f"{os.getpid()}-{secrets.token_hex(8)}"
 
     def __enter__(self) -> Lock:
         for _ in range(2):
@@ -850,19 +876,38 @@ class Lock:
                 except OSError:
                     continue
                 if age <= self.stale:
-                    raise Busy(f"another pull holds {self.path} (started {age / 60:.0f} min "
-                               "ago); delete the file if no pull is running") from None
+                    raise Busy(f"another pull holds {self.path} (last sign of life "
+                               f"{age / 60:.0f} min ago); delete the file if no pull is "
+                               "running") from None
                 try:
                     self.path.unlink()
                 except OSError:
                     pass
                 continue
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps({"pid": os.getpid(), "started": iso(utcnow())}))
+                handle.write(json.dumps({"pid": os.getpid(), "token": self.token,
+                                         "started": iso(utcnow())}))
             return self
         raise Busy(f"cannot take {self.path}")
 
+    def owned(self) -> bool:
+        """Whether the file still holds this lock's token (not taken over as stale)."""
+        got = read_json(self.path)
+        return isinstance(got, dict) and got.get("token") == self.token
+
+    def touch(self) -> bool:
+        """The heartbeat: refreshes the file's time. False when another run took it over."""
+        if not self.owned():
+            return False
+        try:
+            os.utime(self.path, None)
+        except OSError:
+            return False
+        return True
+
     def __exit__(self, *exc) -> None:
+        if not self.owned():                    # another run's lock now: leave it
+            return
         try:
             self.path.unlink()
         except OSError:
@@ -1004,8 +1049,10 @@ def _all_members(client: cr_api.Client, clan: str) -> tuple[list[Any] | None, cr
 
 
 def pull(cfg: Config, client: cr_api.Client, store: Store, *,
-         now: dt.datetime | None = None) -> dict[str, Any]:
-    """The daily pull. Returns its summary (also written to state.json)."""
+         now: dt.datetime | None = None,
+         heartbeat: Callable[[], Any] | None = None) -> dict[str, Any]:
+    """The daily pull. Returns its summary (also written to state.json). `heartbeat` (the
+    lock's touch) is called after every log."""
     now = now or utcnow()
     store.ensure()
     state = store.read_state()
@@ -1034,6 +1081,8 @@ def pull(cfg: Config, client: cr_api.Client, store: Store, *,
     for tag in order if fatal is None else ():
         logs += 1
         resp = client.battlelog(tag)
+        if heartbeat is not None:
+            heartbeat()
         save_raw(store, f"battlelog_{_tag_file(tag)}", resp, now, keep)
         if resp.status in FATAL:
             fatal = resp
@@ -1132,7 +1181,12 @@ def top_board(client: cr_api.Client, top: int, now: dt.datetime
 
 
 def meta(cfg: Config, client: cr_api.Client, store: Store, *, top: int | None = None,
-         workers: int = META_WORKERS, now: dt.datetime | None = None) -> dict[str, Any]:
+         workers: int = META_WORKERS, now: dt.datetime | None = None,
+         heartbeat: Callable[[], Any] | None = None,
+         max_fails_in_a_row: int = META_MAX_FAILS_IN_A_ROW) -> dict[str, Any]:
+    """The top players' Path of Legends battles. It stops on a FATAL status, after
+    `max_fails_in_a_row` failed logs in a row, or when `heartbeat` (the lock's touch, called
+    after every log) returns False because another run took the lock over."""
     now = now or utcnow()
     store.ensure()
     state = store.read_state()
@@ -1147,20 +1201,31 @@ def meta(cfg: Config, client: cr_api.Client, store: Store, *, top: int | None = 
                   "board": 0, "board_path": "", "logs_ok": 0, "failed": failed,
                   "failed_count": len(failed), "added": 0, "dropped": {},
                   "held": store.count(store.meta), "weeks": cfg.meta_weeks,
-                  "calls": client.calls}
+                  "calls": client.calls, "stopped": None}
         state["meta"] = result
         store.write_state(state)
         return result
     standing = {clean_tag(p.get("tag")): (_int(p.get("eloRating")), _int(p.get("rank")))
                 for p in board}
     abort = threading.Event()
+    streak_lock = threading.Lock()
+    streak = [0]
+    stopped: list[str] = []
 
     def one(tag: str) -> tuple[str, cr_api.Response | None]:
+        # Checked and counted in the worker, so with one worker the stop is exact; with two,
+        # at most the log already in flight is asked after it.
         if abort.is_set():
             return tag, None
         resp = client.battlelog(tag)
         if resp.status in FATAL:
             abort.set()
+        with streak_lock:
+            streak[0] = 0 if resp.ok else streak[0] + 1
+            if streak[0] >= max(1, int(max_fails_in_a_row)) and not abort.is_set():
+                stopped.append(f"{streak[0]} failed logs in a row (the network or the API is "
+                               "failing); stopped")
+                abort.set()
         return tag, resp
 
     def role_of(tag: str) -> str:
@@ -1176,6 +1241,9 @@ def meta(cfg: Config, client: cr_api.Client, store: Store, *, top: int | None = 
         for tag, resp in pool.map(one, list(standing)):
             if resp is None:
                 continue
+            if heartbeat is not None and heartbeat() is False and not abort.is_set():
+                stopped.append("another run took the lock over; stopped")
+                abort.set()
             save_raw(store, f"meta_battlelog_{_tag_file(tag)}", resp, now, cfg.keep_raw_days)
             if resp.status in FATAL and fatal is None:
                 fatal = resp
@@ -1210,12 +1278,13 @@ def meta(cfg: Config, client: cr_api.Client, store: Store, *, top: int | None = 
 
     store.rewrite(store.meta, keep)
     result = {
-        "started_at": iso(now), "ok": fatal is None and not failures,
+        "started_at": iso(now), "ok": fatal is None and not failures and not stopped,
         "fatal": fatal.status if fatal else None, "board": len(board), "board_path": source,
         "logs_ok": logs_ok, "failed": failed, "failed_count": failures, "added": added,
         "dropped": dict(sorted(dropped.items())), "held": store.count(store.meta),
-        "weeks": cfg.meta_weeks, "calls": client.calls}
-    if fatal is None and logs_ok >= max(1, len(board) // 2):
+        "weeks": cfg.meta_weeks, "calls": client.calls,
+        "stopped": stopped[0] if stopped else None}
+    if fatal is None and not stopped and logs_ok >= max(1, len(board) // 2):
         state["meta_at"] = iso(now)
     state["meta"] = result
     store.write_state(state)
@@ -1581,7 +1650,8 @@ def print_probe(report: Mapping[str, Any]) -> None:
         print("          check this against what was played: an evolution in slot 1, a hero in "
               "slot 2")
     change = "" if report["recommend"] == report["rule"] else \
-        f" (config has {report['rule']}: set \"form_rule\": \"{report['recommend']}\")"
+        (f" (config has {report['rule']}: run tools/opponents.py init --form-rule "
+         f"{report['recommend']})")
     print(f"verdict   form_rule {report['recommend']}{change}: {report['why']}")
 
 
@@ -1645,6 +1715,8 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--friend", action="append", default=[],
                       help="a sparring partner outside the clan (repeatable)")
     init.add_argument("--drop-friend", action="append", default=[], help="remove a friend")
+    init.add_argument("--form-rule", choices=FORM_RULES, default=None,
+                      help="how battle-log forms are read (default slot; probe recommends one)")
     init.add_argument("--check", action="store_true",
                       help="look every tag up through the API (one call each)")
     sub.add_parser("pull", parents=[common, api], help="the daily pull")
@@ -1701,23 +1773,27 @@ def _cmd_init(args, store: Store, transport, rate) -> int:
     data = dict(existing) if isinstance(existing, dict) else template()
     data["_comment"] = ("Local settings for tools/opponents.py (gitignored with the folder). "
                         "Change them with tools/opponents.py init.")
-    for name in ("clan", "owner", "bot"):
-        value = getattr(args, name)
-        if value:
-            got = clean_tag(value)
-            if not got:
-                print(f"opponents: --{name} {value!r} is not a tag", file=sys.stderr)
-                return EXIT_SETTING
-            data[name] = got
-    friends = [clean_tag(t) or t for t in data.get("friends") or []]
-    for value in args.friend:
-        got = clean_tag(value)
-        if not got:
-            print(f"opponents: --friend {value!r} is not a tag", file=sys.stderr)
-            return EXIT_SETTING
-        friends.append(got)
+    try:
+        for name in ("clan", "owner", "bot"):
+            value = getattr(args, name)
+            if value:
+                data[name] = _tag_value(value, f"--{name}")
+        friends = [clean_tag(t) or t for t in data.get("friends") or []]
+        friends += [_tag_value(value, "--friend") for value in args.friend]
+    except ConfigError as exc:
+        print(f"opponents: {exc}", file=sys.stderr)
+        return EXIT_SETTING
     drop = {clean_tag(t) for t in args.drop_friend}
     data["friends"] = [t for t in dict.fromkeys(friends) if t not in drop]
+    # The API settings are saved too: `init --base proxy` moves every later pull to the proxy.
+    if args.base is not None:
+        data["base"] = str(args.base).strip()
+    if args.transport is not None:
+        data["transport"] = args.transport
+    if args.rate is not None:
+        data["rate"] = args.rate
+    if args.form_rule is not None:
+        data["form_rule"] = args.form_rule
     try:
         cfg = parse_config(data, "config")
     except ConfigError as exc:
@@ -1727,7 +1803,9 @@ def _cmd_init(args, store: Store, transport, rate) -> int:
     write_json(store.config, {"_comment": data["_comment"], **cfg.to_json()})
     for line in cfg.warnings:
         print(f"WARN      {line}")
-    print(f"config    {store.config}: clan, owner, bot and {len(cfg.friends)} friends")
+    print(f"config    {store.config}: clan, owner, bot and {len(cfg.friends)} friends; base "
+          f"{cfg.base or 'official'}, transport {cfg.transport}, rate {cfg.rate:g}/s, form rule "
+          f"{cfg.form_rule}")
     if not args.check:
         return EXIT_OK
     client = build_client(cfg, args, store, transport=transport, rate=rate)
@@ -1738,7 +1816,9 @@ def _cmd_init(args, store: Store, transport, rate) -> int:
     for what, call, tag in lookups:
         resp = call(tag)
         if resp.ok and isinstance(resp.data, dict):
-            print(f"check     {what}: {resp.data.get('name')!r}")
+            # ascii(): a clan name with an emoji must not crash a console that is not UTF-8
+            # (cp1252 when the output is redirected on Windows).
+            print(f"check     {what}: {ascii(resp.data.get('name'))}")
         else:
             print(f"check     {what}: {resp.hint()}")
             code = EXIT_API
@@ -1856,16 +1936,19 @@ def main(argv: Sequence[str] | None = None, *, transport: cr_api.Transport | Non
             return EXIT_OK
         client = build_client(cfg, args, store, transport=transport, rate=rate)
         store.ensure()
-        with Lock(store.lock):
+        with Lock(store.lock) as lock:
             if args.cmd == "pull":
-                result = pull(cfg, client, store, now=now)
+                result = pull(cfg, client, store, now=now, heartbeat=lock.touch)
                 _print_pull(result, store)
                 return EXIT_OK if result["ok"] else EXIT_API
-            result = meta(cfg, client, store, top=args.top, workers=args.workers, now=now)
+            result = meta(cfg, client, store, top=args.top, workers=args.workers, now=now,
+                          heartbeat=lock.touch)
             print(f"meta      board {result['board']} players ({result['board_path'] or '-'})"
                   f"; {result['logs_ok']} logs, {result['failed_count']} failed; "
                   f"{result['added']} new battles; {result['held']} held "
                   f"({cfg.meta_weeks} weeks)")
+            if result.get("stopped"):
+                print(f"STOPPED   {result['stopped']}")
             for item in result["failed"][:5]:
                 print(f"FAILED    {item['what']}: {item['hint']}")
             return EXIT_OK if result["ok"] else EXIT_API

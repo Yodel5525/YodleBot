@@ -14,7 +14,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#2GJUV9",
+    "tag": "#02GJUV9",
     "name": "Fixture Mate 1",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -22,7 +22,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -120,7 +120,7 @@
   ],
   "opponent": [
    {
-    "tag": "#Y0GRC2",
+    "tag": "#0Y0GRC2",
     "name": "Fixture Bot",
     "crowns": 2,
     "kingTowerHitPoints": 4824,
@@ -128,7 +128,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -251,7 +251,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#2GJUV9",
+    "tag": "#02GJUV9",
     "name": "Fixture Mate 1",
     "crowns": 2,
     "kingTowerHitPoints": 4824,
@@ -260,7 +260,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -358,7 +358,7 @@
   ],
   "opponent": [
    {
-    "tag": "#U2CRQ9",
+    "tag": "#0U2CRQ9",
     "name": "Fixture Outsider 2",
     "crowns": 0,
     "kingTowerHitPoints": 4824,

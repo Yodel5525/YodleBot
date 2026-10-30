@@ -54,11 +54,13 @@ What check looks at (section 4.1, step 2):
                  answers; a change from the ledger's or the last check's revision is reported.
   pool           when U03 last pulled the opponent pool (<data>/opponents/state.json).
 
-A new client build is accepted by itself (basis auto, into <runs>/updates/clients.json) when the
-same check found no newer royalesim, ran the radar against a previous snapshot and found no
+A new client build is accepted by itself (basis auto, into <runs>/updates/clients.json) only on
+the day a check first sees it (state.json "pending_client" keeps that day), and only when that
+day's check found no newer royalesim, ran the radar against a previous snapshot and found no
 roster or form change, and found no calendar event since the last check or today, and no
 earlier check the same day found any of these (state.json "noisy_on"). Otherwise it stays a
-warning and exit 11 until the owner accepts it (scripts\game_update.ps1 -AcceptClient -Note).
+warning and exit 11 until the owner accepts it (scripts\game_update.ps1 -AcceptClient -Note):
+a later quiet day does not accept it (section 4.1, "the same day's check").
 
 What it writes, all under <runs>/updates/ (runs/ is gitignored):
   status.json   everything above, the verdict, the warnings and the currency line
@@ -826,23 +828,55 @@ def slug_function() -> Callable[[str], str]:
     return fn if callable(fn) else _slug_fallback
 
 
-def api_cards() -> tuple[Any, str]:
+_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+
+
+def mask_ips(text: str, keep: Iterable[str] = ()) -> str:
+    """`text` with every IPv4 address but those in `keep` written as <ip>. A 403 invalidIp
+    message names the PC's public address, and status.txt is printed in every selfcheck and
+    live header (and U12 copies reports into git): the address must not get there."""
+    kept = {str(k) for k in keep if k}
+    return _IPV4.sub(lambda m: m.group(0) if m.group(0) in kept else "<ip>", str(text))
+
+
+def api_settings(data_root: Path | None) -> dict[str, str]:
+    """base and transport from U03's <data>/opponents/config.json, when it sets them (read
+    loosely: tools/opponents.py validates the file). An owner on the proxy because of a changing
+    IP set it there, and this call must go the same way."""
+    if data_root is None:
+        return {}
+    cfg = gv.read_json(Path(data_root) / "opponents" / "config.json")
+    if not isinstance(cfg, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    base = cfg.get("base")
+    if isinstance(base, str) and base.strip():
+        out["base"] = base.strip()
+    transport = cfg.get("transport")
+    if isinstance(transport, str) and transport.strip().lower() in ("urllib", "curl"):
+        out["transport"] = transport.strip().lower()
+    return out
+
+
+def api_cards(data_root: Path | None = None) -> tuple[Any, str]:
     """(GET /v1/cards body or None, what happened). Through cr_api.Client, at one request per
-    second; never raises."""
+    second, with the opponents config's base and transport; never raises. What happened holds
+    no IP address (mask_ips)."""
     mod = _cr_api()
     if mod is None or not hasattr(mod, "Client"):
         return None, "tools/cr_api.py (U02) is not there"
+    keep = [getattr(mod, "PROXY_IP", "")]
     try:
-        client = mod.Client(per_second=1.0)
+        client = mod.Client(per_second=1.0, **api_settings(data_root))
     except Exception as exc:                # TokenError: no key; never prints the token
-        return None, f"no API client ({type(exc).__name__}: {exc})"
+        return None, mask_ips(f"no API client ({type(exc).__name__}: {exc})", keep)
     try:
         resp = client.cards()
     except Exception as exc:
-        return None, f"GET /v1/cards failed ({type(exc).__name__}: {exc})"
+        return None, mask_ips(f"GET /v1/cards failed ({type(exc).__name__}: {exc})", keep)
     if not getattr(resp, "ok", False):
         hint = resp.hint() if hasattr(resp, "hint") else f"HTTP {getattr(resp, 'status', '?')}"
-        return None, f"GET /v1/cards: {hint}"
+        return None, mask_ips(f"GET /v1/cards: {hint}", keep)
     return resp.data, "GET /v1/cards (tools/cr_api.py)"
 
 
@@ -1101,7 +1135,7 @@ def check_radar(updates: Path, data_root: Path, cards_file: Path | None,
                 (now - when).total_seconds() <= CARDS_FRESH_H * 3600:
             payload, source, fetched = unwrap_cards(raw), "<data>/opponents/cards_api.json", when
         else:
-            body, note = api_cards()
+            body, note = api_cards(data_root)
             payload = unwrap_cards(body)
             if payload is None:
                 return {"skipped": f"no /v1/cards snapshot: {note}"}
@@ -1445,15 +1479,26 @@ def run_check(opts: Options) -> tuple[int, dict[str, Any]]:
     except ValueError as exc:
         client = {"seen": False, "error": str(exc)}
         errors.append(f"client: {exc}")
-    # "The same day's check": a change seen by any check today keeps the day noisy, so running
-    # the check again the same day (the radar then compares with its own snapshot) does not
-    # accept the build.
+    # Section 4.1: a new build is accepted by itself only when the check of the day it appears
+    # finds nothing else. "The day it appears" is the day a check first saw it (state.json
+    # pending_client.first_checked); any later day it stays a WARN until -AcceptClient, so the
+    # build that came with a season's new forms is never accepted the morning after. A change
+    # seen by any check that day keeps the day noisy (noisy_on), so running the check again
+    # the same day (the radar then compares with its own snapshot) does not accept it either.
     today = now.date().isoformat()
     noisy = bool(rs.get("newer") or rad.get("changed") or cal["passed"] or cal["today"])
     quiet = (not noisy and state.get("noisy_on") != today
              and not rs.get("skipped") and not rs.get("error")
              and not rad.get("skipped") and not rad.get("error") and not rad.get("baseline"))
-    if client.get("seen") and client.get("verdict") in ("new", "unaccepted") and quiet:
+    new_build = bool(client.get("seen") and client.get("verdict") in ("new", "unaccepted"))
+    pending = state.get("pending_client") if isinstance(state.get("pending_client"), dict) \
+        else {}
+    first_checked = None
+    if new_build:
+        first_checked = (str(pending.get("first_checked") or "")
+                         if pending.get("version_code") == client.get("version_code")
+                         else "") or today
+    if new_build and quiet and first_checked == today:
         entry = {"version_code": client["version_code"], "version_name": client["version_name"],
                  "first_seen": (gv.parse_date(client.get("seen_at")) or now.date()).isoformat(),
                  "accepted": now.date().isoformat(), "basis": "auto",
@@ -1464,11 +1509,16 @@ def run_check(opts: Options) -> tuple[int, dict[str, Any]]:
                   "verdict": "ok", "auto_accepted": True}
         notes.append(f"client {client['version_code']} ({client['version_name']}) accepted by "
                      "itself (basis auto): nothing else changed today")
-    elif client.get("seen") and client.get("verdict") in ("new", "unaccepted"):
+    elif new_build:
         why = ("not in data/game_versions.json" if client["verdict"] == "new"
                else "listed but never accepted")
         warnings.append(f"client {client['version_code']} ({client['version_name']}) is {why}; "
                         f"line {client.get('relation')} of table {client.get('table_content')}")
+        client = {**client, "first_checked": first_checked}
+        if first_checked != today:
+            notes.append(f"client {client['version_code']} was first checked on {first_checked}, "
+                         "a day that was not quiet: it is not accepted by itself "
+                         "(scripts\\game_update.ps1 -AcceptClient -Note \"why\")")
     elif client.get("relation") == "ahead" and client.get("accepted"):
         notes.append(f"client {client.get('version_code')} is ahead of table "
                      f"{client.get('table_content')}, accepted {client['accepted']} "
@@ -1513,6 +1563,11 @@ def run_check(opts: Options) -> tuple[int, dict[str, Any]]:
     new_state.update({"schema": SCHEMA, "last_check": gv.iso(now), "last_exit": code})
     if noisy:
         new_state["noisy_on"] = today
+    if new_build and not client.get("auto_accepted"):
+        new_state["pending_client"] = {"version_code": client.get("version_code"),
+                                       "first_checked": first_checked}
+    else:
+        new_state.pop("pending_client", None)
     if il.get("sha"):
         new_state["il_replay"] = {"sha": il["sha"], "last_modified": il.get("last_modified"),
                                   "seen_at": gv.iso(now)}
@@ -1568,8 +1623,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the device's versionCode (default <updates>/last_seen_client.json)")
     c.add_argument("--cards", type=Path, default=None, metavar="FILE",
                    help="a saved /v1/cards response for the radar (no API call)")
-    c.add_argument("--skip", type=_parts, default=frozenset(), metavar="PARTS",
-                   help=f"comma-separated parts not to check: {', '.join(PARTS)}")
+    # nargs="+": in PowerShell 5.1 an unquoted pypi,radar is an array, which reaches python.exe
+    # as two arguments; "pypi,radar", "pypi radar" and two --skip all read the same.
+    c.add_argument("--skip", type=_parts, nargs="+", action="extend", default=[],
+                   metavar="PARTS",
+                   help=f"parts not to check, comma- or space-separated: {', '.join(PARTS)}")
     c.add_argument("--pre", action="store_true", help="count pre-releases on PyPI")
     c.add_argument("--max-sdists", type=int, default=MAX_SDISTS, metavar="N",
                    help=f"read at most the N newest new releases (default {MAX_SDISTS})")
@@ -1591,7 +1649,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         opts = Options(updates=args.updates if args.updates is not None else gv.updates_dir(),
                        data_root=args.data if args.data is not None else gv.data_root(),
                        ledger=args.ledger, client=args.client, cards=args.cards,
-                       skip=args.skip, pre=args.pre, max_sdists=args.max_sdists)
+                       skip=frozenset().union(*args.skip), pre=args.pre,
+                       max_sdists=args.max_sdists)
         code, status = run_check(opts)
         if args.json:
             print(json.dumps(status, indent=1))

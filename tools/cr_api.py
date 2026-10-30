@@ -42,18 +42,29 @@ What the client does:
 * 429 backs off. It waits the response's Retry-After (seconds or an HTTP date), or 2, 4, 8
   and 16 s without one, up to RETRIES times. The wait is put on the shared `Rate`, so every
   thread pauses, not only the one that was refused. A Retry-After longer than MAX_WAIT is not
-  waited out: the 429 is returned at once rather than asked again and again. 500, 502, 504
-  and "no response" are tried once more after TRANSIENT_WAIT. 503 (maintenance) is not
-  retried.
+  waited out: the 429 is returned at once rather than asked again and again. A 429 that is
+  returned (the retries ran out, or the Retry-After was too long) still holds the shared Rate
+  for the Retry-After, or for the next back-off step, so no thread asks again before then.
+  500, 502, 504 and "no response" are tried once more after TRANSIENT_WAIT. 503
+  (maintenance) is not retried.
+* STOP is the set of statuses after which a run of many calls stops, because every later call
+  would fail the same way: 403 (the key or its IP), 429 (still throttled after the back-off)
+  and 503 (maintenance). tools/opponents.py and tools/ladder_pull.py stop on them.
 * The User-Agent is always USER_AGENT, never Python's or curl's default.
+* Redirects are never followed: a 3xx comes back as its status. The urllib transport also
+  sends the token as an unredirected header, and curl runs with -q (no .curlrc) and without
+  -L. Following a Location would send the token to whatever host it names.
 * The base is the official API, RoyaleAPI's proxy, or another https URL ending in /v1. It
   comes from `--base` / `base=` or HASTYCR_CR_API_BASE. Plain http is refused, because the
   token travels in a header.
-* The token is read from .secrets/supercell_token (gitignored), BOM and line end stripped. It
+* The token is read from .secrets/supercell_token (gitignored), BOM and line end stripped. A
+  file saved as UTF-16 (Windows PowerShell 5.1's `>` and Out-File write UTF-16LE with a BOM)
+  is read too; other bytes that are not UTF-8 give a TokenError that says how to save it. It
   never appears in an argv, a log line, a repr or an error message. The curl transport passes
   it on stdin (`curl -K -`).
 * Rate: DEFAULT_RATE, 2 requests per second, shared by all threads (section 4.1 plans about
-  1,000 calls in about 8 minutes at 2 per second).
+  1,000 calls in about 8 minutes at 2 per second). MAX_RATE (5 per second) is the most the
+  tools that use this client accept from a command line or a config.
 * `slug` is the one card-name rule (section 7.3): lower case, dots dropped, every other run of
   non-alphanumerics becomes "-", with no "-" at either end. It turns an API display name into
   the RoyaleAPI key that data/cards (tools/rs_cards.py) and IL_Replay use: "Mini P.E.K.K.A" ->
@@ -77,6 +88,7 @@ the main account plays an evolution in slot 1 and a hero in slot 2 (section 7.1)
 from __future__ import annotations
 
 import argparse
+import codecs
 import dataclasses
 import datetime
 import email.utils
@@ -117,6 +129,7 @@ USER_AGENT = ("yodlebot-sparring/1.0 (Clash Royale friendly-battle sparring rese
               "tools/cr_api.py; low request rate)")
 
 DEFAULT_RATE = 2.0          # requests per second, across all threads
+MAX_RATE = 5.0              # the most a command line or config may ask for (courtesy, 7.7)
 DEFAULT_TIMEOUT = 30.0      # seconds per request
 RETRIES = 4                 # 429 retries before the 429 is returned
 BACKOFF = 2.0               # first wait without Retry-After; doubles per retry: 2, 4, 8, 16 s
@@ -124,6 +137,9 @@ MIN_WAIT = 1.0              # the shortest 429 wait, also for "Retry-After: 0"
 MAX_WAIT = 120.0            # a longer Retry-After is not waited out: the 429 is returned
 TRANSIENT = frozenset({0, 500, 502, 504})   # tried once more; 503 is maintenance, not retried
 TRANSIENT_WAIT = 5.0
+#: Statuses after which a run of many calls stops: every later call would fail the same way.
+#: 403 the key or its IP; 429 still throttled after the back-off; 503 maintenance.
+STOP = frozenset({403, 429, 503})
 
 #: Exit codes of the CLI.
 EXIT_OK, EXIT_API, EXIT_SETTING = 0, 1, 2
@@ -245,14 +261,22 @@ def check_token(token: str, where: str = "the token") -> str:
 
 def read_token(path: str | os.PathLike | None = None) -> str:
     """The API token from `path` (default .secrets/supercell_token). A BOM and line ends from a
-    Windows editor are stripped."""
+    Windows editor are stripped. UTF-16 with a BOM (what Windows PowerShell 5.1's `>` and
+    Out-File write) is read too; any other bytes that are not UTF-8 raise TokenError."""
     path = Path(TOKEN_FILE if path is None else path)
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        data = path.read_bytes()
     except FileNotFoundError:
         raise TokenError(f"no token at {path}") from None
     except OSError as exc:
         raise TokenError(f"cannot read the token at {path}: {exc.strerror or exc}") from None
+    utf16 = data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+    try:
+        text = data.decode("utf-16" if utf16 else "utf-8-sig")
+    except UnicodeDecodeError:                  # the message names no byte of the file
+        raise TokenError(f"the token at {path} is not plain text (UTF-8, ASCII or UTF-16). Save "
+                         "only the key, e.g. in PowerShell: Set-Content -Encoding ascii "
+                         f"-NoNewline -Path {path} -Value '<the key>'") from None
     return check_token(text, f"the token at {path}")
 
 
@@ -335,19 +359,36 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follows a 3xx: urllib's own handler copies the request's headers, the token among
+    them, onto the request for the Location (CPython urllib/request.py redirect_request), which
+    may name another host or plain http. With None here the 3xx reaches the default error
+    handler and comes back as an HTTPError, so the client sees the 3xx status itself."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _lower_headers(items: Iterable[tuple[str, str]] | None) -> dict[str, str]:
     return {str(k).lower(): str(v) for k, v in (items or ())}
 
 
 class UrllibTransport:
-    """Python's urllib, over IPv4 unless ipv4=False, asking for gzip and decoding it."""
+    """Python's urllib, over IPv4 unless ipv4=False, asking for gzip and decoding it. Redirects
+    are not followed, and Authorization is an unredirected header (belt and braces)."""
 
     def __init__(self, *, ipv4: bool = True):
-        handlers = [_IPv4HTTPSHandler()] if ipv4 else []
+        handlers = [_NoRedirect(), *([_IPv4HTTPSHandler()] if ipv4 else [])]
         self._opener = urllib.request.build_opener(*handlers)
 
     def __call__(self, url: str, headers: Mapping[str, str], timeout: float) -> Raw:
-        req = urllib.request.Request(url, headers={**headers, "Accept-Encoding": "gzip"})
+        req = urllib.request.Request(url)
+        for name, value in headers.items():
+            if str(name).lower() == "authorization":
+                req.add_unredirected_header(name, value)
+            else:
+                req.add_header(name, value)
+        req.add_header("Accept-Encoding", "gzip")
         try:
             with self._opener.open(req, timeout=timeout) as resp:
                 status = int(getattr(resp, "status", None) or resp.getcode())
@@ -380,12 +421,14 @@ def _curl_quote(text: str) -> str:
 
 def _parse_head(text: str) -> dict[str, str]:
     """The headers of the last response in a `curl -D` dump (a proxy's CONNECT reply or a
-    100 Continue comes first when there is one)."""
-    blocks = [b for b in re.split(r"\r?\n\r?\n", text) if b.strip().startswith("HTTP/")]
+    100 Continue comes first when there is one). Line ends are "\\r\\n" as sent, "\\n", or
+    "\\r\\r\\n" (a "\\r\\n" that went through a Windows text-mode write); all read the same."""
+    text = re.sub(r"\r*\n", "\n", str(text)).replace("\r", "\n")
+    blocks = [b for b in text.split("\n\n") if b.strip().startswith("HTTP/")]
     if not blocks:
         return {}
     out: dict[str, str] = {}
-    for line in blocks[-1].strip().splitlines()[1:]:
+    for line in blocks[-1].strip().split("\n")[1:]:
         name, sep, value = line.partition(":")
         if sep:
             out[name.strip().lower()] = value.strip()
@@ -393,9 +436,11 @@ def _parse_head(text: str) -> dict[str, str]:
 
 
 class CurlTransport:
-    """curl -4 -sS --compressed, as tools/ladder_pull.py always called it. The headers, the
-    token among them, go in on stdin as a curl config (`-K -`), so no argv carries the token.
-    Body and headers land in per-thread files under `scratch`, deleted after each call."""
+    """curl -q -4 -sS --compressed, as tools/ladder_pull.py always called it, plus -q first so
+    no .curlrc / _curlrc (a `location` line, say) applies; without -L, curl follows no
+    redirect. The headers, the token among them, go in on stdin as a curl config (`-K -`), so
+    no argv carries the token. Body and headers land in per-thread files under `scratch`,
+    deleted after each call."""
 
     def __init__(self, *, ipv4: bool = True, scratch: str | os.PathLike | None = None,
                  curl: str = "curl"):
@@ -416,7 +461,7 @@ class CurlTransport:
         ident = threading.get_ident()
         body_path, head_path = folder / f"resp_{ident}.json", folder / f"head_{ident}.txt"
         config = "".join(f"header = {_curl_quote(f'{k}: {v}')}\n" for k, v in headers.items())
-        argv = [self.curl, *(["-4"] if self.ipv4 else []), "-sS", "--compressed",
+        argv = [self.curl, "-q", *(["-4"] if self.ipv4 else []), "-sS", "--compressed",
                 "--max-time", str(max(1, int(math.ceil(timeout)))),
                 "-o", str(body_path), "-D", str(head_path), "-w", "%{http_code}",
                 "-K", "-", url]
@@ -428,8 +473,8 @@ class CurlTransport:
             if status == 0:
                 why = (done.stderr or "").strip() or f"curl exit {done.returncode}"
                 return Raw(0, error=f"no response: {why}")
-            try:
-                got = _parse_head(head_path.read_text(encoding="latin-1"))
+            try:                                # bytes: no newline translation on Windows
+                got = _parse_head(head_path.read_bytes().decode("latin-1"))
             except OSError:
                 got = {}
             try:
@@ -642,7 +687,15 @@ class Client:
             if resp.status == 429:
                 wait = self._throttle_wait(resp, throttles)
                 if wait is None or throttles >= self.retries:
-                    self._note(f"429 on {shown}: giving up after {attempts} attempts")
+                    # Given up, but the server's wish still holds: no thread asks again before
+                    # the Retry-After (or the next back-off step) has passed. Callers stop a
+                    # bulk run on a 429 (STOP), so this is the last word, not a long sleep.
+                    # (wait is None only when a Retry-After was given, so pause is a number.)
+                    pause = max(MIN_WAIT, float(resp.retry_after if resp.retry_after is not None
+                                                else wait))
+                    self.rate.hold(pause)
+                    self._note(f"429 on {shown}: giving up after {attempts} attempts; no "
+                               f"request for {pause:.0f} s")
                     return resp
                 throttles += 1
                 self._note(f"429 on {shown}: waiting {wait:.0f} s "
@@ -799,8 +852,14 @@ def main(argv: list[str] | None = None) -> int:
     cards.add_argument("--transport", choices=("urllib", "curl"), default="urllib")
     cards.add_argument("--token-file", type=Path, default=None,
                        help="default .secrets/supercell_token")
-    cards.add_argument("--rate", type=float, default=DEFAULT_RATE)
+    cards.add_argument("--rate", type=float, default=DEFAULT_RATE,
+                       help=f"requests per second (default {DEFAULT_RATE:g}, at most "
+                            f"{MAX_RATE:g})")
     args = ap.parse_args(argv)
+    if not 0.1 <= args.rate <= MAX_RATE:
+        print(f"cr_api: --rate {args.rate:g}: between 0.1 and {MAX_RATE:g} requests per second",
+              file=sys.stderr)
+        return EXIT_SETTING
     try:
         client = Client(token_file=args.token_file, base=args.base, transport=args.transport,
                         per_second=args.rate, log=lambda m: print(f"  {m}", flush=True))

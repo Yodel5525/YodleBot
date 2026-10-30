@@ -3,9 +3,13 @@
 Hand-written answers of the official Clash Royale API, for `tests/pipeline/test_cr_api.py`
 (U02 of `docs/SEASON_UPDATES.md`). Nothing here was pulled from the API.
 
-**Every tag, name, clan, time and number is invented.** The tags use only the letters real tags
-use (0289PYLQGRJCUV), so the client's tag rules accept them, but they belong to no one. The
-IP address in `error_403_invalid_ip.json` is from the documentation range 198.51.100.0/24.
+**Every tag, name, clan, time and number is invented.** The tags use only the characters real tags
+use (0289PYLQGRJCUV), so the tag rules accept them, and every one starts with `0`, which no real tag
+does: a tag is an account id written in base 14 with those characters, most significant digit first,
+and the encoder stops at the last non-zero digit, so a tag never starts with the zero digit (the
+`tagfromid` loop in https://gist.github.com/samyk/66148f77ef073384112123be8944e6cb). These tags can
+name no real player or clan. The IP address in `error_403_invalid_ip.json` is from the documentation
+range 198.51.100.0/24.
 
 The shapes follow the sources `tools/cr_api.py` cites:
 

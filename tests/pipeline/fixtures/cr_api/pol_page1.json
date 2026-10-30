@@ -1,8 +1,8 @@
 {
   "items": [
-    {"tag": "#2PYQ0", "name": "Fixture Player A", "expLevel": 70, "eloRating": 3600, "rank": 1,
-     "clan": {"tag": "#2LQ8CV", "name": "Fixture Clan", "badgeId": 16000000}},
-    {"tag": "#8LGRJ", "name": "Fixture Player B", "expLevel": 68, "eloRating": 3550, "rank": 2}
+    {"tag": "#02PYQ0", "name": "Fixture Player A", "expLevel": 70, "eloRating": 3600, "rank": 1,
+     "clan": {"tag": "#02LQ8CV", "name": "Fixture Clan", "badgeId": 16000000}},
+    {"tag": "#08LGRJ", "name": "Fixture Player B", "expLevel": 68, "eloRating": 3550, "rank": 2}
   ],
   "paging": {"cursors": {"after": "eyJwb3MiOjJ9"}}
 }

@@ -8,10 +8,10 @@ the opener's open() and subprocess.run. Waits go through a FakeClock, so a 429 b
 list of numbers, not a pause.
 
 Worked by hand for the ladder_pull golden test (--top 3 --workers 1):
-* The board: page 1 (limit=3) gives A (#2PYQ0, 3600) and B (#8LGRJ, 3550) and the cursor
-  eyJwb3MiOjJ9; page 2 (limit=1&after=...) gives C (#9CUV2, 3500).
+* The board: page 1 (limit=3) gives A (#02PYQ0, 3600) and B (#08LGRJ, 3550) and the cursor
+  eyJwb3MiOjJ9; page 2 (limit=1&after=...) gives C (#09CUV2, 3500).
 * A's log: a ranked 1-0 over B at 20261029T201500.000Z, a friendly (skipped), and a ranked 0-2
-  against D (#P0LYJ, not on the board, so no elo) at 20261029T194000.000Z. B's log: the same
+  against D (#0P0LYJ, not on the board, so no elo) at 20261029T194000.000Z. B's log: the same
   battle with A from B's side (deduplicated on time and sorted tags; A's row is kept) and a 2v2
   (skipped). C's log: 404, so no battles.
 * Decks are the card names sorted. A: Cannon, Fireball, Hog Rider, Ice Golem, Ice Spirit,
@@ -130,7 +130,7 @@ def test_slug_leaves_the_card_map_keys_as_they_are(api):
     extras = json.loads((ROOT / "data" / "cards" / "replay_cards_extra.json").read_text(
         encoding="utf-8"))["cards"]
     keys = [*vendored, *extras]
-    assert len(keys) == 122
+    assert len(keys) >= 122             # 119 + 3 today; confirmed entries (minion-giant) add more
     for key in keys:
         for form in ("", "-ev1", "-hero"):
             assert api.slug(key + form) == key + form
@@ -146,15 +146,15 @@ def test_slug_examples(api, name, key):
 
 
 def test_tags(api):
-    assert api.norm_tag("2pyq0") == "#2PYQ0"
-    assert api.norm_tag("%232PYQ0") == "#2PYQ0"
-    assert api.norm_tag(" #8lgro ") == "#8LGR0"            # a typed O is a zero
-    assert api.tag_path("#2PYQ0") == "%232PYQ0"
+    assert api.norm_tag("02pyq0") == "#02PYQ0"
+    assert api.norm_tag("%2302PYQ0") == "#02PYQ0"
+    assert api.norm_tag(" #08lgro ") == "#08LGR0"            # a typed O is a zero
+    assert api.tag_path("#02PYQ0") == "%2302PYQ0"
     for bad in ("", "#", "#AB-C", "#2PY Q0"):
         with pytest.raises(ValueError):
             api.norm_tag(bad)
-    assert api.redact("/players/%232PYQ0/battlelog") == "/players/%23<tag>/battlelog"
-    assert api.redact("clan #2LQ8CV") == "clan #<tag>"
+    assert api.redact("/players/%2302PYQ0/battlelog") == "/players/%23<tag>/battlelog"
+    assert api.redact("clan #02LQ8CV") == "clan #<tag>"
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +187,16 @@ def test_read_token(api, tmp_path):
         with pytest.raises(api.TokenError) as caught:
             api.read_token(path)
         assert "SECRETTOKEN" not in str(caught.value)
+    # Windows PowerShell 5.1's `>` and Out-File write UTF-16LE with a BOM: read it all the same
+    path.write_bytes(b"\xff\xfe" + "SECRETTOKEN.abc-def_1\r\n".encode("utf-16-le"))
+    assert api.read_token(path) == "SECRETTOKEN.abc-def_1"
+    path.write_bytes(b"\xfe\xff" + "SECRETTOKEN.abc-def_1\n".encode("utf-16-be"))
+    assert api.read_token(path) == "SECRETTOKEN.abc-def_1"
+    # other bytes that are not UTF-8: a TokenError that says how to save it, and no byte of it
+    path.write_bytes(b"SECRET\x80\x81TOKEN")
+    with pytest.raises(api.TokenError, match="not plain text") as caught:
+        api.read_token(path)
+    assert "SECRET" not in str(caught.value) and "Set-Content -Encoding ascii" in str(caught.value)
 
 
 def test_client_never_shows_the_token(api):
@@ -218,16 +228,16 @@ def test_headers_url_and_a_200(api):
 def test_endpoint_paths_and_redacted_path(api):
     base = api.OFFICIAL_BASE
     ok = raw(api, 200, body=b"{}")
-    fake = FakeTransport({f"{base}/players/%232PYQ0/battlelog": [ok],
-                          f"{base}/players/%232PYQ0": [ok],
-                          f"{base}/clans/%232LQ8CV": [ok],
-                          f"{base}/clans/%232LQ8CV/members": [ok]})
+    fake = FakeTransport({f"{base}/players/%2302PYQ0/battlelog": [ok],
+                          f"{base}/players/%2302PYQ0": [ok],
+                          f"{base}/clans/%2302LQ8CV": [ok],
+                          f"{base}/clans/%2302LQ8CV/members": [ok]})
     c = client(api, fake)
-    resp = c.battlelog("#2PYQ0")
+    resp = c.battlelog("#02PYQ0")
     assert resp.ok and resp.path == "/players/%23<tag>/battlelog"
-    c.player("2pyq0")
-    c.clan("#2LQ8CV")
-    c.clan_members("#2lq8cv")
+    c.player("02pyq0")
+    c.clan("#02LQ8CV")
+    c.clan_members("#02lq8cv")
     assert len(fake.calls) == 4
 
 
@@ -288,15 +298,28 @@ def test_429_gives_up_and_returns_the_code(api):
     assert resp.attempts == 3 and len(fake.calls) == 3
     assert clock.slept == [2.0, 4.0]
     assert resp.reason == "requestThrottled" and "throttled" in resp.hint()
+    assert 429 in api.STOP                                 # callers stop a bulk run on it
+    # given up, the shared Rate still holds for the next back-off step (2 * 2**2 = 8 s): any
+    # later request, on any thread, waits it out
+    c_rate = api.Rate(1000.0, clock=clock.monotonic, sleep=clock.sleep)
+    c = api.Client(TOKEN, transport=fake, rate=c_rate, env={}, retries=2)
+    clock.slept.clear()
+    c.cards()
+    assert clock.slept == [2.0, 4.0]
+    c_rate.wait()
+    assert clock.slept == [2.0, 4.0, 8.0]
 
 
 def test_429_with_a_long_retry_after_is_not_waited_out(api):
     url = f"{api.OFFICIAL_BASE}/cards"
     fake = FakeTransport({url: [raw(api, 429, "error_429.json", {"retry-after": "600"})]})
     clock = FakeClock()
-    resp = client(api, fake, clock).cards()
+    rate = api.Rate(1000.0, clock=clock.monotonic, sleep=clock.sleep)
+    resp = api.Client(TOKEN, transport=fake, rate=rate, env={}).cards()
     assert resp.status == 429 and resp.attempts == 1 and resp.retry_after == 600.0
     assert clock.slept == [] and "600" in resp.hint()
+    rate.wait()                     # not retried, but no thread asks again within the 600 s
+    assert clock.slept == [600.0]
 
 
 def test_a_429_pauses_every_thread(api):
@@ -369,7 +392,7 @@ def test_paged(api):
                           f"{path}?limit=2": [raw(api, 200, "pol_page1.json")]})
     c = client(api, fake)
     items, last = c.paged("locations/global/pathoflegend/players", want=3)
-    assert [p["tag"] for p in items] == ["#2PYQ0", "#8LGRJ", "#9CUV2"] and last.ok
+    assert [p["tag"] for p in items] == ["#02PYQ0", "#08LGRJ", "#09CUV2"] and last.ok
     items, _ = c.paged("locations/global/pathoflegend/players", want=2)
     assert len(items) == 2
     assert fake.urls == [f"{path}?limit=3", f"{path}?limit=1&after=eyJwb3MiOjJ9",
@@ -428,6 +451,33 @@ def test_urllib_transport_sends_our_user_agent_and_decodes_gzip(api, monkeypatch
     assert req.get_header("User-agent") == api.USER_AGENT
     assert req.get_header("Authorization") == f"Bearer {TOKEN}"
     assert req.get_header("Accept-encoding") == "gzip" and seen["timeout"] == 30.0
+    # the token is an unredirected header: urllib never copies it onto a redirect
+    assert "Authorization" not in req.headers and "Authorization" in req.unredirected_hdrs
+
+
+def test_urllib_transport_never_follows_a_redirect(api, monkeypatch):
+    """urllib's own redirect handler copies req.headers onto the request for the Location; the
+    transport's handler refuses, so a 3xx comes back as its status and nothing is re-sent."""
+    transport = api.UrllibTransport()
+    redirectors = [h for h in transport._opener.handlers
+                   if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert len(redirectors) == 1 and isinstance(redirectors[0], api._NoRedirect)
+    req = urllib.request.Request(f"{api.OFFICIAL_BASE}/cards")
+    assert redirectors[0].redirect_request(req, None, 302, "Found", {},
+                                           "http://elsewhere.invalid/v1/cards") is None
+    url = f"{api.OFFICIAL_BASE}/cards"
+    opened = []
+
+    def moved(req, timeout=None):
+        opened.append(req.full_url)
+        hdrs = http.client.HTTPMessage()
+        hdrs["Location"] = "http://elsewhere.invalid/v1/cards"
+        raise urllib.error.HTTPError(url, 302, "Found", hdrs, io.BytesIO(b""))
+
+    monkeypatch.setattr(transport._opener, "open", moved)
+    got = transport(url, {"Authorization": f"Bearer {TOKEN}"}, 30.0)
+    assert got.status == 302 and opened == [url]
+    assert got.headers["location"] == "http://elsewhere.invalid/v1/cards"
 
 
 def test_urllib_transport_maps_errors(api, monkeypatch):
@@ -486,28 +536,39 @@ def test_curl_transport_keeps_the_token_off_argv(api, monkeypatch, tmp_path):
     def fake_run(argv, input=None, **kwargs):
         seen.update(argv=argv, input=input, kwargs=kwargs)
         Path(argv[argv.index("-o") + 1]).write_bytes(fixture("error_429.json"))
-        Path(argv[argv.index("-D") + 1]).write_text(
-            "HTTP/1.1 200 Connection established\r\n\r\n"
-            "HTTP/2 429\r\ncontent-type: application/json\r\nretry-after: 7\r\n\r\n",
-            encoding="latin-1")
+        # bytes, as curl writes the dump: write_text would turn each \n into \r\n on Windows
+        Path(argv[argv.index("-D") + 1]).write_bytes(
+            b"HTTP/1.1 200 Connection established\r\n\r\n"
+            b"HTTP/2 429\r\ncontent-type: application/json\r\nretry-after: 7\r\n\r\n")
         return subprocess.CompletedProcess(argv, 0, stdout="429", stderr="")
 
     monkeypatch.setattr(api.subprocess, "run", fake_run)
     scratch = tmp_path / "scratch"
     transport = api.CurlTransport(scratch=scratch)
-    url = f"{api.OFFICIAL_BASE}/players/%232PYQ0/battlelog"
+    url = f"{api.OFFICIAL_BASE}/players/%2302PYQ0/battlelog"
     got = transport(url, {"Authorization": f"Bearer {TOKEN}", "User-Agent": api.USER_AGENT},
                     30.0)
     assert got.status == 429 and got.headers == {"content-type": "application/json",
                                                  "retry-after": "7"}
     assert json.loads(got.body)["reason"] == "requestThrottled"
     argv = seen["argv"]
-    assert argv[0] == "curl" and "-4" in argv and "--compressed" in argv
+    assert argv[:2] == ["curl", "-q"]                      # -q first: no .curlrc applies
+    assert "-4" in argv and "--compressed" in argv and "-L" not in argv
     assert argv[argv.index("-K") + 1] == "-" and argv[-1] == url
     assert not any(TOKEN in part for part in argv)
     assert f'header = "Authorization: Bearer {TOKEN}"\n' in seen["input"]
     assert f'header = "User-Agent: {api.USER_AGENT}"\n' in seen["input"]
     assert list(scratch.iterdir()) == []                   # files deleted after the call
+
+
+def test_parse_head_reads_every_line_end(api):
+    """\r\n as sent, \n, and \r\r\n (a \r\n written through a Windows text-mode file)."""
+    want = {"content-type": "application/json", "retry-after": "7"}
+    for end in ("\r\n", "\n", "\r\r\n"):
+        text = (f"HTTP/1.1 200 Connection established{end}{end}HTTP/2 429{end}"
+                f"content-type: application/json{end}retry-after: 7{end}{end}")
+        assert api._parse_head(text) == want, repr(end)
+    assert api._parse_head("") == {}
 
 
 def test_curl_transport_without_a_response(api, monkeypatch, tmp_path):
@@ -546,7 +607,9 @@ def test_make_transport(api):
 def test_cards_report_on_the_fixture(api, monkeypatch):
     rs_cards = importlib.import_module("rs_cards")
     payload = json.loads(fixture("cards.json"))
-    rep = api.cards_report(payload, rs_cards.load())
+    # Minion Giant has no key today; the set below keeps it so after the owner confirms the
+    # proposed "minion-giant" entry into data/cards/replay_cards_extra.json (section 4.6)
+    rep = api.cards_report(payload, set(rs_cards.load()) - {"minion-giant"})
     assert rep["items"] == 8 and rep["support_items"] == 1
     assert rep["max_evolution_level"] == {"1": 2, "2": 1, "3": 1}
     assert rep["without_max_evolution_level"] == 4
@@ -571,6 +634,8 @@ def test_cli_cards(api, monkeypatch, tmp_path, capsys):
     fake = FakeTransport({f"{api.OFFICIAL_BASE}/cards": [
         raw(api, 200, "cards.json", {"cache-control": "max-age=600"})]})
     monkeypatch.setattr(api, "make_transport", lambda spec=None, **kw: fake)
+    keys, _ = api._card_map_keys()
+    monkeypatch.setattr(api, "_card_map_keys", lambda: (set(keys) - {"minion-giant"}, ""))
     assert api.main(["cards", "--token-file", str(_token_file(tmp_path))]) == api.EXIT_OK
     out = capsys.readouterr().out
     assert "/cards: 200" in out and "8 cards, 1 support items" in out
@@ -588,6 +653,9 @@ def test_cli_cards_errors(api, monkeypatch, tmp_path, capsys):
     assert "no token at" in capsys.readouterr().err
     assert api.main(["cards", "--token-file", str(_token_file(tmp_path)),
                      "--base", "http://example.invalid/v1"]) == api.EXIT_SETTING
+    assert api.main(["cards", "--token-file", str(_token_file(tmp_path)),
+                     "--rate", "50"]) == api.EXIT_SETTING
+    assert "--rate 50: between 0.1 and 5" in capsys.readouterr().err
 
 
 def test_cr_api_imports_only_the_standard_library(api):
@@ -618,10 +686,23 @@ def _ladder_routes(api, board_answer=None):
     return {
         f"{board}?limit=3": [board_answer or raw(api, 200, "pol_page1.json")],
         f"{board}?limit=1&after=eyJwb3MiOjJ9": [raw(api, 200, "pol_page2.json")],
-        f"{base}/players/%232PYQ0/battlelog": [raw(api, 200, "battlelog_a.json")],
-        f"{base}/players/%238LGRJ/battlelog": [raw(api, 200, "battlelog_b.json")],
-        f"{base}/players/%239CUV2/battlelog": [raw(api, 404, "error_404.json")],
+        f"{base}/players/%2302PYQ0/battlelog": [raw(api, 200, "battlelog_a.json")],
+        f"{base}/players/%2308LGRJ/battlelog": [raw(api, 200, "battlelog_b.json")],
+        f"{base}/players/%2309CUV2/battlelog": [raw(api, 404, "error_404.json")],
     }
+
+
+def fast_rates(api, ladder, monkeypatch):
+    """ladder_pull's Rate(per_second) replaced by a FakeClock one; returns the rates asked for."""
+    asked: list[float] = []
+    clock = FakeClock()
+
+    def make(per_second):
+        asked.append(per_second)
+        return api.Rate(1000.0, clock=clock.monotonic, sleep=clock.sleep)
+
+    monkeypatch.setattr(ladder, "Rate", make)
+    return asked
 
 
 def test_ladder_pull_writes_the_same_outputs(api, ladder, monkeypatch, tmp_path):
@@ -634,23 +715,24 @@ def test_ladder_pull_writes_the_same_outputs(api, ladder, monkeypatch, tmp_path)
 
     monkeypatch.setattr(api, "make_transport", fake_make)
     monkeypatch.setattr(ladder, "TOKEN_FILE", _token_file(tmp_path))
+    asked = fast_rates(api, ladder, monkeypatch)
     out = tmp_path / "out"
-    assert ladder.main(["--top", "3", "--rate", "1000", "--workers", "1",
-                        "--out", str(out)]) == 0
+    assert ladder.main(["--top", "3", "--workers", "1", "--out", str(out)]) == 0
     assert made == [("curl", {"scratch": out / ".scratch"})]       # curl stays the default
+    assert asked == [api.DEFAULT_RATE]                             # 2 per second by default
     base = api.OFFICIAL_BASE
     assert fake.urls == [
         f"{base}/locations/global/pathoflegend/players?limit=3",
         f"{base}/locations/global/pathoflegend/players?limit=1&after=eyJwb3MiOjJ9",
-        f"{base}/players/%232PYQ0/battlelog", f"{base}/players/%238LGRJ/battlelog",
-        f"{base}/players/%239CUV2/battlelog"]
+        f"{base}/players/%2302PYQ0/battlelog", f"{base}/players/%2308LGRJ/battlelog",
+        f"{base}/players/%2309CUV2/battlelog"]
     assert all(h["User-Agent"] == api.USER_AGENT for _, h, _ in fake.calls)
 
     expected_csv = (
         "battle_time,player_tag,opponent_tag,player_deck,opponent_deck,player_crowns,"
         "opponent_crowns,player_elo,opponent_elo\r\n"
-        f'20261029T201500.000Z,#2PYQ0,#8LGRJ,"{DECK_A}","{DECK_B}",1,0,3600,3550\r\n'
-        f'20261029T194000.000Z,#2PYQ0,#P0LYJ,"{DECK_A}","{DECK_D}",0,2,3600,\r\n')
+        f'20261029T201500.000Z,#02PYQ0,#08LGRJ,"{DECK_A}","{DECK_B}",1,0,3600,3550\r\n'
+        f'20261029T194000.000Z,#02PYQ0,#0P0LYJ,"{DECK_A}","{DECK_D}",0,2,3600,\r\n')
     assert (out / "ladder_battles.csv").read_bytes() == expected_csv.encode("utf-8")
     expected_meta = [
         {"deck": DECK_A, "seen": 2, "wins": 1, "win_rate": 0.5, "share": 0.5},
@@ -665,11 +747,43 @@ def test_ladder_pull_still_stops_on_403(api, ladder, monkeypatch, tmp_path):
     fake = FakeTransport(_ladder_routes(api, raw(api, 403, "error_403_invalid_ip.json")))
     monkeypatch.setattr(api, "make_transport", lambda spec=None, **kw: fake)
     monkeypatch.setattr(ladder, "TOKEN_FILE", _token_file(tmp_path))
+    fast_rates(api, ladder, monkeypatch)
     with pytest.raises(SystemExit) as caught:
-        ladder.main(["--top", "3", "--rate", "1000", "--out", str(tmp_path / "out")])
+        ladder.main(["--top", "3", "--out", str(tmp_path / "out")])
     text = str(caught.value.code)
     assert text.startswith(ladder.FORBIDDEN) and "accessDenied.invalidIp" in text
     assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("status, name, head", [(429, "error_429.json", "THROTTLED"),
+                                                (503, "error_503.json", "MAINTENANCE")])
+def test_ladder_pull_stops_every_worker_on_429_and_503(api, ladder, monkeypatch, tmp_path,
+                                                       status, name, head):
+    """A's log is refused (a 429 with a Retry-After too long to wait, or maintenance): the walk
+    stops there; B's and C's logs are never asked, and nothing is written."""
+    base = api.OFFICIAL_BASE
+    routes = _ladder_routes(api)
+    routes[f"{base}/players/%2302PYQ0/battlelog"] = [raw(api, status, name,
+                                                        {"retry-after": "600"})]
+    fake = FakeTransport(routes)
+    monkeypatch.setattr(api, "make_transport", lambda spec=None, **kw: fake)
+    monkeypatch.setattr(ladder, "TOKEN_FILE", _token_file(tmp_path))
+    fast_rates(api, ladder, monkeypatch)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as caught:
+        ladder.main(["--top", "3", "--workers", "1", "--out", str(out)])
+    assert str(caught.value.code).startswith(getattr(ladder, head))
+    assert fake.urls[-1] == f"{base}/players/%2302PYQ0/battlelog" and len(fake.calls) == 3
+    assert not (out / "ladder_battles.csv").exists()
+
+
+def test_ladder_pull_refuses_an_impolite_rate(api, ladder, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(ladder, "TOKEN_FILE", _token_file(tmp_path))
+    for argv in (["--rate", "50"], ["--rate", "0"], ["--workers", "64"]):
+        with pytest.raises(SystemExit) as caught:
+            ladder.main([*argv, "--out", str(tmp_path / "out")])
+        assert caught.value.code == 2, argv
+    assert "--rate 50: between 0.1 and 5" in capsys.readouterr().err
 
 
 def test_ladder_pull_without_a_token(api, ladder, monkeypatch, tmp_path):

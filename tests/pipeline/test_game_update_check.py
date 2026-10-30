@@ -262,6 +262,12 @@ def world(gu, gv, rs_engine, tmp_path, monkeypatch):
     ledger.write_text(json.dumps(data), encoding="utf-8")
     web = Web(gu)
     monkeypatch.setattr(gu, "fetch", web)
+    # Minion Giant has no card-map key today; the radar tests keep it that way, so they still
+    # hold after the owner confirms the proposed "minion-giant" entry (section 4.6)
+    rs_cards = importlib.import_module("rs_cards")
+    live_load = rs_cards.load
+    monkeypatch.setattr(rs_cards, "load", lambda *a, **kw: {
+        k: v for k, v in live_load(*a, **kw).items() if k != "minion-giant"})
     w = World(gu=gu, gv=gv, web=web, ledger=ledger, updates=tmp_path / "updates",
               data=tmp_path / "data", files={})
     pypi = load("pypi_royalesim.json")
@@ -509,7 +515,10 @@ def test_skip_everything_makes_no_request(world, gu):
 # a new client build
 # ---------------------------------------------------------------------------
 
-def test_a_new_client_is_exit_11_until_a_quiet_day_accepts_it(world, gu, gv):
+def test_a_new_client_on_a_noisy_day_waits_for_the_owner(world, gu, gv):
+    """Section 4.1: only the check of the day the build appears may accept it. 2026-11-03 has
+    the Season 89 roster change (Giant and Mirror gain evolutions the table lacks), so the build
+    first seen that day stays a WARN and exit 11 on every later day, quiet or not."""
     world.previous_cards()
     world.seen(160700001, "2026-11-03T05:00:00Z")
     world.last_check("2026-11-02T05:47:00Z")
@@ -518,31 +527,57 @@ def test_a_new_client_is_exit_11_until_a_quiet_day_accepts_it(world, gu, gv):
     code, status = gu.run_check(world.options(cards=cards, now=NOW_1103))
     assert code == 11 and status["verdict"] == "NEW CLIENT"
     assert status["client"]["verdict"] == "new"
+    assert status["client"]["first_checked"] == "2026-11-03"
     assert any(w.startswith("client 160700001 (16.700.1) is not in data/game_versions.json")
                for w in status["warnings"])
     assert "-AcceptClient" in status["next"]
     assert "client ahead, NOT ACCEPTED" in " ".join(status["line"].split())
     state = json.loads((world.updates / "state.json").read_text(encoding="utf-8"))
     assert state["noisy_on"] == "2026-11-03"
+    assert state["pending_client"] == {"version_code": 160700001, "first_checked": "2026-11-03"}
     # 2. the same day again: the radar now compares with run 1's snapshot (no change), but
     # the day stays noisy
     code, status = gu.run_check(world.options(cards=cards, now=NOW_1103 + dt.timedelta(hours=2)))
     assert code == 11 and status["radar"]["changed"] is False
     assert not (world.updates / gv.LOCAL_CLIENTS).exists()
-    # 3. the next day nothing changes: accepted by itself
+    # 3. the next day nothing changes, but it is not the day the build appeared: still exit 11
     code, status = gu.run_check(world.options(cards=cards, now=NOW_1103 + dt.timedelta(days=1)))
+    assert code == 11 and status["radar"]["changed"] is False
+    assert "auto_accepted" not in status["client"]
+    assert status["client"]["first_checked"] == "2026-11-03"
+    assert any("first checked on 2026-11-03, a day that was not quiet" in n
+               for n in status["notes"])
+    assert not (world.updates / gv.LOCAL_CLIENTS).exists()
+    state = json.loads((world.updates / "state.json").read_text(encoding="utf-8"))
+    assert state["pending_client"]["first_checked"] == "2026-11-03"
+    # 4. a newer build is a new decision, on its own first day
+    world.seen(160700002, "2026-11-05T05:00:00Z")
+    code, status = gu.run_check(world.options(cards=cards, now=NOW_1103 + dt.timedelta(days=2)))
     assert code == 0 and status["client"]["auto_accepted"] is True
-    assert (status["client"]["basis"], status["client"]["accepted"]) == ("auto", "2026-11-04")
+    assert status["client"]["version_code"] == 160700002
+    state = json.loads((world.updates / "state.json").read_text(encoding="utf-8"))
+    assert "pending_client" not in state
+
+
+def test_a_new_client_on_a_quiet_first_day_is_accepted_by_itself(world, gu, gv):
+    world.previous_cards()
+    world.seen(160700001, "2026-10-30T05:00:00Z")
+    world.last_check("2026-10-29T05:47:00Z")
+    code, status = gu.run_check(world.options())                  # 2026-10-30: nothing new
+    assert code == 0 and status["client"]["auto_accepted"] is True
+    assert (status["client"]["basis"], status["client"]["accepted"]) == ("auto", "2026-10-30")
     assert any("accepted by itself (basis auto)" in n for n in status["notes"])
     stored = json.loads((world.updates / gv.LOCAL_CLIENTS).read_text(encoding="utf-8"))
     (entry,) = stored["clients"]
     assert (entry["version_code"], entry["basis"], entry["first_seen"]) == (
-        160700001, "auto", "2026-11-03")
+        160700001, "auto", "2026-10-30")
     ledger = gv.load(world.ledger)
     assert gv.judge_client(ledger, 160700001, world.updates)["verdict"] == "ok"
-    assert "accepted 2026-11-04 (auto)" in " ".join(status["line"].split())
-    # 4. and stays accepted
-    code, status = gu.run_check(world.options(cards=cards, now=NOW_1103 + dt.timedelta(days=2)))
+    assert "accepted 2026-10-30 (auto)" in " ".join(status["line"].split())
+    state = json.loads((world.updates / "state.json").read_text(encoding="utf-8"))
+    assert "pending_client" not in state
+    # and it stays accepted
+    code, status = gu.run_check(world.options(now=NOW_1030 + dt.timedelta(days=1)))
     assert code == 0 and "auto_accepted" not in status["client"]
 
 
@@ -630,6 +665,32 @@ def test_the_radar_degrades_when_cr_api_refuses(world, gu, monkeypatch):
     fake_cr_api(monkeypatch, FakeResponse(None, ok=False, status=403, hint="403: access denied"))
     _, status = gu.run_check(world.options(cards=None, skip=frozenset({"pypi"})))
     assert status["radar"]["skipped"] == "no /v1/cards snapshot: GET /v1/cards: 403: access denied"
+
+
+def test_the_radar_call_follows_the_opponents_config(world, gu, gv, monkeypatch):
+    """An owner on the proxy (a changing home IP) set it in <data>/opponents/config.json; the
+    radar's own call must go the same way, or it 403s whenever the pull's snapshot is old."""
+    made = fake_cr_api(monkeypatch, FakeResponse(load("cards_api_2026-10-30.json")))
+    gv.write_json(world.data / "opponents" / "config.json",
+                  {"schema": 1, "base": "proxy", "transport": "curl", "rate": 2.0})
+    gu.run_check(world.options(cards=None, skip=frozenset({"pypi"})))
+    assert made == [{"per_second": 1.0, "base": "proxy", "transport": "curl"}]
+    assert gu.api_settings(None) == {} and gu.api_settings(world.data / "none") == {}
+
+
+def test_the_radar_note_holds_no_ip_address(world, gu, monkeypatch):
+    said = ("403: The key is bound to one public IP. Use --base proxy with 45.79.218.79 on the "
+            "key. The API said: accessDenied.invalidIp: API key does not allow access from IP "
+            "198.51.100.7")
+    fake_cr_api(monkeypatch, FakeResponse(None, ok=False, status=403, hint=said))
+    sys.modules["cr_api"].PROXY_IP = "45.79.218.79"
+    _, status = gu.run_check(world.options(cards=None, skip=frozenset({"pypi"})))
+    skipped = status["radar"]["skipped"]
+    assert "198.51.100.7" not in skipped and "from IP <ip>" in skipped
+    assert "45.79.218.79" in skipped                              # the proxy's address stays
+    for name in ("status.json", "status.txt"):
+        assert "198.51.100.7" not in (world.updates / name).read_text(encoding="utf-8")
+    assert gu.mask_ips("10.0.0.1 and 1.2.3.4.5 and v1.2.3") == "<ip> and 1.2.3.4.5 and v1.2.3"
 
 
 def test_a_fresh_pull_snapshot_is_used_before_the_api(world, gu, gv, monkeypatch):
@@ -906,6 +967,13 @@ def test_cli_exit_codes(world, gu, capsys):
     assert out.rstrip().splitlines()[-1].startswith("exit 0: OK")
     assert gu.main(base + ["--skip", "pypi,royaleimitate,radar,il_replay", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["exit"] == 0
+    # PowerShell 5.1 hands an unquoted pypi,royaleimitate,radar,il_replay over as four
+    # arguments; that and two --skip read the same
+    for skip in (["--skip", *gu.PARTS], ["--skip", "pypi,royaleimitate", "--skip", "radar",
+                                         "il_replay"]):
+        assert gu.main(base + [*skip, "--json"]) == 0, skip
+        assert all(v.get("skipped") for k, v in json.loads(capsys.readouterr().out).items()
+                   if k in ("royalesim", "royaleimitate", "radar", "il_replay"))
     for argv in (["check", "--skip", "bogus"], ["check", "--client", "12"],
                  ["check", "--max-sdists", "-1"], [], ["probe"]):
         with pytest.raises(SystemExit) as exc:

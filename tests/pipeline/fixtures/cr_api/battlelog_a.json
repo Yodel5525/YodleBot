@@ -14,7 +14,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#2PYQ0",
+    "tag": "#02PYQ0",
     "name": "Fixture Player A",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -22,7 +22,7 @@
      3052
     ],
     "clan": {
-     "tag": "#2LQ8CV",
+     "tag": "#02LQ8CV",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -128,7 +128,7 @@
   ],
   "opponent": [
    {
-    "tag": "#8LGRJ",
+    "tag": "#08LGRJ",
     "name": "Fixture Player B",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -250,7 +250,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#2PYQ0",
+    "tag": "#02PYQ0",
     "name": "Fixture Player A",
     "crowns": 3,
     "kingTowerHitPoints": 4824,
@@ -258,7 +258,7 @@
      3052
     ],
     "clan": {
-     "tag": "#2LQ8CV",
+     "tag": "#02LQ8CV",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -364,7 +364,7 @@
   ],
   "opponent": [
    {
-    "tag": "#Q2L8P",
+    "tag": "#0Q2L8P",
     "name": "Fixture Friend X",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -373,7 +373,7 @@
      3052
     ],
     "clan": {
-     "tag": "#2LQ8CV",
+     "tag": "#02LQ8CV",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -491,7 +491,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#2PYQ0",
+    "tag": "#02PYQ0",
     "name": "Fixture Player A",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -500,7 +500,7 @@
      3052
     ],
     "clan": {
-     "tag": "#2LQ8CV",
+     "tag": "#02LQ8CV",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -606,7 +606,7 @@
   ],
   "opponent": [
    {
-    "tag": "#P0LYJ",
+    "tag": "#0P0LYJ",
     "name": "Fixture Player D",
     "crowns": 2,
     "kingTowerHitPoints": 4824,

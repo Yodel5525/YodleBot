@@ -5,8 +5,12 @@ Hand-made answers of the official Clash Royale API for `tests/pipeline/test_oppo
 board and battle logs in `../cr_api/`, and the pull tests use `../cr_api/cards.json`.
 
 **Every tag, name, clan, time and number is invented.** The tags use only the characters real tags
-use (0289PYLQGRJCUV), so the tag rules accept them, but they belong to no one. The shapes follow
-the U02 fixtures and the sources `tools/opponents.py` cites (the Swagger spec, API_NOTES.md).
+use (0289PYLQGRJCUV), so the tag rules accept them, and every one starts with `0`, which no real tag
+does: a tag is an account id written in base 14 with those characters, most significant digit first,
+and the encoder stops at the last non-zero digit, so a tag never starts with the zero digit (the
+`tagfromid` loop in https://gist.github.com/samyk/66148f77ef073384112123be8944e6cb). These tags can
+name no real player or clan. The shapes follow the U02 fixtures and the sources `tools/opponents.py`
+cites (the Swagger spec, API_NOTES.md).
 
 What the fixtures assume, and the probe checks on the PC (`cr_api.UNCONFIRMED`,
 `opponents.UNCONFIRMED`):
@@ -24,14 +28,14 @@ What the fixtures assume, and the probe checks on the PC (`cr_api.UNCONFIRMED`,
 
 | Tag | Who | In |
 |---|---|---|
-| `#9QJ0RV2` | the clan | config |
-| `#PL0QY8` | the owner (main account; coLeader) | config, roster |
-| `#Y0GRC2` | Yodle2, the bot (also a clan member) | config, roster |
-| `#2GJUV9` | M1, leader | roster |
-| `#8RPYCQ` | M2, elder | roster |
-| `#LUV2R8` | a friend outside the clan | config friends |
-| `#9YRJQP` | a stranger who played Yodle2 | nobody's list |
-| `#CJ8P0L`, `#U2CRQ9`, `#RJ9QC0`, `#G2PV8L` | Path of Legends and 2v2 opponents | nobody's list |
+| `#09QJ0RV2` | the clan | config |
+| `#0PL0QY8` | the owner (main account; coLeader) | config, roster |
+| `#0Y0GRC2` | Yodle2, the bot (also a clan member) | config, roster |
+| `#02GJUV9` | M1, leader | roster |
+| `#08RPYCQ` | M2, elder | roster |
+| `#0LUV2R8` | a friend outside the clan | config friends |
+| `#09YRJQP` | a stranger who played Yodle2 | nobody's list |
+| `#0CJ8P0L`, `#0U2CRQ9`, `#0RJ9QC0`, `#0G2PV8L` | Path of Legends and 2v2 opponents | nobody's list |
 
 ## Decks, in slot order
 
@@ -58,9 +62,9 @@ What the fixtures assume, and the probe checks on the PC (`cr_api.UNCONFIRMED`,
 |---|---|---|---|---|
 | 20261030T183000.000Z | friendly | Yodle2 1, owner 2 | bot, owner | spar, Yodle2 L |
 | 20261030T181500.000Z | clanMate | Yodle2 2, M1 1 | bot, M1 | spar, Yodle2 W |
-| 20261030T170000.000Z | pathOfLegend | owner 1, `#CJ8P0L` 2 | owner | clan |
+| 20261030T170000.000Z | pathOfLegend | owner 1, `#0CJ8P0L` 2 | owner | clan |
 | 20261030T160000.000Z | clanMate2v2 | owner + M2 against two | owner | dropped (2v2) |
-| 20261030T150000.000Z | pathOfLegend | M1 2 (7 cards), `#U2CRQ9` 0 | M1 | clan |
+| 20261030T150000.000Z | pathOfLegend | M1 2 (7 cards), `#0U2CRQ9` 0 | M1 | clan |
 | 20261030T120000.000Z | friendly | Yodle2 1, stranger 1 | bot | bot_unknown |
 | 20261029T210000.000Z | friendly | Yodle2 3, friend 0 | bot, friend | spar, Yodle2 W |
 
@@ -69,13 +73,13 @@ go 2-0-1. M2's log is empty.
 
 | File | What |
 |---|---|
-| `members.json` | `/clans/%239QJ0RV2/members`: M1, the owner, M2, Yodle2 |
+| `members.json` | `/clans/%2309QJ0RV2/members`: M1, the owner, M2, Yodle2 |
 | `battlelog_bot.json` | Yodle2's log (4 battles, newest first) |
 | `battlelog_owner.json` | the owner's log (3 battles, one of them the 2v2) |
 | `battlelog_m1.json` | M1's log (2) |
 | `battlelog_m2.json` | M2's log: empty |
 | `battlelog_friend.json` | the friend's log (1) |
-| `player_owner.json` | `/players/%23PL0QY8`: the collection (owned bits) and `currentDeck` in slot order |
+| `player_owner.json` | `/players/%230PL0QY8`: the collection (owned bits) and `currentDeck` in slot order |
 
 The probe on these files reads: forms `ownership` (4 cards show a form they own but cannot play in
 their slot, 0 show only the playable one), card order `same`, hero slot `present`, 1 of 10 sides

@@ -46,8 +46,8 @@ TOKEN = "fixture.token-value_3"
 NOW = dt.datetime(2026, 10, 30, 19, 0, tzinfo=dt.timezone.utc)
 LATER = NOW + dt.timedelta(hours=24)
 
-CLAN, OWNER, BOT, M1, M2 = "#9QJ0RV2", "#PL0QY8", "#Y0GRC2", "#2GJUV9", "#8RPYCQ"
-FRIEND, STRANGER, OUT1, OUT2, FORMER = "#LUV2R8", "#9YRJQP", "#CJ8P0L", "#U2CRQ9", "#QC92LJ"
+CLAN, OWNER, BOT, M1, M2 = "#09QJ0RV2", "#0PL0QY8", "#0Y0GRC2", "#02GJUV9", "#08RPYCQ"
+FRIEND, STRANGER, OUT1, OUT2, FORMER = "#0LUV2R8", "#09YRJQP", "#0CJ8P0L", "#0U2CRQ9", "#0QC92LJ"
 T_OWNER, T_M1, T_FRIEND = ("20261030T183000.000Z", "20261030T181500.000Z",
                            "20261029T210000.000Z")
 HOG = "cannon-ev1,fireball,hog-rider,ice-golem,ice-spirit,musketeer-hero,skeletons-ev1,the-log"
@@ -116,12 +116,12 @@ def fast_rate(opp):
 def pull_routes(opp, **override):
     base = opp.cr_api.OFFICIAL_BASE
     routes = {
-        "clans/%239QJ0RV2/members": [answer(opp, 200, "members.json")],
-        "players/%23Y0GRC2/battlelog": [answer(opp, 200, "battlelog_bot.json")],
-        "players/%23PL0QY8/battlelog": [answer(opp, 200, "battlelog_owner.json")],
-        "players/%232GJUV9/battlelog": [answer(opp, 200, "battlelog_m1.json")],
-        "players/%238RPYCQ/battlelog": [answer(opp, 200, "battlelog_m2.json")],
-        "players/%23LUV2R8/battlelog": [answer(opp, 200, "battlelog_friend.json")],
+        "clans/%2309QJ0RV2/members": [answer(opp, 200, "members.json")],
+        "players/%230Y0GRC2/battlelog": [answer(opp, 200, "battlelog_bot.json")],
+        "players/%230PL0QY8/battlelog": [answer(opp, 200, "battlelog_owner.json")],
+        "players/%2302GJUV9/battlelog": [answer(opp, 200, "battlelog_m1.json")],
+        "players/%2308RPYCQ/battlelog": [answer(opp, 200, "battlelog_m2.json")],
+        "players/%230LUV2R8/battlelog": [answer(opp, 200, "battlelog_friend.json")],
         "cards": [answer(opp, 200, "cards.json", folder=API_FIX)],
         **override}
     return {f"{base}/{path}": answers for path, answers in routes.items()}
@@ -275,12 +275,12 @@ def test_pull_stores_each_battle_once(opp, tmp_path, capsys):
     fake = FakeTransport(pull_routes(opp))
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_OK
     base = opp.cr_api.OFFICIAL_BASE
-    assert fake.urls == [f"{base}/clans/%239QJ0RV2/members",
-                         f"{base}/players/%23Y0GRC2/battlelog",
-                         f"{base}/players/%23PL0QY8/battlelog",
-                         f"{base}/players/%232GJUV9/battlelog",
-                         f"{base}/players/%238RPYCQ/battlelog",
-                         f"{base}/players/%23LUV2R8/battlelog", f"{base}/cards"]
+    assert fake.urls == [f"{base}/clans/%2309QJ0RV2/members",
+                         f"{base}/players/%230Y0GRC2/battlelog",
+                         f"{base}/players/%230PL0QY8/battlelog",
+                         f"{base}/players/%2302GJUV9/battlelog",
+                         f"{base}/players/%2308RPYCQ/battlelog",
+                         f"{base}/players/%230LUV2R8/battlelog", f"{base}/cards"]
     assert all(h["User-Agent"] == opp.cr_api.USER_AGENT for _, h in fake.calls)
     records = stored(folder)
     assert [r["id"] for r in records] == IDS and [r["kind"] for r in records] == KINDS
@@ -319,7 +319,7 @@ def test_pull_stores_each_battle_once(opp, tmp_path, capsys):
     raw = sorted((folder / "raw" / "2026-10-30").iterdir())
     assert len(raw) == 7 and all(p.name.startswith("190000_") for p in raw)
     first = json.loads(gzip.decompress((folder / "raw" / "2026-10-30" /
-                                        "190000_battlelog_Y0GRC2.json.gz").read_bytes()))
+                                        "190000_battlelog_0Y0GRC2.json.gz").read_bytes()))
     assert first["status"] == 200 and len(first["data"]) == 4
     assert first["path"] == "/players/%23<tag>/battlelog"
     assert (folder / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
@@ -370,7 +370,7 @@ def test_a_config_change_reaches_stored_battles(opp, tmp_path):
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_OK
     write_config(folder, friends=[], form_rule="base")
     assert run(opp, folder, "pull", transport=fake, now=LATER) == opp.EXIT_OK
-    assert sum("%23LUV2R8" in url for url in fake.urls) == 1
+    assert sum("%230LUV2R8" in url for url in fake.urls) == 1
     records = stored(folder)
     assert [r["kind"] for r in records] == ["bot_unknown", *KINDS[1:]]
     assert opp.side_of(records[0], FRIEND)["role"] == ""
@@ -386,21 +386,21 @@ def test_a_member_who_left_is_still_a_sparring_partner(opp, tmp_path):
     write_config(folder)
     members = load("members.json")
     members["items"] = [m for m in members["items"] if m["tag"] != M1]
-    fake = FakeTransport(pull_routes(opp, **{"clans/%239QJ0RV2/members": [
+    fake = FakeTransport(pull_routes(opp, **{"clans/%2309QJ0RV2/members": [
         answer(opp, 200, "members.json"),
         answer(opp, 200, body=json.dumps(members).encode())]}))
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_OK
     assert run(opp, folder, "pull", transport=fake, now=LATER) == opp.EXIT_OK
     roster = json.loads((folder / "roster.json").read_text(encoding="utf-8"))
     assert roster["members"][M1]["left"] == "2026-10-31T19:00:00Z"
-    assert sum("%232GJUV9" in url for url in fake.urls) == 1   # not pulled after leaving
+    assert sum("%2302GJUV9" in url for url in fake.urls) == 1   # not pulled after leaving
     assert [r["kind"] for r in stored(folder)] == KINDS        # the M1 spar stays a spar
 
 
 def test_pull_stops_on_403(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
     write_config(folder)
-    fake = FakeTransport(pull_routes(opp, **{"clans/%239QJ0RV2/members": [
+    fake = FakeTransport(pull_routes(opp, **{"clans/%2309QJ0RV2/members": [
         answer(opp, 403, "error_403_invalid_ip.json", folder=API_FIX)]}))
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_API
     assert len(fake.calls) == 1
@@ -412,10 +412,26 @@ def test_pull_stops_on_403(opp, tmp_path, capsys):
     assert state["pull"]["fatal"] == 403 and not state["pull"]["ok"]
 
 
+def test_pull_stops_on_a_429_the_back_off_cannot_clear(opp, tmp_path, capsys):
+    """Yodle2's log is throttled with a Retry-After of 600 s (too long to wait): the pull stops
+    there instead of asking for the next log, and the shared rate holds for the 600 s."""
+    folder = tmp_path / "opponents"
+    write_config(folder)
+    throttled = opp.cr_api.Raw(429, {"content-type": "application/json", "retry-after": "600"},
+                               (API_FIX / "error_429.json").read_bytes())
+    fake = FakeTransport(pull_routes(opp, **{"players/%230Y0GRC2/battlelog": [throttled]}))
+    assert run(opp, folder, "pull", transport=fake) == opp.EXIT_API
+    assert len(fake.calls) == 2                                # the members, then Yodle2's log
+    state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
+    assert state["pull"]["fatal"] == 429 and "pulled_at" not in state
+    assert "FAILED    battle log of a bot: 429: throttled" in capsys.readouterr().out
+    assert 429 in opp.FATAL and opp.FATAL == opp.cr_api.STOP
+
+
 def test_pull_goes_on_past_a_failed_log(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
     write_config(folder)
-    fake = FakeTransport(pull_routes(opp, **{"players/%238RPYCQ/battlelog": [
+    fake = FakeTransport(pull_routes(opp, **{"players/%2308RPYCQ/battlelog": [
         answer(opp, 404, "error_404.json", folder=API_FIX)]}))
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_API
     assert len(fake.calls) == 7 and [r["id"] for r in stored(folder)] == IDS
@@ -451,6 +467,25 @@ def test_a_held_lock_refuses_and_a_stale_one_is_taken(opp, tmp_path, capsys):
     os.utime(folder / "pull.lock", (old, old))
     assert run(opp, folder, "pull", transport=fake) == opp.EXIT_OK
     assert not (folder / "pull.lock").exists()
+
+
+def test_the_lock_beats_and_leaves_a_lock_it_lost(opp, tmp_path):
+    path = tmp_path / "pull.lock"
+    first = opp.Lock(path)
+    with first:
+        old = time.time() - 600
+        os.utime(path, (old, old))
+        assert first.touch() is True and time.time() - path.stat().st_mtime < 60   # heartbeat
+        # a run that made no progress for LOCK_STALE_S is taken over by a second run ...
+        old = time.time() - opp.LOCK_STALE_S - 60
+        os.utime(path, (old, old))
+        second = opp.Lock(path)
+        second.__enter__()
+        assert second.owned() and not first.owned()
+        assert first.touch() is False                      # ... which the first one notices
+    assert path.exists() and second.owned()                # and does not remove on its way out
+    second.__exit__(None, None, None)
+    assert not path.exists()
 
 
 def test_settings_errors_exit_2(opp, tmp_path, capsys):
@@ -501,10 +536,15 @@ def test_config_rules(opp):
     cfg = opp.parse_config(good)
     assert (cfg.clan, cfg.friends, cfg.rate, cfg.form_rule) == (CLAN, (FRIEND,), 2.0, "slot")
     assert cfg.to_json()["friends"] == [FRIEND] and cfg.warnings == ()
-    odd = opp.parse_config({**good, "clan": "#ABC", "colour": "red"})
-    assert any("never use 'AB'" in w for w in odd.warnings)
+    odd = opp.parse_config({**good, "colour": "red"})
     assert any("unknown setting 'colour'" in w for w in odd.warnings)
-    for bad, match in [({"owner": BOT}, "same tag"), ({"rate": 50}, "rate"),
+    for bad, match in [({"clan": "#ABC"}, "never use 'AB'"), ({"friends": ["#2PYQX"]}, "'X'"),
+                       ({"clan": "#CLANTAG"}, "placeholder"),
+                       ({"bot": "#YODLE2TAG"}, "placeholder"),
+                       ({"owner": "#MAINTAG"}, "placeholder"),
+                       ({"clan": "#<clan tag>"}, "placeholder"),
+                       ({"owner": "#..."}, "placeholder"),
+                       ({"owner": BOT}, "same tag"), ({"rate": 50}, "rate"),
                        ({"form_rule": "guess"}, "form_rule"), ({"bot": ""}, "not set"),
                        ({"keep_raw_days": -1}, "keep_raw_days"), ({"friends": "x"}, "list"),
                        ({"base": "http://example.invalid/v1"}, "https"),
@@ -516,10 +556,10 @@ def test_config_rules(opp):
 
 def test_init_writes_and_changes_the_config(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
-    assert run(opp, folder, "init", "--clan", "#9qj0rv2") == opp.EXIT_SETTING
+    assert run(opp, folder, "init", "--clan", "#09qj0rv2") == opp.EXIT_SETTING
     assert "owner is not set" in capsys.readouterr().err and not folder.exists()
-    assert run(opp, folder, "init", "--clan", "#9qj0rv2", "--owner", "PL0QY8", "--bot",
-               "#Y0GRC2", "--friend", "#luv2r8") == opp.EXIT_OK
+    assert run(opp, folder, "init", "--clan", "#09qj0rv2", "--owner", "0PL0QY8", "--bot",
+               "#0Y0GRC2", "--friend", "#0luv2r8") == opp.EXIT_OK
     data = json.loads((folder / "config.json").read_text(encoding="utf-8"))
     assert (data["clan"], data["owner"], data["bot"], data["friends"]) == \
         (CLAN, OWNER, BOT, [FRIEND])
@@ -528,6 +568,32 @@ def test_init_writes_and_changes_the_config(opp, tmp_path, capsys):
     assert run(opp, folder, "init", "--drop-friend", FRIEND, "--friend", STRANGER) == opp.EXIT_OK
     data = json.loads((folder / "config.json").read_text(encoding="utf-8"))
     assert data["friends"] == [STRANGER] and data["clan"] == CLAN
+    # the API settings and the form rule are saved, so every later pull uses them
+    capsys.readouterr()
+    assert run(opp, folder, "init", "--base", "proxy", "--transport", "curl", "--rate", "1.5",
+               "--form-rule", "field") == opp.EXIT_OK
+    data = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    assert (data["base"], data["transport"], data["rate"], data["form_rule"]) == \
+        ("proxy", "curl", 1.5, "field")
+    assert "base proxy, transport curl, rate 1.5/s, form rule field" in capsys.readouterr().out
+    cfg = opp.Store(folder).load_config()
+    args = argparse.Namespace(token_file=tmp_path / "token")       # written by run()
+    assert opp.build_client(cfg, args, opp.Store(folder),
+                            transport=FakeTransport({})).base == opp.cr_api.PROXY_BASE
+    assert run(opp, folder, "init", "--rate", "9") == opp.EXIT_SETTING
+    assert json.loads((folder / "config.json").read_text(encoding="utf-8"))["rate"] == 1.5
+
+
+def test_init_refuses_placeholders_and_writes_nothing(opp, tmp_path, capsys):
+    """The instructions' own words pasted as they are must not become a config."""
+    folder = tmp_path / "opponents"
+    assert run(opp, folder, "init", "--clan", "#CLANTAG", "--owner", "#MAINTAG", "--bot",
+               "#YODLE2TAG", "--check", transport=FakeTransport({})) == opp.EXIT_SETTING
+    assert "placeholder" in capsys.readouterr().err and not (folder / "config.json").exists()
+    assert run(opp, folder, "init", "--clan", CLAN, "--owner", OWNER, "--bot", BOT,
+               "--friend", "#2PYQX") == opp.EXIT_SETTING
+    assert "real tags never use 'X'" in capsys.readouterr().err
+    assert not (folder / "config.json").exists()
 
 
 def test_init_check_looks_the_tags_up_and_stops_on_403(opp, tmp_path, capsys):
@@ -535,14 +601,16 @@ def test_init_check_looks_the_tags_up_and_stops_on_403(opp, tmp_path, capsys):
     write_config(folder)
     base = opp.cr_api.OFFICIAL_BASE
     fake = FakeTransport({
-        f"{base}/clans/%239QJ0RV2": [answer(opp, 200, body=b'{"tag": "#9QJ0RV2", '
-                                                             b'"name": "Fixture Clan"}')],
-        f"{base}/players/%23PL0QY8": [answer(opp, 200, "player_owner.json")],
-        f"{base}/players/%23Y0GRC2": [answer(opp, 403, "error_403.json", folder=API_FIX)]})
+        f"{base}/clans/%2309QJ0RV2": [answer(opp, 200, body=b'{"tag": "#09QJ0RV2", '
+                                                             b'"name": "Fixture Clan \\u2694"}')],
+        f"{base}/players/%230PL0QY8": [answer(opp, 200, "player_owner.json")],
+        f"{base}/players/%230Y0GRC2": [answer(opp, 403, "error_403.json", folder=API_FIX)]})
     assert run(opp, folder, "init", "--check", transport=fake) == opp.EXIT_API
     assert len(fake.calls) == 3                                # the friend is not asked
     out = capsys.readouterr().out
-    assert "check     clan: 'Fixture Clan'" in out and "check     owner: 'Fixture Owner'" in out
+    # ascii(): a name with a symbol prints as an escape, never a UnicodeEncodeError on cp1252
+    assert "check     clan: 'Fixture Clan \\u2694'" in out
+    assert "check     owner: 'Fixture Owner'" in out
     assert "check     bot: 403" in out
 
 
@@ -604,7 +672,7 @@ def test_add_list_remove(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
     assert run(opp, folder, "add", "--deck", "Hog Rider, Musketeer-hero, Cannon-ev1, "
                "Skeletons-evo, Ice Golem, Ice Spirit, Fireball, The Log", "--label", "hog",
-               "--partner", "#2gjuv9") == opp.EXIT_OK
+               "--partner", "#02gjuv9") == opp.EXIT_OK
     ident = opp.deck_id(HOG)
     assert f"added     {ident}  {HOG}" in capsys.readouterr().out
     assert run(opp, folder, "add", "--deck", HOG, "--weight", "2") == opp.EXIT_OK
@@ -706,9 +774,9 @@ def test_probe_cli(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
     write_config(folder)
     base = opp.cr_api.OFFICIAL_BASE
-    routes = {f"{base}/players/%23PL0QY8": [answer(opp, 200, "player_owner.json")],
-              f"{base}/players/%23PL0QY8/battlelog": [answer(opp, 200, "battlelog_owner.json")],
-              f"{base}/players/%23Y0GRC2/battlelog": [answer(opp, 200, "battlelog_bot.json")]}
+    routes = {f"{base}/players/%230PL0QY8": [answer(opp, 200, "player_owner.json")],
+              f"{base}/players/%230PL0QY8/battlelog": [answer(opp, 200, "battlelog_owner.json")],
+              f"{base}/players/%230Y0GRC2/battlelog": [answer(opp, 200, "battlelog_bot.json")]}
     assert run(opp, folder, "probe", transport=FakeTransport(routes)) == opp.EXIT_OK
     out = capsys.readouterr().out
     assert "verdict   form_rule slot: the log shows what the player owns; card order same" in out
@@ -716,7 +784,7 @@ def test_probe_cli(opp, tmp_path, capsys):
     saved = json.loads((folder / "probe.json").read_text(encoding="utf-8"))
     assert saved["player"] == OWNER and saved["forms"] == "ownership"
     assert len(list((folder / "raw" / "2026-10-30").iterdir())) == 3
-    routes[f"{base}/players/%23PL0QY8"] = [answer(opp, 404, "error_404.json", folder=API_FIX)]
+    routes[f"{base}/players/%230PL0QY8"] = [answer(opp, 404, "error_404.json", folder=API_FIX)]
     assert run(opp, folder, "probe", transport=FakeTransport(routes)) == opp.EXIT_API
 
 
@@ -731,31 +799,31 @@ def meta_routes(opp):
         f"{board}?limit=3": [answer(opp, 200, "pol_page1.json", folder=API_FIX)],
         f"{board}?limit=1&after=eyJwb3MiOjJ9": [answer(opp, 200, "pol_page2.json",
                                                        folder=API_FIX)],
-        f"{base}/players/%232PYQ0/battlelog": [answer(opp, 200, "battlelog_a.json",
+        f"{base}/players/%2302PYQ0/battlelog": [answer(opp, 200, "battlelog_a.json",
                                                       folder=API_FIX)],
-        f"{base}/players/%238LGRJ/battlelog": [answer(opp, 200, "battlelog_b.json",
+        f"{base}/players/%2308LGRJ/battlelog": [answer(opp, 200, "battlelog_b.json",
                                                       folder=API_FIX)],
-        f"{base}/players/%239CUV2/battlelog": [answer(opp, 404, "error_404.json",
+        f"{base}/players/%2309CUV2/battlelog": [answer(opp, 404, "error_404.json",
                                                       folder=API_FIX)]}
 
 
 def test_meta_keeps_path_of_legends_battles_for_8_weeks(opp, tmp_path, capsys):
     folder = tmp_path / "opponents"
     write_config(folder)
-    old = {"v": 1, "id": "20260801T000000.000Z|#2PYQ0|#8LGRJ", "kind": "top",
+    old = {"v": 1, "id": "20260801T000000.000Z|#02PYQ0|#08LGRJ", "kind": "top",
            "battle_time": "20260801T000000.000Z", "sides": []}
     (folder / "meta_battles.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
     assert run(opp, folder, "meta", "--top", "3", "--workers", "1",
                transport=FakeTransport(meta_routes(opp))) == opp.EXIT_API   # C's log: 404
     records = stored(folder, "meta_battles.jsonl")
-    assert [r["id"] for r in records] == ["20261029T194000.000Z|#2PYQ0|#P0LYJ",
-                                          "20261029T201500.000Z|#2PYQ0|#8LGRJ"]
+    assert [r["id"] for r in records] == ["20261029T194000.000Z|#02PYQ0|#0P0LYJ",
+                                          "20261029T201500.000Z|#02PYQ0|#08LGRJ"]
     assert {r["kind"] for r in records} == {"top"}
-    a = opp.side_of(records[1], "#2PYQ0")
+    a = opp.side_of(records[1], "#02PYQ0")
     assert (a["role"], a["rating"], a["rank"]) == ("top", 3600, 1)
     assert a["deck"] == \
         "cannon,fireball,hog-rider,ice-golem,ice-spirit,musketeer-hero,skeletons,the-log"
-    d = opp.side_of(records[0], "#P0LYJ")
+    d = opp.side_of(records[0], "#0P0LYJ")
     assert (d["role"], d["rating"], d["rank"]) == ("", None, None)
     assert "name" not in a and "level" not in a["cards"][0]     # slim: no names or levels
     state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
@@ -769,9 +837,36 @@ def test_meta_keeps_path_of_legends_battles_for_8_weeks(opp, tmp_path, capsys):
     assert "FAILED    a top player's battle log: 404" in out
 
 
+def test_meta_stops_after_failed_logs_in_a_row(opp, tmp_path, capsys):
+    """With the limit at 1 and one worker, A's 404 stops the run: B and C are never asked."""
+    folder = tmp_path / "opponents"
+    write_config(folder)
+    routes = meta_routes(opp)
+    base = opp.cr_api.OFFICIAL_BASE
+    routes[f"{base}/players/%2302PYQ0/battlelog"] = [answer(opp, 404, "error_404.json",
+                                                           folder=API_FIX)]
+    fake = FakeTransport(routes)
+    client = opp.cr_api.Client(TOKEN, transport=fake, rate=fast_rate(opp), env={})
+    cfg = opp.Store(folder).load_config()
+    beats = []
+    result = opp.meta(cfg, client, opp.Store(folder), top=3, workers=1, now=NOW,
+                      heartbeat=lambda: beats.append(1) or True, max_fails_in_a_row=1)
+    assert fake.urls[-1] == f"{base}/players/%2302PYQ0/battlelog" and len(fake.calls) == 3
+    assert result["stopped"].startswith("1 failed logs in a row") and not result["ok"]
+    assert beats == [1]
+    state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
+    assert "meta_at" not in state and state["meta"]["stopped"] == result["stopped"]
+    # a lost lock stops it too
+    fake = FakeTransport(meta_routes(opp))
+    client = opp.cr_api.Client(TOKEN, transport=fake, rate=fast_rate(opp), env={})
+    result = opp.meta(cfg, client, opp.Store(folder), top=3, workers=1, now=NOW,
+                      heartbeat=lambda: False)
+    assert result["stopped"] == "another run took the lock over; stopped" and not result["ok"]
+
+
 def test_meta_falls_back_to_the_last_seasons(opp):
     base = opp.cr_api.OFFICIAL_BASE
-    one = b'{"items": [{"tag": "#2PYQ0", "eloRating": 3600, "rank": 1}], "paging": {}}'
+    one = b'{"items": [{"tag": "#02PYQ0", "eloRating": 3600, "rank": 1}], "paging": {}}'
     fake = FakeTransport({
         f"{base}/locations/global/pathoflegend/players?limit=3": [
             answer(opp, 404, "error_404.json", folder=API_FIX)],
@@ -781,7 +876,7 @@ def test_meta_falls_back_to_the_last_seasons(opp):
             answer(opp, 200, body=one)]})
     client = opp.cr_api.Client(TOKEN, transport=fake, rate=fast_rate(opp), env={})
     players, last, path = opp.top_board(client, 3, NOW)
-    assert [p["tag"] for p in players] == ["#2PYQ0"] and last.status == 200
+    assert [p["tag"] for p in players] == ["#02PYQ0"] and last.status == 200
     assert path == "locations/global/pathoflegend/2026-09/rankings/players"
     assert opp.recent_seasons(dt.datetime(2027, 1, 5)) == ["2027-01", "2026-12", "2026-11"]
 

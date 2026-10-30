@@ -14,7 +14,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#LUV2R8",
+    "tag": "#0LUV2R8",
     "name": "Fixture Friend",
     "crowns": 0,
     "kingTowerHitPoints": 0,
@@ -123,7 +123,7 @@
   ],
   "opponent": [
    {
-    "tag": "#Y0GRC2",
+    "tag": "#0Y0GRC2",
     "name": "Fixture Bot",
     "crowns": 3,
     "kingTowerHitPoints": 4824,
@@ -132,7 +132,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },

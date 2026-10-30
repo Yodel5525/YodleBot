@@ -14,7 +14,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#8LGRJ",
+    "tag": "#08LGRJ",
     "name": "Fixture Player B",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -120,7 +120,7 @@
   ],
   "opponent": [
    {
-    "tag": "#2PYQ0",
+    "tag": "#02PYQ0",
     "name": "Fixture Player A",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -128,7 +128,7 @@
      3052
     ],
     "clan": {
-     "tag": "#2LQ8CV",
+     "tag": "#02LQ8CV",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -250,7 +250,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#8LGRJ",
+    "tag": "#08LGRJ",
     "name": "Fixture Player B",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -353,7 +353,7 @@
     "elixirLeaked": 1.5
    },
    {
-    "tag": "#YJ2C0",
+    "tag": "#0YJ2C0",
     "name": "Fixture Mate Y",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -458,7 +458,7 @@
   ],
   "opponent": [
    {
-    "tag": "#U8VRQ",
+    "tag": "#0U8VRQ",
     "name": "Fixture Player Z",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -562,7 +562,7 @@
     "elixirLeaked": 1.5
    },
    {
-    "tag": "#CQ9PL",
+    "tag": "#0CQ9PL",
     "name": "Fixture Player W",
     "crowns": 0,
     "kingTowerHitPoints": 4824,

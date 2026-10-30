@@ -14,7 +14,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#PL0QY8",
+    "tag": "#0PL0QY8",
     "name": "Fixture Owner",
     "crowns": 2,
     "kingTowerHitPoints": 4824,
@@ -22,7 +22,7 @@
      1200
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -132,7 +132,7 @@
   ],
   "opponent": [
    {
-    "tag": "#Y0GRC2",
+    "tag": "#0Y0GRC2",
     "name": "Fixture Bot",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -140,7 +140,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -263,7 +263,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#PL0QY8",
+    "tag": "#0PL0QY8",
     "name": "Fixture Owner",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -272,7 +272,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -382,7 +382,7 @@
   ],
   "opponent": [
    {
-    "tag": "#CJ8P0L",
+    "tag": "#0CJ8P0L",
     "name": "Fixture Outsider 1",
     "crowns": 2,
     "kingTowerHitPoints": 4824,
@@ -506,7 +506,7 @@
   "deckSelection": "collection",
   "team": [
    {
-    "tag": "#PL0QY8",
+    "tag": "#0PL0QY8",
     "name": "Fixture Owner",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -515,7 +515,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -623,7 +623,7 @@
     "elixirLeaked": 2.25
    },
    {
-    "tag": "#8RPYCQ",
+    "tag": "#08RPYCQ",
     "name": "Fixture Mate 2",
     "crowns": 1,
     "kingTowerHitPoints": 4824,
@@ -632,7 +632,7 @@
      3052
     ],
     "clan": {
-     "tag": "#9QJ0RV2",
+     "tag": "#09QJ0RV2",
      "name": "Fixture Clan",
      "badgeId": 16000000
     },
@@ -734,7 +734,7 @@
   ],
   "opponent": [
    {
-    "tag": "#RJ9QC0",
+    "tag": "#0RJ9QC0",
     "name": "Fixture Outsider 3",
     "crowns": 0,
     "kingTowerHitPoints": 4824,
@@ -838,7 +838,7 @@
     "elixirLeaked": 2.25
    },
    {
-    "tag": "#G2PV8L",
+    "tag": "#0G2PV8L",
     "name": "Fixture Outsider 4",
     "crowns": 0,
     "kingTowerHitPoints": 4824,

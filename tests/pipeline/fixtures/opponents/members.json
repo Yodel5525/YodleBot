@@ -1,7 +1,7 @@
 {
  "items": [
   {
-   "tag": "#2GJUV9",
+   "tag": "#02GJUV9",
    "name": "Fixture Mate 1",
    "role": "leader",
    "expLevel": 62,
@@ -16,7 +16,7 @@
    "donationsReceived": 80
   },
   {
-   "tag": "#PL0QY8",
+   "tag": "#0PL0QY8",
    "name": "Fixture Owner",
    "role": "coLeader",
    "expLevel": 58,
@@ -31,7 +31,7 @@
    "donationsReceived": 60
   },
   {
-   "tag": "#8RPYCQ",
+   "tag": "#08RPYCQ",
    "name": "Fixture Mate 2",
    "role": "elder",
    "expLevel": 50,
@@ -46,7 +46,7 @@
    "donationsReceived": 40
   },
   {
-   "tag": "#Y0GRC2",
+   "tag": "#0Y0GRC2",
    "name": "Fixture Bot",
    "role": "member",
    "expLevel": 40,
