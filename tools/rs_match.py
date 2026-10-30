@@ -32,14 +32,50 @@ and `first` change sides, so each agent keeps its deck, its seed and its noise o
 
 THE AGENTS (AgentSpec). ckpt: a token-policy checkpoint, played by MatchAgent, rs_eval.RSAgent
 with a sampling preset added; "" is an idle seat that never plays (a floor anchor). schema: the
-row layout the seat builds; None reads the checkpoint's vocab "schema" (absent: rs_rows.SCHEMA).
-Only rs_rows/legacy rows are built here; another schema is refused until E14 adds its builder.
+row layout the checkpoint must have been trained on, rs_rows/legacy or rs_rows/v2 (ROW_SCHEMAS;
+the short names "legacy" and "v2" are taken too); None takes the checkpoint's vocab "schema"
+(absent: legacy). The seat builds the rows of its checkpoint's schema (V2 SEATS below).
 lead: rs_eval --lead (0 none, n engine copy, -n rebuilt from public information, 1000 + n dead
 reckoning); a decision-time checkpoint (E11, vocab obs_delay.ticks > 0) wants 0. noise: a
 perception-noise profile (tools/perception_noise.py: a NoiseProfile, its JSON dict, a path,
 "default"; None or "none" is a perfect observer). decide: rs_decide's preset, "live" (the live
 runner's rule, the default here), "legacy" (rs_eval's) or "sample" (RL's sampled slot and tile).
-visibility: rs_rows --visibility (None: the checkpoint's own).
+visibility: rs_rows --visibility (None: the checkpoint's own). presses: whether the seat may
+press its ability buttons (V2 SEATS; default False, every seat as before).
+
+V2 SEATS (E14 / E15; tools/rs_schema.py). A checkpoint whose meta "schema" is rs_rows/v2 gets
+rs_eval.RSAgent's v2 rows (RSAgent.v2_kw) with what the live runner gives its rows:
+  buttons     its ability button cards, named from the deck and forms the spec deals its team
+              (rs_presses.side_buttons: hero entries in deal order, then champions), as
+              rs_eval.play names them; run_match sets them on every seat whose `v2` is true,
+              and such a seat checks royalesim.STATUS_BITS first (its rows read the burrow bit).
+  own_pending its own plays sent and not run yet (the state's pending rows, card + 2 and ticks
+              to land; RSAgent.own_pending), except for a checkpoint whose rows were built at
+              landing time (meta obs_delay ticks 0): those rows never showed a pending play, and
+              rs_decide.pending_inputs gives the live runner none for it either.
+  opp_elixir  the opponent's bar as the seat counts it from its memory view (rs_rows.SeenElixir,
+              lag 0), paid only for the plays the engine RAN. A play the engine refused when it
+              was sent (its step result) or when it ran under the delay
+              (Battle.step_commands_run) stays in the memory, as it always did (opp_seen and
+              opp_last show it), but run_match hands each seat that reads them (MatchAgent.unran)
+              the entries of its memory whose play never ran, and MatchAgent.opp_elixir leaves
+              them out. With mem_lag >= 1 (the default) a play is known to have run or not before
+              any view holds it; with lag 0 or "legacy" the count is redone from the view once a
+              refusal is known (RSAgent.opp_elixir starts again when a counted play leaves the
+              view). The opponent's presses are not counted: the live screen reader does not see
+              them either.
+  presses     AgentSpec.presses (default False: every button masked, as before) lets rs_decide
+              press the seat's buttons when its checkpoint's buttons trained
+              (rs_decide.presses_allowed(meta): v2, train_rows press_rows "trained"), in every
+              decide preset. A press command, (team, HAND_SIZE + button, 0, 0), is taken only
+              from a seat whose spec has presses on (else it is refused as a slot outside the
+              hand, ValueError). It is counted in presses / press_refused (at send, and when it
+              ran under a delay), logged with its button's card (the abilities row's, -1
+              unknown) and its slot, never recorded in a memory (it is no card play), and when
+              it costs elixir it ends a full bar's leak as a play does. AgentSpec.to_dict leaves
+              presses out while it is False, so the specs, game keys and player identities of
+              earlier runs (tools/rs_league_eval.py) do not change.
+A legacy checkpoint's seat (and any seat whose `v2` is not true) is played exactly as before.
 
 THE LOOP (run_match), rs_eval.play's loop with two policy seats and no ghost: make_battle under
 the spec's engine config with its delay, reset with the spec's decks, forms, levels and 6 elixir
@@ -64,8 +100,10 @@ tick, so a lag profile is approximate here (MatchNoise counts board_lag_unavaila
 
 THE RESULT (MatchResult): winner (team, -1 a draw), crowns, game_over, end_tick, plays sent and
 refused (at send, and when they ran under a delay where the engine reports it), decisions,
-elixir leak, final tower hp, the delays, per-seat agent info and noise counts, the play log and
-timings (wall seconds: setup, engine, each seat's decisions; never compare them). score(team) is
+elixir leak, final tower hp, the delays, per-seat agent info and noise counts, the play log
+([tick, team, card, slot, x_sub, y_sub, reason at send]; a press has slot HAND_SIZE + button),
+timings (wall seconds: setup, engine, each seat's decisions; never compare them) and the
+presses sent and refused (V2 SEATS). score(team) is
 1 / 0.5 / 0; score_of(name) is that agent's, whichever seat it sat in; summarize() gives an
 agent's score, Wilson interval (tools/league/stats.py) and means.
 
@@ -127,7 +165,9 @@ import rs_engine  # noqa: E402
 import rs_eval  # noqa: E402  (read-only: RSAgent, AGENT_CLASS, seat_visibility, skip_record)
 import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
+import rs_presses  # noqa: E402  (V2 SEATS: side_buttons, champion_ids, button_count, hand_size)
 import rs_rows as RR  # noqa: E402  (read-only: _setup, obs_row through RSAgent, HOG26, settings)
+import rs_schema  # noqa: E402  (V2 SEATS: the schema names)
 from royalesim_redrive import base_key, deal_order  # noqa: E402
 from tools.league.stats import score_interval  # noqa: E402
 
@@ -199,6 +239,7 @@ class AgentSpec:
     hold_pending: bool = False
     seed_offset: int = 0
     allow_drift: bool | None = None
+    presses: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ckpt", "" if self.ckpt is None else str(self.ckpt))
@@ -207,8 +248,14 @@ class AgentSpec:
             raise ValueError(f"decide: one of {', '.join(rs_decide.MODES)}, got {self.decide!r}")
         if self.visibility is not None:
             RR.visibility_mode(self.visibility)
+        if self.schema is not None:
+            text = str(self.schema).strip()
+            object.__setattr__(self, "schema", rs_schema.SHORT_NAMES.get(text, text))
         for what in ("lead", "noise_seed", "seed_offset"):
             object.__setattr__(self, what, _int(getattr(self, what), what))
+        if not isinstance(self.presses, (bool, np.bool_)):
+            raise ValueError(f"presses: True or False, got {self.presses!r}")
+        object.__setattr__(self, "presses", bool(self.presses))
         if _is_noise_profile(self.noise) and not _is_noise_model(self.noise):
             object.__setattr__(self, "noise", self.noise.to_dict())     # plain data: picklable
 
@@ -226,9 +273,13 @@ class AgentSpec:
         return Path(self.ckpt).parent.name or self.ckpt
 
     def to_dict(self) -> dict:
+        """The fields as a dict; `presses` only when True (V2 SEATS: the dict, and so the game
+        keys and identities built from it, is what it was before the switch while it is off)."""
         out = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
         if _is_noise_model(self.noise):
             out["noise"] = self.noise.profile.to_dict()
+        if not self.presses:
+            del out["presses"]
         return out
 
     @classmethod
@@ -415,35 +466,79 @@ class MatchSpec:
 
 class MatchAgent(rs_eval.RSAgent):
     """rs_eval.RSAgent (checkpoint loading and checks, rows, look-ahead, rs_decide.decide on the
-    match battle) with the decision cadence of the match and the sampling preset added."""
+    match battle) with the decision cadence of the match and the sampling preset added, and for
+    a v2 checkpoint the live runner's rules for its own plays in flight, the opponent's elixir
+    and the ability buttons (module doc, V2 SEATS)."""
 
     cadence = DECIDE
+    #: AgentSpec.presses (configure sets it): press when the checkpoint's buttons trained.
+    presses = False
+    #: run_match's Counter of (team, card token, tick) entries of this seat's memory whose play
+    #: the engine refused (V2 SEATS); None outside run_match.
+    unran = None
+
+    def presses_on(self) -> bool:
+        """Whether decide may press for this seat: AgentSpec.presses and a checkpoint whose
+        ability buttons trained (rs_decide.presses_allowed)."""
+        return bool(self.presses) and rs_decide.presses_allowed(getattr(self, "meta", None))
 
     def decide_config(self):
         m = self.decide_mode
+        kw = {"presses": True} if self.presses_on() else {}
         if m == rs_decide.MODE_LEGACY:
-            return rs_decide.DecideConfig.legacy(self.wait_bias, dt=self.cadence)
+            return rs_decide.DecideConfig.legacy(self.wait_bias, dt=self.cadence, **kw)
         if m == rs_decide.MODE_LIVE:
             guard = rs_decide.card_ids(self._catalogue(), rs_decide.GUARD_CARD_NAMES)
-            return rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard, dt=self.cadence)
+            return rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard, dt=self.cadence,
+                                               **kw)
         if m == rs_decide.MODE_SAMPLE:
-            return rs_decide.DecideConfig.sampling(self.wait_bias, dt=self.cadence)
+            return rs_decide.DecideConfig.sampling(self.wait_bias, dt=self.cadence, **kw)
         raise ValueError(f"decide: one of {', '.join(rs_decide.MODES)}, got {m!r}")
+
+    def own_pending(self, state, team) -> list:
+        """RSAgent.own_pending, but none for a checkpoint whose rows were built at landing time
+        (meta obs_delay ticks 0), as rs_decide.pending_inputs gives the live runner (V2 SEATS)."""
+        if rs_decide.obs_delay_ticks(getattr(self, "meta", None)) <= 0:
+            return []
+        return super().own_pending(state, team)
+
+    def opp_elixir(self, team, mem, tick, royalesim=None) -> tuple:
+        """RSAgent.opp_elixir on the memory view less the opponent's entries in `unran`, the
+        plays the engine never ran (V2 SEATS); each entry takes out one equal play of the
+        view's "last" list. Without `unran` (or nothing in it): RSAgent.opp_elixir as is."""
+        opp = 1 - int(team)
+        drop = Counter({(int(c), int(t)): n for (who, c, t), n in (self.unran or {}).items()
+                        if int(who) == opp and n > 0})
+        if drop:
+            last = dict(mem.get("last") or {})
+            kept = []
+            for card, when in last.get(opp, ()):
+                key = (int(card), int(when))
+                if drop[key] > 0:
+                    drop[key] -= 1
+                    continue
+                kept.append((card, when))
+            last[opp] = kept
+            mem = {**mem, "last": last}
+        return super().opp_elixir(team, mem, tick, royalesim)
 
 
 #: The row layout of every checkpoint before E14 (vocab "schema", absent before E04).
-LEGACY_SCHEMA = "rs_rows/legacy"
-#: Schemas whose rows RSAgent.act builds (rs_rows.obs_row): the legacy one and rs_rows.SCHEMA.
-ROW_SCHEMAS = frozenset({LEGACY_SCHEMA, str(RR.SCHEMA)})
+LEGACY_SCHEMA = rs_schema.SCHEMA_LEGACY
+#: Schemas whose rows RSAgent.act builds (rs_rows.obs_row): legacy (rs_rows.SCHEMA) and v2
+#: (E14 / E15: RSAgent.v2_kw; module doc, V2 SEATS).
+ROW_SCHEMAS = frozenset({LEGACY_SCHEMA, rs_schema.SCHEMA_V2, str(RR.SCHEMA)})
 
 
 def seat_schema(seat: Any) -> str | None:
     """The row schema a seat's checkpoint was trained on: its meta "schema" (LEGACY_SCHEMA when
-    the meta has none); None for a seat without a meta (a stub, an idle seat)."""
+    the meta has none; "legacy" / "v2" as their full names); None for a seat without a meta (a
+    stub, an idle seat)."""
     meta = getattr(seat, "meta", None)
     if not isinstance(meta, Mapping):
         return None
-    return str(meta.get("schema") or LEGACY_SCHEMA)
+    name = str(meta.get("schema") or LEGACY_SCHEMA).strip()
+    return rs_schema.SHORT_NAMES.get(name, name)
 
 
 def check_schema(seat: Any, agent: AgentSpec) -> None:
@@ -457,12 +552,13 @@ def check_schema(seat: Any, agent: AgentSpec) -> None:
                          f"spec says {agent.schema!r}")
     if got not in ROW_SCHEMAS:
         raise ValueError(f"{agent.label}: schema {got!r}; rs_match builds "
-                         f"{sorted(ROW_SCHEMAS)} rows only (E14 adds the v2 builder)")
+                         f"{sorted(ROW_SCHEMAS)} rows only")
 
 
 def configure(seat: Any, agent: AgentSpec, cfg: Any) -> Any:
     """Set an RSAgent-like seat up as rs_eval.play sets its agent: engine, lead (rs_eval --lead
-    encoding), hold, spell aim, decision rule and (when given) visibility; checks the schema."""
+    encoding), hold, spell aim, decision rule, the presses switch (MatchAgent reads it) and
+    (when given) visibility; checks the schema."""
     seat.engine = cfg
     seat.lead = abs(agent.lead) % 1000
     seat.lead_rebuild = -1000 < agent.lead < 0
@@ -470,6 +566,7 @@ def configure(seat: Any, agent: AgentSpec, cfg: Any) -> Any:
     seat.hold_pending = agent.hold_pending
     seat.spell_aim = agent.spell_aim
     seat.decide_mode = agent.decide
+    seat.presses = agent.presses
     if agent.visibility is not None:
         seat.visibility = agent.visibility
     check_schema(seat, agent)
@@ -494,10 +591,14 @@ def seat_info(seat: Any, agent: AgentSpec) -> dict:
     meta = getattr(seat, "meta", None)
     meta = meta if isinstance(meta, Mapping) else {}
     vis = getattr(seat, "visibility", None) if seat is not None else None
+    on = getattr(seat, "presses_on", None)
+    buttons = getattr(seat, "buttons", None)
     return {"name": agent.label, "ckpt": agent.ckpt, "lead": agent.lead, "decide": agent.decide,
             "visibility": vis if isinstance(vis, str) else agent.visibility,
             "schema": seat_schema(seat), "obs_delay": meta.get("obs_delay"),
-            "live_compat": meta.get("live_compat")}
+            "live_compat": meta.get("live_compat"),
+            "presses": bool(on()) if callable(on) else False,
+            "buttons": None if buttons is None else [int(c) for c in buttons]}
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +674,8 @@ class MatchResult:
     noise: tuple = (None, None)
     log: tuple = ()
     timings: Any = None
+    presses: tuple = (0, 0)
+    press_refused: tuple = (0, 0)
 
     def score(self, team: int) -> float:
         """1 a win, 0 a loss, 0.5 a draw, for `team`."""
@@ -632,16 +735,22 @@ def _law_for(cfg: rs_engine.EngineConfig) -> rs_elixir.ElixirLaw:
     return rs_elixir.default_law()
 
 
-def _command(cmd: Any, team: int, state: Mapping[str, Any]) -> tuple[int, int, int, int]:
-    """A seat's command as (team, slot, x_sub, y_sub) ints, checked: its own team, a hand slot."""
+def _command(cmd: Any, team: int, state: Mapping[str, Any], *, buttons: int = 0,
+             hand_size: int = rs_presses.FALLBACK_HAND_SIZE) -> tuple[int, int, int, int]:
+    """A seat's command as (team, slot, x_sub, y_sub) ints, checked: its own team and a hand
+    slot, or (buttons > 0: the seat may press) a button's slot hand_size + k, k < buttons."""
     try:
         out = tuple(int(v) for v in cmd)
     except (TypeError, ValueError):
         raise ValueError(f"team {team}'s seat returned {cmd!r}, not (team, slot, x_sub, y_sub)") from None
     hand = state["players"][team]["hand"]
+    if (len(out) == 4 and out[0] == team and buttons > 0
+            and hand_size <= out[1] < hand_size + buttons and out[1] >= len(hand)):
+        return out
     if len(out) != 4 or out[0] != team or not 0 <= out[1] < len(hand):
+        press = f" or a button slot {hand_size}-{hand_size + buttons - 1}" if buttons > 0 else ""
         raise ValueError(f"team {team}'s seat returned {cmd!r}: expected (team, slot, x_sub, "
-                         f"y_sub) for its own team and a hand slot 0-{len(hand) - 1}")
+                         f"y_sub) for its own team and a hand slot 0-{len(hand) - 1}{press}")
     return out
 
 
@@ -654,18 +763,67 @@ def _reason(row: Any) -> int:
         return 0
 
 
-def _ran_refusals(battle: Any) -> list[int]:
-    """Teams of the delayed deploys the last step refused or dropped when they ran
-    (Battle.step_commands_run; absent on engines and fakes without it)."""
+def _ran_rows(battle: Any) -> list[tuple[int, int, Any, int, int]]:
+    """The last step's Battle.step_commands_run() rows, (tick, team, kind, what, reason): every
+    delayed command that ran or was dropped in it (kind "deploy" a card play, any other a
+    press); [] on engines and fakes without it."""
     fn = getattr(battle, "step_commands_run", None)
     if not callable(fn):
         return []
     out = []
     for row in fn() or ():
         row = tuple(row)
-        if len(row) >= 5 and row[2] == rs_memory.RAN_DEPLOY and int(row[4]) != rs_memory.RAN_OK:
-            out.append(int(row[1]))
+        if len(row) < 5:
+            continue
+        try:
+            tick, team, reason = int(row[0]), int(row[1]), int(row[4])
+        except (TypeError, ValueError):
+            continue
+        try:
+            what = int(row[3])
+        except (TypeError, ValueError):
+            what = -1                           # a press may name no card
+        if team in (0, 1):
+            out.append((tick, team, row[2], what, reason))
     return out
+
+
+def _ran_refusals(battle: Any) -> list[int]:
+    """Teams of the delayed deploys the last step refused or dropped when they ran
+    (Battle.step_commands_run; absent on engines and fakes without it)."""
+    return [r[1] for r in _ran_rows(battle)
+            if r[2] == rs_memory.RAN_DEPLOY and r[4] != rs_memory.RAN_OK]
+
+
+def _ran_play(flying: list[int], log: Sequence[Sequence[int]], exec_of: Mapping[int, int],
+              team: int, card: int, tick: int) -> int | None:
+    """The log index of the play a step_commands_run deploy row (`team` ran `card` on `tick`)
+    reports, taken out of `flying` (plays accepted under a delay and not reported yet): the
+    oldest of that team and card dated `tick`, else the oldest dated before it; None if none."""
+    pick = None
+    for j, k in enumerate(flying):
+        if log[k][1] != team or log[k][2] != card or exec_of[k] > tick:
+            continue
+        if exec_of[k] == tick:
+            pick = j
+            break
+        if pick is None:
+            pick = j
+    return None if pick is None else flying.pop(pick)
+
+
+class _Recorder:
+    """A PublicMemory stand-in for MatchNoise.record: records into `mem` and keeps what it was
+    handed, (card token, tick), the entry that seat's memory got for the play."""
+
+    __slots__ = ("mem", "got")
+
+    def __init__(self, mem: rs_memory.PublicMemory):
+        self.mem, self.got = mem, None
+
+    def record(self, team: int, card: int, exec_tick: int) -> None:
+        self.mem.record(team, card, exec_tick)
+        self.got = (int(card), int(exec_tick))
 
 
 def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | None = None,
@@ -678,13 +836,17 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
     ctx           rs_rows._setup(cfg)'s tuple, when the caller already has it
     law           the rs_elixir.ElixirLaw the leak is counted under (default: the engine's)
     noise_models  a dict that keeps NoiseModels across matches (run_many passes one)
+
+    A seat whose `v2` is true gets its `buttons` from the deck and forms the spec deals its team,
+    and a seat that has an `unran` attribute (MatchAgent) gets the Counter of its memory's
+    entries whose play the engine refused (module doc, V2 SEATS).
     """
     t_start = time.perf_counter()
     spec = MatchSpec.from_dict(spec)
     cfg = spec.engine_config()
     if ctx is None:
         ctx = RR._setup(cfg)
-    royalesim, _names, ids, _cat = ctx
+    royalesim, _names, ids, cat = ctx
     sub = royalesim.SUBTILE_PER_MILLITILE
     lag = spec.mem_lag
     legacy = lag == RR.MEM_LEGACY
@@ -692,7 +854,8 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
     engine_s = 0.0
     t0 = time.perf_counter()
     battle = rs_engine.make_battle(cfg, royalesim)
-    battle.reset(**spec.reset_kwargs(ids))
+    dealt = spec.reset_kwargs(ids)
+    battle.reset(**dealt)
     engine_s += time.perf_counter() - t0
     t0 = time.perf_counter()
     if seats is None:
@@ -700,9 +863,25 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
         seats = [factory(spec.agents[t], t, spec, cfg) for t in (0, 1)]
     else:
         seats = list(_two(seats, "seats"))
-    for seat in seats:
-        if seat is not None and rs_eval.seat_visibility(seat) == RR.VIS_PUBLIC:
-            RR.check_status_bits(royalesim)
+    # V2 SEATS: the press slots each team's spec allows (0: none), and per observing seat the
+    # entries (team, card token, tick) of its memory whose play the engine refused.
+    hand_size = rs_presses.hand_size(royalesim)
+    n_buttons = rs_presses.button_count(royalesim)
+    press_slots = [n_buttons if spec.agents[t].presses else 0 for t in (0, 1)]
+    unran = [Counter(), Counter()]
+    champs = None
+    for t, seat in enumerate(seats):
+        if seat is None:
+            continue
+        v2 = bool(getattr(seat, "v2", False))
+        if rs_eval.seat_visibility(seat) == RR.VIS_PUBLIC or v2:
+            RR.check_status_bits(royalesim)       # a v2 row reads the burrow bit too
+        if v2:
+            if champs is None:
+                champs = rs_presses.champion_ids(cat, getattr(royalesim, "CATALOGUE_FIELDS", None))
+            seat.buttons = rs_presses.side_buttons(dealt["decks"][t], dealt["forms"][t], champs)
+        if hasattr(seat, "unran"):
+            seat.unran = unran[t]
     noise = []
     for t in (0, 1):
         model = noise_model(spec.agents[t].noise, battle, sub, noise_models)
@@ -712,10 +891,24 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
     mems = [rs_memory.PublicMemory(), rs_memory.PublicMemory()]
     order = (spec.first, 1 - spec.first)
     plays, refused, decisions, full = [0, 0], [0, 0], [0, 0], [0, 0]
+    pressed, press_refused = [0, 0], [0, 0]
     leak_fine = [0, 0]
     execs: list[list[int]] = [[], []]
     decide_s = [0.0, 0.0]
     log: list[list[int]] = []
+    # Per play (its log index): (team, the entry each seat's memory got or None), its exec tick;
+    # flying: the plays accepted under a delay that step_commands_run has not reported yet.
+    entries: dict[int, tuple] = {}
+    exec_of: dict[int, int] = {}
+    flying: list[int] = []
+
+    def never_ran(k: int) -> None:
+        """Play k was refused: each seat's memory entry of it goes into that seat's unran."""
+        who, got = entries.pop(k, (None, ()))
+        for obs, entry in enumerate(got):
+            if entry is not None:
+                unran[obs][(who, entry[0], entry[1])] += 1
+
     cap = None
     tick = 0
     while tick < spec.max_ticks:
@@ -750,35 +943,70 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
             decisions[team] += 1
             if cmd is None:
                 continue
-            cmd = _command(cmd, team, state)
-            card = int(state["players"][team]["hand"][cmd[1]])
+            cmd = _command(cmd, team, state, buttons=press_slots[team], hand_size=hand_size)
+            hand = state["players"][team]["hand"]
             cmds.append(cmd)
             exec_tick = tick + delays[team]
+            if cmd[1] >= len(hand):
+                # V2 SEATS: a press (its spec lets the seat press). No card play: no memory entry,
+                # nothing in flight for the look-ahead; its cost (for the leak) from the abilities.
+                button = cmd[1] - hand_size
+                pressed[team] += 1
+                sent.append((team, exec_tick, len(log), rs_decide.press_cost(state, team, button)))
+                log.append([tick, team, rs_decide.button_card(state, team, button), cmd[1],
+                            cmd[2], cmd[3], 0])
+                continue
+            card = int(hand[cmd[1]])
             # Our own plays in flight, for the rebuilt look-ahead (rs_eval.play's agent.sent).
             seat.sent = list(getattr(seat, "sent", None) or []) + [(exec_tick, card, cmd[2], cmd[3])]
             when = tick if legacy else exec_tick
+            token = card + rs_memory.TOKEN_OFFSET
+            got = []
             for obs in (0, 1):
                 if obs != team and noise[obs] is not None:
-                    noise[obs].record(mems[obs], team, card + rs_memory.TOKEN_OFFSET, when)
+                    seen_as = _Recorder(mems[obs])
+                    noise[obs].record(seen_as, team, token, when)
+                    got.append(seen_as.got)                 # None: that seat missed the play
                 else:
-                    mems[obs].record(team, card + rs_memory.TOKEN_OFFSET, when)
+                    mems[obs].record(team, token, when)
+                    got.append((token, when))
             plays[team] += 1
-            sent.append((team, exec_tick, len(log)))
+            entries[len(log)] = (team, tuple(got))
+            exec_of[len(log)] = exec_tick
+            sent.append((team, exec_tick, len(log), None))
             log.append([tick, team, card, cmd[1], cmd[2], cmd[3], 0])
         step = max(1, min(END_TICK, (tick // spec.cadence + 1) * spec.cadence) - tick)
         step = max(1, min(step, spec.max_ticks - tick))
         t0 = time.perf_counter()
         res = list(battle.step(cmds, step) or ())
-        for team in _ran_refusals(battle):
-            refused[team] += 1
+        ran = _ran_rows(battle)
         engine_s += time.perf_counter() - t0
-        for i, (team, exec_tick, k) in enumerate(sent):
+        for i, (team, exec_tick, k, press_cost) in enumerate(sent):
             reason = _reason(res[i]) if i < len(res) else 0
             log[k][6] = reason
+            if press_cost is not None:                  # a press
+                if reason != 0:
+                    press_refused[team] += 1
+                elif press_cost > 0:
+                    execs[team].append(exec_tick)       # it spends elixir, as a play does
+                continue
             if reason == 0:
                 execs[team].append(exec_tick)
+                if delays[team] > 0:
+                    flying.append(k)
             else:
                 refused[team] += 1
+                never_ran(k)
+        # Under a delay: the commands that ran (or were dropped) in this step.
+        for run_tick, team, kind, what, reason in ran:
+            if kind == rs_memory.RAN_DEPLOY:
+                k = _ran_play(flying, log, exec_of, team, what, run_tick)
+                if reason != rs_memory.RAN_OK:
+                    refused[team] += 1
+                    if k is not None:
+                        never_ran(k)
+            elif reason != rs_memory.RAN_OK:
+                press_refused[team] += 1
         # Elixir leak over [tick, tick + step) (module doc, ELIXIR LEAK).
         for t in (0, 1):
             if state["players"][t]["elixir_milli"] < cap:
@@ -808,7 +1036,8 @@ def run_match(spec: MatchSpec | Mapping[str, Any], *, seats: Sequence[Any] | Non
         noise=tuple(_noise_entry(nz) for nz in noise),
         log=tuple(tuple(e) for e in log) if keep_log else (),
         timings={"total_s": time.perf_counter() - t_start, "setup_s": setup_s,
-                 "engine_s": engine_s, "decide_s": list(decide_s)})
+                 "engine_s": engine_s, "decide_s": list(decide_s)},
+        presses=tuple(pressed), press_refused=tuple(press_refused))
 
 
 def _run_dict(spec_dict: Mapping[str, Any]) -> dict:
@@ -1281,6 +1510,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--noise-b", default=None, metavar="PROFILE")
     ap.add_argument("--noise-seed", type=int, default=0)
     ap.add_argument("--visibility", choices=RR.VISIBILITY_MODES, default=None)
+    ap.add_argument("--presses", default="none", choices=("none", "a", "b", "ab"),
+                    help="agents that may press their ability buttons, when their checkpoint's "
+                         "buttons trained (rs_decide.presses_allowed; default none)")
     RR.add_mem_lag_arg(ap)
     ap.add_argument("--max-ticks", type=int, default=MAX_TICKS)
     ap.add_argument("--pairs-file", type=Path, default=None,
@@ -1332,9 +1564,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"engine: {cfg.describe()}\npairs: {len(pairs)} of the {split} split "
           f"[{pairs.digest()}], {args.seats} seat(s) each", flush=True)
     agents = (AgentSpec(args.a, name=args.name_a, lead=args.lead_a, noise=args.noise_a,
-                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility),
+                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility,
+                        presses="a" in args.presses),
               AgentSpec(args.b, name=args.name_b, lead=args.lead_b, noise=args.noise_b,
-                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility))
+                        noise_seed=args.noise_seed, decide=args.decide, visibility=args.visibility,
+                        presses="b" in args.presses))
     base = ("a" in args.base_forms, "b" in args.base_forms)
     specs = pairing_specs(pairs.pairs, agents, seed=args.seed, seats=args.seats, base_forms=base,
                           delay=delay, engine=cfg.to_json(), mem_lag=args.mem_lag,

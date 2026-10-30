@@ -41,6 +41,18 @@ prefixes of one pair list, so the champion's games against an anchor are on the 
 (pairing, team, deck) of every candidate's games against it. Every policy seat gets the
 protocol's noise unless its spec sets one (noise="none" is a perfect observer); idle seats none.
 
+V2 PLAYERS. A checkpoint trained on rs_rows/v2 rows (its vocab "schema") plays like any other:
+rs_match gives its seat v2 rows (module doc of tools/rs_match.py, V2 SEATS: the ability buttons
+of the deck it is dealt, its own plays in flight, the opponent's elixir counted from the plays
+the engine ran). Legacy and v2 players meet in one league. A player never presses its ability
+buttons unless its spec says presses=on (or the run passes --presses for every player that sets
+none), and then only when its checkpoint's buttons trained (rs_decide.presses_allowed): with
+h2h decks "both" it also plays the opponent deck, heroes and champions included. The switch is
+part of the player's identity (game keys, identity digests) only while it is on, so the logs of
+runs before it still resume; the command line turns it off, with a note, for a checkpoint that
+cannot press (presses_effective), so --presses changes the identity only of the players whose
+play it changes. An idle player never presses.
+
 THE GATE (gate()), evaluated in order on the protocol's games:
   1 beats_champion  the candidate's score against the champion over >= champion_games (1,000)
                     games: Wilson 95% lower bound > champion_lower_bound (0.52). At n = 1,000 a
@@ -356,7 +368,7 @@ def pairings_for(config: GateConfig, protocol: Protocol, *, pool: bool = False) 
 
 _INT_OPTS = frozenset({"lead", "noise_seed", "seed_offset"})
 _FLOAT_OPTS = frozenset({"wait_keep"})
-_BOOL_OPTS = frozenset({"spell_aim", "hold_pending", "allow_drift"})
+_BOOL_OPTS = frozenset({"spell_aim", "hold_pending", "allow_drift", "presses"})
 _STR_OPTS = frozenset({"decide", "visibility", "schema", "noise"})
 _TRUE, _FALSE = frozenset({"1", "true", "yes", "on"}), frozenset({"0", "false", "no", "off"})
 
@@ -386,8 +398,8 @@ def _option(key: str, text: str) -> Any:
 def parse_player(value: Any, **defaults: Any) -> Any:
     """An rs_match.AgentSpec from an AgentSpec, its dict, a JSON object, or the command-line
     form [NAME=]CKPT[,KEY=VALUE...] (keys: lead, decide, noise, noise_seed, visibility, schema,
-    wait_keep, spell_aim, hold_pending, seed_offset, allow_drift). CKPT "idle" (or empty) never
-    plays. `defaults` fill keys the value leaves out (None: not filled)."""
+    wait_keep, spell_aim, hold_pending, seed_offset, allow_drift, presses). CKPT "idle" (or
+    empty) never plays. `defaults` fill keys the value leaves out (None: not filled)."""
     RM = _rm()
     if isinstance(value, RM.AgentSpec):
         return value
@@ -447,13 +459,16 @@ class Roles:
 
 def prepare_players(candidates: Iterable[Any], champion: Any, anchors: Iterable[Any] = (),
                     pool: Iterable[Any] = (), protocol: Protocol | None = None, *,
-                    decide: str | None = None) -> Roles:
-    """Parse every player (parse_player, `decide` as the default rule), give it the protocol's
-    noise (apply_protocol) and check that no name is used twice."""
+                    decide: str | None = None, presses: bool | None = None) -> Roles:
+    """Parse every player (parse_player, `decide` as the default rule, `presses` as the default
+    switch: module doc, V2 PLAYERS), give it the protocol's noise (apply_protocol) and check
+    that no name is used twice."""
     specs: dict[str, Any] = {}
 
     def add(role: str, value: Any) -> str:
-        agent = parse_player(value, decide=decide)
+        agent = parse_player(value, decide=decide, presses=presses)
+        if agent.idle and agent.presses:
+            agent = dataclasses.replace(agent, presses=False)     # an idle seat never presses
         if protocol is not None:
             agent = apply_protocol(agent, protocol)
         name = agent.label
@@ -472,6 +487,18 @@ def prepare_players(candidates: Iterable[Any], champion: Any, anchors: Iterable[
     anch = tuple(add("anchor", a) for a in anchors)
     members = tuple(add("pool member", m) for m in pool)
     return Roles(cands, champ, anch, members, specs)
+
+
+def presses_effective(agent: Any, meta: Mapping[str, Any] | None) -> Any:
+    """The agent with its presses switch off when its checkpoint (`meta`) cannot press anyway
+    (rs_decide.presses_allowed: a v2 checkpoint whose buttons trained), so that --presses
+    changes the identity only of the players it changes the play of (module doc, V2 PLAYERS)."""
+    if not agent.presses:
+        return agent
+    import rs_decide
+    if rs_decide.presses_allowed(meta):
+        return agent
+    return dataclasses.replace(agent, presses=False)
 
 
 def ckpt_digest(ckpt: str) -> str | None:
@@ -1339,9 +1366,11 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
              config: GateConfig | None = None, log_path: str | Path, workers: int = 1,
              play: Callable[[Any], Any] | None = None, stop_early: bool = True,
              rating_anchor: str | None = None, final: bool = False, decide: str | None = None,
-             echo: Callable[[str], Any] | None = None, max_errors: int = MAX_ERRORS) -> dict:
+             echo: Callable[[str], Any] | None = None, max_errors: int = MAX_ERRORS,
+             presses: bool | None = None) -> dict:
     """Play what the gate needs and report (module doc). pairs: an rs_match.PairSet (or a list
-    of DeckPairs) of the protocol's split; players: AgentSpecs, dicts or [NAME=]CKPT[,K=V] text.
+    of DeckPairs) of the protocol's split; players: AgentSpecs, dicts or [NAME=]CKPT[,K=V] text
+    (`decide` / `presses`: the defaults of the players that set none; V2 PLAYERS).
     Phases: every candidate against the champion; the champion and the surviving candidates
     against every anchor; the champion and the surviving candidates against the selected pool
     members (pool_selection; the champion's games give pool_collapse its reference on the same
@@ -1366,7 +1395,8 @@ def evaluate(pairs: Any, protocol: Protocol | None = None, *, candidates: Iterab
                          f"{digest}")
     protocol = protocol.replace(pairs_digest=digest)
     pd = protocol.digest()
-    roles = prepare_players(candidates, champion, anchors, pool, protocol, decide=decide)
+    roles = prepare_players(candidates, champion, anchors, pool, protocol, decide=decide,
+                            presses=presses)
     players = roles.players
     digests = {n: ckpt_digest(a.ckpt) for n, a in players.items()}
     idents = {n: identity(a, digests[n]) for n, a in players.items()}
@@ -1479,7 +1509,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--candidate", action="append", required=True, metavar=player,
                      help="a candidate (repeatable); CKPT 'idle' never plays; keys: lead, "
                           "decide, noise, noise_seed, visibility, schema, wait_keep, spell_aim, "
-                          "hold_pending, seed_offset, allow_drift")
+                          "hold_pending, seed_offset, allow_drift, presses")
     run.add_argument("--champion", required=True, metavar=player)
     run.add_argument("--anchor", action="append", default=[], metavar=player)
     run.add_argument("--pool", action="append", default=[], metavar=player,
@@ -1487,6 +1517,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "champion plays them too, on the candidates' positions")
     run.add_argument("--decide", default=None,
                      help="decision rule of players that set none: live (default), legacy, sample")
+    run.add_argument("--presses", action="store_true",
+                     help="players that set no presses= may press their ability buttons when "
+                          "their checkpoint's buttons trained (v2; default: never press)")
     run.add_argument("--split", default="dev", help="dev (IL_Replay val) or final (test, --final)")
     run.add_argument("--pairs", type=int, default=0,
                      help="pairings to sample when no pairs file exists (0: what the gate needs)")
@@ -1599,14 +1632,14 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                             h2h_decks=args.h2h_decks, engine=cfg.to_json()).resolved()
         config = _gate_config(args)
         roles = prepare_players(args.candidate, args.champion, args.anchor, args.pool, protocol,
-                                decide=args.decide)
+                                decide=args.decide, presses=True if args.presses else None)
     except (ValueError, TypeError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
     import rs_checkpoint
     if args.allow_vocab_drift:
         rs_checkpoint.set_allow_drift(True)              # the workers inherit it
-    for name, agent in roles.players.items():
+    for name, agent in list(roles.players.items()):
         if agent.idle:
             continue
         try:
@@ -1617,6 +1650,13 @@ def _cmd_run(ap: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         except FileNotFoundError as exc:
             print(f"error: {name}: {exc}", file=sys.stderr)
             return 1
+        if agent.presses:
+            # V2 PLAYERS: the switch stays only where the checkpoint's buttons trained.
+            meta = rs_checkpoint._load_blob(agent.ckpt)["meta"]
+            roles.players[name] = presses_effective(agent, meta)
+            if not roles.players[name].presses:
+                print(f"note: {name} cannot press (its checkpoint's ability buttons did not "
+                      "train): presses off", flush=True)
     log_path = args.log if args.log is not None else _default_log(split)
     pairs_path = (args.pairs_file if args.pairs_file is not None
                   else log_path.with_name(log_path.stem + ".pairs.json"))
