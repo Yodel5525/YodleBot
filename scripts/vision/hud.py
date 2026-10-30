@@ -1265,6 +1265,8 @@ class HandState:
     known: tuple[bool, ...]             # slot read (a card, or an empty slot)
     cycle: tuple[int | None, ...] = ()  # cards not in hand, in the order they return; [0] is next
     corrections: int = 0                # times the FIFO prior overrode the art
+    fixes: int = 0                      # misread refills corrected in place (rule 4)
+    swaps: int = 0                      # slot pairs swapped (rule 4)
 
 
 class HandTracker:
@@ -1279,27 +1281,43 @@ class HandTracker:
     1. Duplicates among the slot readings: the weaker one takes its best unused
        alternative (if it clears min_score/min_margin) or becomes unsure.
     2. A slot that showed card c and now reads empty: c was played; it goes to
-       the back of the cycle and the slot waits for a refill.
-    3. A waiting slot that reads a card x: the prior says the k-th lowest
-       waiting slot gets cycle[k]; when x is not that card and the expected
-       card still scores >= prior_min_score (or beats x by less than
-       prior_override_margin), the expected card is taken: the FIFO prior
-       corrects the misread.
+       the back of the cycle and the slot waits for a refill (`left[slot]` is c
+       until then: the card in flight from that slot).
+    3. A waiting slot that reads a card x: the game refills the slots in PLAY
+       order (the first slot played gets the next card; the owner's friendly,
+       2026-10-29, frames 1035-1066: slot 1 played, then slot 0, and slot 1 got
+       the next card), so the prior says the k-th waiting slot by play time gets
+       cycle[k]; when x is not that card and the expected card still scores
+       >= prior_min_score (or beats x by less than prior_override_margin), the
+       expected card is taken: the FIFO prior corrects the misread.
     4. A slot that changes card without an empty frame: accepted at once when
        the new card is the (old) next card, else after `change_votes` frames.
+       Within `refill_fix_s` of the slot's refill (always by votes then) it is
+       the refill that was misread, not a new play: it is corrected in place (the cycle gets
+       the misread card back where it was, `fixes` counts them) and no play is
+       logged. Two slots that read each other's cards for `change_votes`
+       frames are swapped.
     5. Unsure readings hold the last value. The next box is never a card in
        hand; a new next card fills the cycle's first unknown place.
+    6. A slot unknown so far (empty at the first frame with a card: the deal,
+       or never read) that reads empty stays unknown and takes the first card
+       it reads, without the prior: a slot that was never seen holding a card
+       was not played. A frame on which no slot shows a card and two or more
+       cards would leave the hand at once is a deal or a covered panel, not
+       plays: it is held.
     """
 
     def __init__(self, deck: Sequence[int] | None = None, *, prior_min_score: float = 0.25,
                  prior_override_margin: float = 0.15, change_votes: int = 3,
-                 min_score: float = MIN_SCORE, min_margin: float = MIN_MARGIN):
+                 min_score: float = MIN_SCORE, min_margin: float = MIN_MARGIN,
+                 refill_fix_s: float = 1.0):
         self.deck = [int(c) for c in deck] if deck else None
         self.prior_min_score = float(prior_min_score)
         self.prior_override_margin = float(prior_override_margin)
         self.change_votes = max(1, int(change_votes))
         self.min_score = float(min_score)
         self.min_margin = float(min_margin)
+        self.refill_fix_s = float(refill_fix_s)
         self.reset()
 
     def reset(self) -> None:
@@ -1307,10 +1325,15 @@ class HandTracker:
         self.next: int | None = None
         self.cycle: list[int | None] = []
         self.pending: dict[int, float] = {}
+        self.left: dict[int, int] = {}                      # slot -> the card that left it (in flight)
         self._votes: dict[int, tuple[int, int]] = {}
+        self._swap_votes: dict[tuple[int, int], int] = {}
+        self._refilled: dict[int, tuple[float, int, int | None]] = {}   # slot -> (t, card, cycle index)
         self.started = False
         self.plays: list[tuple[float, int, int]] = []       # (t, slot, card) seen played
         self.corrections = 0
+        self.fixes = 0
+        self.swaps = 0
 
     # -- helpers ---------------------------------------------------------------
     def _alternative(self, sr: SlotRead, used: set[int]) -> int | None:
@@ -1349,11 +1372,11 @@ class HandTracker:
             self.cycle[holes[0]] = missing[0]
 
     def _start(self, raw: list[int | None], nxt: int | None, t: float) -> None:
-        self.hand = list(raw)
+        # A slot empty at the start is being dealt (the owner's friendly dealt the four cards
+        # over 1 s after the clock started): unknown, read as it lands, never "waiting" for
+        # the FIFO prior (which forced the next-box card into it).
+        self.hand = [None if c is None or c < 0 else c for c in raw]
         self.started = True
-        for slot, c in enumerate(raw):
-            if c == EMPTY_CARD:
-                self.pending[slot] = t
         cards = sum(1 for c in raw if c is not None and c >= 0)
         size = (len(self.deck) if self.deck else 8) - cards
         self.cycle = [None] * max(1, size)
@@ -1365,21 +1388,75 @@ class HandTracker:
     def _play(self, slot: int, card: int, t: float) -> None:
         self.hand[slot] = EMPTY_CARD
         self.pending[slot] = t
+        self.left[slot] = int(card)
         self.cycle.append(card)
         self.plays.append((t, slot, card))
         self._votes.pop(slot, None)
+        self._refilled.pop(slot, None)
 
-    def _refill(self, slot: int, card: int) -> None:
+    def _refill(self, slot: int, card: int, t: float | None = None) -> None:
         self.hand[slot] = card
         self.pending.pop(slot, None)
+        self.left.pop(slot, None)
         self._votes.pop(slot, None)
+        k: int | None = None
+        if card in self.cycle:
+            k = self.cycle.index(card)
+            self.cycle.pop(k)
+        elif None in self.cycle:
+            k = self.cycle.index(None)
+            self.cycle.pop(k)
+        elif self.deck:                                   # inconsistent: rebuild from the deck
+            self.cycle = [c for c in self.deck if c not in self.hand]
+        if t is not None:
+            self._refilled[slot] = (float(t), int(card), k)
+        self._infer()
+
+    def _recent_refill(self, slot: int, t: float) -> bool:
+        e = self._refilled.get(slot)
+        return e is not None and float(t) - e[0] <= self.refill_fix_s
+
+    def _fix_refill(self, slot: int, card: int) -> None:
+        """The refill of `slot` was misread: it is `card`. The misread card goes back into the
+        cycle where the refill took it from, and `card` leaves the cycle; no play is logged."""
+        _, wrong, k = self._refilled.pop(slot)
+        self.hand[slot] = card
+        self._votes.pop(slot, None)
+        if k is not None:
+            self.cycle.insert(min(k, len(self.cycle)), wrong)
         if card in self.cycle:
             self.cycle.remove(card)
         elif None in self.cycle:
             self.cycle.remove(None)
         elif self.deck:                                   # inconsistent: rebuild from the deck
             self.cycle = [c for c in self.deck if c not in self.hand]
+        if k is None and wrong not in self.cycle and wrong not in self.hand:
+            self.cycle.append(wrong)
+        self.fixes += 1
         self._infer()
+
+    def _swap(self, slot: int, raw: Sequence[int | None], counted: set[tuple[int, int]]) -> None:
+        """`slot` reads a card another slot holds: when that slot reads this slot's card (the
+        two were assigned the wrong way round), count it; `change_votes` frames swap them."""
+        r, prev = raw[slot], self.hand[slot]
+        if prev is None or prev < 0 or r is None or r < 0 or r not in self.hand:
+            return
+        j = self.hand.index(r)
+        if j == slot or j in self.pending or raw[j] != prev:
+            return
+        key = (min(slot, j), max(slot, j))
+        if key in counted:
+            return
+        counted.add(key)
+        n = self._swap_votes.get(key, 0) + 1
+        self._swap_votes[key] = n
+        if n >= self.change_votes:
+            self.hand[slot], self.hand[j] = self.hand[j], self.hand[slot]
+            self._swap_votes.pop(key, None)
+            for s in (slot, j):
+                self._votes.pop(s, None)
+                self._refilled.pop(s, None)
+            self.swaps += 1
 
     def _prefer(self, expected: int | None, r: int, sr: SlotRead) -> int:
         if expected is None or expected < 0 or r == expected:
@@ -1404,34 +1481,39 @@ class HandTracker:
             if any(c is not None and c >= 0 for c in raw):
                 self._start(raw, nraw, t)
             return self.state()
+        leaving = [s for s in range(HAND_SIZE) if raw[s] == EMPTY_CARD and s not in self.pending
+                   and self.hand[s] is not None and self.hand[s] >= 0]
+        if len(leaving) >= 2 and not any(c is not None and c >= 0 for c in raw):
+            self._swap_votes.clear()
+            return self.state()                    # a deal or a covered panel: held (rule 6)
         old_next = self.next
+        counted: set[tuple[int, int]] = set()
         for slot in range(HAND_SIZE):
             r, prev, sr = raw[slot], self.hand[slot], reading.slots[slot]
             if slot in self.pending:
                 if r is None or r == EMPTY_CARD:
                     continue
-                # Refills go to the lowest empty slot first: the k-th lowest slot
-                # still waiting gets cycle[k] (cycle[0] already left on a refill
-                # earlier in this loop).
-                k = sorted(self.pending).index(slot)
+                # Refills come in play order: the k-th slot still waiting, by the time it
+                # was played, gets cycle[k] (cycle[0] already left on a refill earlier in
+                # this loop).
+                order = sorted(self.pending, key=lambda s: (self.pending[s], s))
+                k = order.index(slot)
                 expected = self.cycle[k] if k < len(self.cycle) else None
                 card = self._prefer(expected, r, sr)
                 if card in self._others(slot):
                     if expected is None or expected in self._others(slot):
                         continue
                     card = expected
-                self._refill(slot, card)
+                self._refill(slot, card, t)
                 continue
             if r is None:
                 continue
             if r == EMPTY_CARD:
                 if prev is not None and prev >= 0:
                     self._play(slot, prev, t)
-                else:
-                    self.hand[slot] = EMPTY_CARD
-                    self.pending[slot] = t
-                continue
+                continue                           # an unknown slot stays unknown (rule 6)
             if r in self._others(slot):
+                self._swap(slot, raw, counted)
                 continue
             if prev is None:
                 self.hand[slot] = r
@@ -1443,16 +1525,22 @@ class HandTracker:
             if r == prev:
                 self._votes.pop(slot, None)
                 continue
-            if old_next is not None and r == old_next:
+            recent = self._recent_refill(slot, t)
+            if old_next is not None and r == old_next and not recent:
                 self._play(slot, prev, t)
-                self._refill(slot, r)
+                self._refill(slot, r, t)
                 continue
             v = self._votes.get(slot)
             n = v[1] + 1 if v is not None and v[0] == r else 1
             self._votes[slot] = (r, n)
             if n >= self.change_votes:
-                self._play(slot, prev, t)
-                self._refill(slot, r)
+                if recent:
+                    self._fix_refill(slot, r)      # a misread refill, not a new play
+                else:
+                    self._play(slot, prev, t)
+                    self._refill(slot, r, t)
+        for key in [k for k in self._swap_votes if k not in counted]:
+            del self._swap_votes[key]              # the pair stopped reading swapped
         # The next box, checked against the hand AFTER the slots were settled (a
         # misread slot may have shown the next card's art).
         in_hand = self._others(-1)
@@ -1469,7 +1557,7 @@ class HandTracker:
         hand = tuple(EMPTY_CARD if c is None else int(c) for c in self.hand)
         known = tuple(c is not None for c in self.hand)
         nxt = EMPTY_CARD if self.next is None else int(self.next)
-        return HandState(hand, nxt, known, tuple(self.cycle), self.corrections)
+        return HandState(hand, nxt, known, tuple(self.cycle), self.corrections, self.fixes, self.swaps)
 
 
 # ---------------------------------------------------------------------------
@@ -1487,6 +1575,7 @@ class HudReport:
     tower_bars: dict[str, float | None] = field(default_factory=dict)
     tower_frac: dict[str, float | None] = field(default_factory=dict)
     towers_live: bool | None = None        # tower readings count on this frame (None: towers not run)
+    hand_restarted: bool = False           # the hand and the elixir started again on this frame
     hand_reading: HandReading | None = None
     hand: HandState | None = None
     errors: list[str] = field(default_factory=list)
@@ -1506,7 +1595,9 @@ class HudReport:
                                 if r.hp is not None},
                 "tower_bars": {k: v for k, v in self.tower_bars.items() if v is not None},
                 "hand": None if h is None else {"hand": list(h.hand), "next": h.next, "known": list(h.known),
-                                                "corrections": h.corrections},
+                                                "corrections": h.corrections, "fixes": h.fixes,
+                                                "swaps": h.swaps},
+                **({"hand_restarted": True} if self.hand_restarted else {}),
                 "errors": list(self.errors), "ms": {k: round(v, 2) for k, v in self.ms.items()}}
 
 
@@ -1534,6 +1625,15 @@ class HudReader:
     and tower readings that do not count still show in report.tower_digits).
     Without clock templates the towers cannot wait and count from the first
     frame.
+    hand_restarts_at_clock (default True): the hand tracker and the elixir
+    filter start again on the frame the battle clock is confirmed the same way
+    (`hand_clock_reads` accepted readings, no rejected one between), once per
+    reset(). The battle intro shows cards that are not the hand, and the owner's
+    friendly then showed all four slots empty on the first clock frames and
+    dealt the hand over the next second: a tracker started on the intro took
+    the empty slots for plays and forced the next-box card into one of them.
+    report.hand_restarted marks the frame. Without clock templates nothing
+    restarts (as before).
     """
 
     def __init__(self, store: TemplateStore | None = None, card_ids: Mapping[str, int] | None = None, *,
@@ -1541,7 +1641,8 @@ class HudReader:
                  tower_max_hp: Mapping[str, int] | None = None, clock_offset_ticks: int = 0,
                  glyph_styles: Mapping[str, GlyphStyle] | None = None, use_tower_bars: bool = True,
                  tower_prior_max_hp: Mapping[str, int] | None = LEVEL11_TOWER_MAX_HP,
-                 towers_wait_for_clock: bool = True, towers_clock_reads: int = 3):
+                 towers_wait_for_clock: bool = True, towers_clock_reads: int = 3,
+                 hand_restarts_at_clock: bool = True, hand_clock_reads: int = 3):
         self.store = store if store is not None else TemplateStore()
         self.regions = regions if regions is not None else load_regions()
         ids = {str(k): int(v) for k, v in (card_ids or {}).items()}
@@ -1558,8 +1659,31 @@ class HudReader:
         self.towers_wait_for_clock = bool(towers_wait_for_clock)
         self.towers_clock_reads = max(1, int(towers_clock_reads))
         self._clock_reads = 0
+        self.hand_restarts_at_clock = bool(hand_restarts_at_clock)
+        self.hand_clock_reads = max(1, int(hand_clock_reads))
+        self._hand_clock_reads = 0
+        self._hand_restarted = False
         self.hand = HandTracker(deck)
         self.report = HudReport()
+
+    def _hand_restart_due(self, state: ClockState | None) -> bool:
+        """True on the one frame (per reset()) the clock is confirmed for the hand restart:
+        the `hand_clock_reads`-th accepted reading in regulation or overtime with no rejected
+        one between (a frame without a reading neither counts nor resets)."""
+        if self._hand_restarted or not self.hand_restarts_at_clock or not self.clock_reader.ready:
+            return False
+        if state is None:
+            return False
+        if state.source == "rejected":
+            self._hand_clock_reads = 0
+            return False
+        if (state.tick is not None and state.source in ("read", "resync")
+                and state.phase in (PHASE_REGULATION, PHASE_OVERTIME)):
+            self._hand_clock_reads += 1
+        if self._hand_clock_reads >= self.hand_clock_reads:
+            self._hand_restarted = True
+            return True
+        return False
 
     def clock_running(self, state: ClockState | None) -> bool | None:
         """Whether this frame's clock state is an accepted reading (ClockState source
@@ -1587,6 +1711,8 @@ class HudReader:
 
     def reset(self) -> None:
         self._clock_reads = 0
+        self._hand_clock_reads = 0
+        self._hand_restarted = False
         self.clock.reset()
         self.elixir.reset()
         self.towers.reset()
@@ -1621,6 +1747,10 @@ class HudReader:
             rep.clock_read = cr
             rep.clock = self.clock.update(cr.seconds_left, t, cr.phase_hint)
             hud.clock_tick, hud.phase = rep.clock.tick, rep.clock.phase
+            if self._hand_restart_due(rep.clock):     # the battle clock runs: start the hand again
+                self.hand.reset()
+                self.elixir.reset()
+                rep.hand_restarted = True
 
         def elixir():
             er = self.elixir_reader.read(img)

@@ -435,8 +435,16 @@ def test_unmatched_own_plays_are_attributed_to_the_human():
         "tile": [8, 26], "uid": 7, "tapped_card": None,
         "bot": {"tick": 120, "card": 5, "name": "Musketeer", "slot": 2, "tile": [8, 26],
                 "p_wait": None, "reason": "", "mode": "manual", "gen": 0, "seq": 3},
-        "bot_age_ticks": 4, "same_card": True, "tile_dist": 0.22, "gen": 0}
+        "bot_age_ticks": 4, "same_card": True, "tile_dist": 0.22,
+        # the newest PLAY suggestion at or before the estimated tap: the same one here
+        "would": {"tick": 120, "card": 5, "name": "Musketeer", "slot": 2, "tile": [8, 26],
+                  "p_wait": None, "reason": "", "mode": "manual", "gen": 0, "seq": 3},
+        "would_age_ticks": 4, "would_same_card": True, "would_tile_dist": 0.22, "gen": 0}
     assert [d["bot"] is None for d in human] == [False, False, True]
+    # the play the bot waited at 110 on is compared with its play suggestion at 100 as well
+    assert (human[1]["bot"]["card"], human[1]["would"]["card"], human[1]["would_age_ticks"],
+            human[1]["would_same_card"]) == (-1, 0, 10, False)
+    assert human[2]["would"] is None and human[2]["would_same_card"] is None
     assert ctl.counts["human_plays"] == 3 and ctl.last_human["card"] == 1
 
 
@@ -475,6 +483,37 @@ def test_bot_plays_are_matched_and_the_lag_is_learned():
                        "mode": "auto", "gen": 0}]
     assert ctl.counts == {"switches": 0, "suggestions": 5, "taps": 4, "dropped": 0,
                           "bot_plays": 3, "human_plays": 1, "bot_unseen": 1}
+
+
+def test_would_play_suggestions_are_compared_and_never_tapped():
+    """The live runner decides on nearly every tick, so a human play's suggestion is nearly
+    always a wait. note_would records what the bot would have played (a second look on a
+    wait): it is never tapped, not in suggestions(), and each human play is compared with the
+    newest play or would-play within PAIR_MAX_AGE_TICKS."""
+    ctl = make_ctl(C.AUTO, names=NAMES)
+    assert ctl.note_would(-1, tick=99) is None                 # a wait is not a would-play
+    w = ctl.note_would(2, slot=1, tile=(13, 22), tick=100, p_wait=0.97, model_tile=[4, 22])
+    assert (w.card, w.name, w.reason, w.tile, w.extra) == (2, "Hog Rider", C.WOULD, (13, 22),
+                                                           {"model_tile": [4, 22]})
+    assert not ctl.should_tap(w) and ctl.suggestions() == [] and ctl.current_would is w
+    ctl.suggest(tick=104, reason="wait")
+    [a] = ctl.attribute([C.OwnPlay(2, 132, 13400.0, 22600.0)], tick=132)     # est. tap 106
+    assert a.who == C.HUMAN and a.suggestion.is_wait and a.same_card is False
+    assert (a.would is w, a.would_same_card) == (True, True)
+    assert a.would_tile_dist == pytest.approx(math.hypot(0.1, 0.1))
+    rec = [d for k, d in ctl.drain_log() if k == "human_play"][0]
+    assert (rec["would"]["card"], rec["would"]["reason"], rec["would_age_ticks"], rec["would_tile_dist"]) == (
+        2, "would", 6, 0.14)
+    assert ctl.would_at(106) is w and ctl.would_at(99) is None and ctl.would_at(161) is None
+    s = ctl.suggest(5, slot=2, tile=(8, 26), tick=110)           # a newer play suggestion wins
+    assert ctl.would_at(120) is s
+    snap = ctl.snapshot()
+    assert snap.would is w and "would play" not in C.window_lines(snap)["suggestion"]
+    ctl.suggest(tick=112)
+    assert C.window_lines(ctl.snapshot(), hotkey=None)["suggestion"] == (
+        "Bot suggests: wait; would play Hog Rider -> tile (13, 22)   (t=112)")
+    ctl.new_battle()
+    assert ctl.current_would is None and ctl.would_at(120) is None
 
 
 def test_note_human_play_pairs_with_a_recent_suggestion_only():
@@ -545,7 +584,8 @@ def test_window_lines():
     lines = C.window_lines(ctl.snapshot(), hotkey=None)
     assert lines["suggestion"] == "Bot suggests: wait (no elixir)   (t=121)"
     assert lines["decision"] == "Last decision: t=120 manual, would play Hog Rider (3, 15)"
-    assert lines["human"] == "Your last play: t=150 Musketeer (8, 26); the bot had wait"
+    assert lines["human"] == ("Your last play: t=150 Musketeer (8, 26); the bot had wait "
+                              "(would play Hog Rider (3, 15))")
     assert lines["button"] == "Hand back to the bot"
     assert lines["status"] == "taps 0   dropped 0   your plays 1   switches 0"
     ctl.toggle("button")

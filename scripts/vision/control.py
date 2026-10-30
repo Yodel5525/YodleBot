@@ -45,7 +45,11 @@ Semantics
   the estimated tap tick: the first sighting minus the median tap-to-sighting
   lag of the bot's own plays, or DEFAULT_LAG_TICKS until 3 have been
   measured. That gives a human-versus-bot record for review and future
-  training data.
+  training data. The live runner decides on nearly every tick and almost
+  every decision is a wait, so the play is also paired with the newest
+  NON-wait suggestion within PAIR_MAX_AGE_TICKS ("would"): a play the bot
+  suggested, or a would-play suggestion (note_would: what the bot would play
+  if it played now, made on its waits; never tapped, not in suggestions()).
 * Every logged decision records the mode it was made in ("mode") and the
   mode at logging time ("mode_now").
 
@@ -138,6 +142,7 @@ ACTION_STOPPED = "stopped"    # STOP was requested
 ACTION_SKIPPED = "skipped"    # AUTO and allowed, but the runner did not tap (its reason)
 ACTIONS = (ACTION_TAP, ACTION_WAIT, ACTION_MANUAL, ACTION_DRY, ACTION_DROPPED,
            ACTION_STOPPED, ACTION_SKIPPED)
+WOULD = "would"               # a would-play suggestion's reason (note_would)
 
 DEFAULT_LAG_TICKS = 26        # live_play.LEAD: tap -> first sighting, until measured
 MAX_LAG_TICKS = 60            # live_play.PENDING_TICKS: a play unseen after 3 s is lost
@@ -350,7 +355,9 @@ class PlayAttribution:
     its card; it differs from card when the play was matched by aim). For a
     human play, tap_tick is an ESTIMATE (first sighting minus lag_ticks) and
     suggestion is the bot's suggestion at that tick, or None when it had none
-    within PAIR_MAX_AGE_TICKS.
+    within PAIR_MAX_AGE_TICKS; would is the newest play the bot suggested or
+    would have played (ControlState.note_would) at or before that tick, within
+    PAIR_MAX_AGE_TICKS, or None.
     """
     who: str
     card: int
@@ -363,10 +370,21 @@ class PlayAttribution:
     uid: int | None = None
     suggestion: Suggestion | None = None
     tapped_card: int | None = None
+    would: Suggestion | None = None
 
     @property
     def tile(self) -> tuple[int, int] | None:
         return world_to_screen_tile(self.x_mt, self.y_mt)
+
+    @property
+    def would_same_card(self) -> bool | None:
+        """Was the bot's would-play this card? (None: nothing to compare with.)"""
+        return None if self.would is None else self.would.card == self.card
+
+    @property
+    def would_tile_dist(self) -> float | None:
+        """Tiles between the play and the centre of the would-play's tile."""
+        return _tile_dist(self.would, self.x_mt, self.y_mt)
 
     @property
     def same_card(self) -> bool | None:
@@ -376,22 +394,33 @@ class PlayAttribution:
     @property
     def tile_dist(self) -> float | None:
         """Tiles between the play and the centre of the suggested tile."""
-        s = self.suggestion
-        if s is None or s.is_wait or s.tile is None or self.x_mt is None or self.y_mt is None:
-            return None
-        return math.hypot(self.x_mt / 1000.0 - (s.tile[0] + 0.5), self.y_mt / 1000.0 - (s.tile[1] + 0.5))
+        return _tile_dist(self.suggestion, self.x_mt, self.y_mt)
+
+    def _age(self, s: Suggestion | None) -> int | None:
+        return None if s is None or s.tick is None or self.tap_tick is None else self.tap_tick - s.tick
 
     def to_record(self, name: str = "") -> dict[str, Any]:
         s, tile, dist = self.suggestion, self.tile, self.tile_dist
-        age = (None if s is None or s.tick is None or self.tap_tick is None
-               else self.tap_tick - s.tick)
-        return {"who": self.who, "mode": self.mode, "card": self.card, "name": name,
-                "tick": self.tick, "tap_tick": self.tap_tick, "estimated": self.who == HUMAN,
-                "lag_ticks": self.lag_ticks, "x_mt": self.x_mt, "y_mt": self.y_mt,
-                "tile": None if tile is None else list(tile), "uid": self.uid,
-                "tapped_card": self.tapped_card,
-                "bot": None if s is None else s.to_dict(), "bot_age_ticks": age,
-                "same_card": self.same_card, "tile_dist": None if dist is None else round(dist, 2)}
+        rec = {"who": self.who, "mode": self.mode, "card": self.card, "name": name,
+               "tick": self.tick, "tap_tick": self.tap_tick, "estimated": self.who == HUMAN,
+               "lag_ticks": self.lag_ticks, "x_mt": self.x_mt, "y_mt": self.y_mt,
+               "tile": None if tile is None else list(tile), "uid": self.uid,
+               "tapped_card": self.tapped_card,
+               "bot": None if s is None else s.to_dict(), "bot_age_ticks": self._age(s),
+               "same_card": self.same_card, "tile_dist": None if dist is None else round(dist, 2)}
+        if self.who == HUMAN:
+            w, wd = self.would, self.would_tile_dist
+            rec.update({"would": None if w is None else w.to_dict(), "would_age_ticks": self._age(w),
+                        "would_same_card": self.would_same_card,
+                        "would_tile_dist": None if wd is None else round(wd, 2)})
+        return rec
+
+
+def _tile_dist(s: Suggestion | None, x_mt: float | None, y_mt: float | None) -> float | None:
+    """Tiles between a world point and the centre of a play suggestion's tile (None: no tile)."""
+    if s is None or s.is_wait or s.tile is None or x_mt is None or y_mt is None:
+        return None
+    return math.hypot(x_mt / 1000.0 - (s.tile[0] + 0.5), y_mt / 1000.0 - (s.tile[1] + 0.5))
 
 
 class PlayAttributor:
@@ -461,7 +490,8 @@ class PlayAttributor:
             self.lags.append(int(lag))
 
     def classify(self, play: OwnPlay, *, mode: str,
-                 lookup: Callable[[int], Suggestion | None]) -> PlayAttribution:
+                 lookup: Callable[[int], Suggestion | None],
+                 would: Callable[[int], Suggestion | None] | None = None) -> PlayAttribution:
         if play.tap_tick is not None:                       # matched upstream: a bot play
             tap = self._take(play.card, play.tick, play.tap_tick) or self._take(play.card, play.tick)
             lag = play.tick - play.tap_tick
@@ -475,14 +505,15 @@ class PlayAttributor:
             self._sample(lag)
             return PlayAttribution(BOT, play.card, play.tick, mode, tap.tick, lag, play.x_mt,
                                    play.y_mt, play.uid, tap.suggestion, tap.card)
-        return self.human(play, mode=mode, lookup=lookup)
+        return self.human(play, mode=mode, lookup=lookup, would=would)
 
     def human(self, play: OwnPlay, *, mode: str,
-              lookup: Callable[[int], Suggestion | None]) -> PlayAttribution:
+              lookup: Callable[[int], Suggestion | None],
+              would: Callable[[int], Suggestion | None] | None = None) -> PlayAttribution:
         lag = self.lag_estimate()
         est = play.tick - lag
         return PlayAttribution(HUMAN, play.card, play.tick, mode, est, lag, play.x_mt, play.y_mt,
-                               play.uid, lookup(est))
+                               play.uid, lookup(est), would=None if would is None else would(est))
 
     def expire(self, tick: int | None) -> list[BotTap]:
         """Drop and return the taps not seen within max_lag_ticks of `tick`."""
@@ -837,6 +868,7 @@ class ControlSnapshot:
     last_decision: dict[str, Any] | None
     last_human: dict[str, Any] | None
     counts: dict[str, int]
+    would: Suggestion | None = None
 
 
 COLORS = {"auto": "#2e7d32", "dry": "#1565c0", "manual": "#e65100", "stopped": "#616161"}
@@ -868,12 +900,15 @@ def describe_decision(rec: Mapping[str, Any]) -> str:
 def describe_human(rec: Mapping[str, Any]) -> str:
     """One line for a human-play record (PlayAttribution.to_record)."""
     bot = rec.get("bot")
+    would = rec.get("would")
     if bot is None:
         other = "no suggestion"
     elif int(bot.get("card", EMPTY_CARD)) < 0:
         other = "wait"
     else:
         other = _card_tile(bot)
+    if would and (bot is None or int(bot.get("card", EMPTY_CARD)) < 0):
+        other += f" (would play {_card_tile(would)})"
     return f"t={rec.get('tick')} {_card_tile(rec)}; the bot had {other}"
 
 
@@ -891,6 +926,10 @@ def window_lines(snap: ControlSnapshot, hotkey: str | None = DEFAULT_HOTKEY) -> 
     button = ("Take over" if snap.mode == AUTO else "Hand back to the bot") + key
     s = snap.suggestion
     suggestion = "Bot suggests: " + ("-" if s is None else s.label())
+    w = snap.would
+    if (s is not None and s.is_wait and w is not None and s.tick is not None and w.tick is not None
+            and 0 <= s.tick - w.tick <= PAIR_MAX_AGE_TICKS):
+        suggestion += f"; would play {w.label()}"
     if s is not None and s.tick is not None:
         suggestion += f"   (t={s.tick})"
     c = snap.counts
@@ -1100,6 +1139,7 @@ class ControlState:
         self.control_file = None if control_file is None else Path(control_file)
         self._names = names
         self._history: deque[Suggestion] = deque(maxlen=max(1, int(history)))
+        self._would: deque[Suggestion] = deque(maxlen=max(1, int(history)))
         self.pair_max_age_ticks = int(pair_max_age_ticks)
         self.repeat_ticks = int(repeat_ticks)
         self.log_waits = bool(log_waits)
@@ -1250,6 +1290,30 @@ class ControlState:
             self.counts["suggestions"] += 1
             return s
 
+    def note_would(self, card: int = EMPTY_CARD, *, slot: int = -1,
+                   tile: Sequence[int] | None = None, tick: int | None = None, name: str = "",
+                   p_wait: float | None = None, reason: str = WOULD, **extra: Any) -> Suggestion | None:
+        """Record what the bot WOULD play now if it played (the live runner's second look on a
+        wait, vision_play.Decider.would): a play Suggestion with reason "would", kept apart
+        from suggestions() and never tapped (should_tap refuses it: its generation is -1).
+        Human plays are compared with it (PlayAttribution.would). A wait (card < 0) is not
+        recorded: returns None."""
+        card = int(card)
+        if card < 0:
+            return None
+        with self._lock:
+            s = Suggestion(None if tick is None else int(tick), card, int(slot),
+                           None if tile is None else (int(tile[0]), int(tile[1])),
+                           name or self.card_name(card), None if p_wait is None else float(p_wait),
+                           str(reason), self._mode, -1, self._clock(), 0, dict(extra))
+            self._would.append(s)
+            return s
+
+    @property
+    def current_would(self) -> Suggestion | None:
+        with self._lock:
+            return self._would[-1] if self._would else None
+
     def should_tap(self, suggestion: Suggestion | None = None) -> bool:
         """May the bot tap now? AUTO, --tap, no STOP and, for a suggestion, one that
         is a play decided in AUTO under the current generation (no switch since)."""
@@ -1338,6 +1402,24 @@ class ControlState:
                 return None if tick - s.tick > self.pair_max_age_ticks else s
         return None
 
+    def _would_at_locked(self, tick: int) -> Suggestion | None:
+        """The newest play suggestion or would-play at or before `tick`, within
+        pair_max_age_ticks (the later of the two kinds; a suggestion on a tie)."""
+        best: Suggestion | None = None
+        for source in (self._history, self._would):
+            for s in reversed(source):
+                if s.tick is None or s.is_wait or s.tick > tick:
+                    continue
+                if tick - s.tick <= self.pair_max_age_ticks and (best is None or s.tick > best.tick):
+                    best = s
+                break
+        return best
+
+    def would_at(self, tick: int) -> Suggestion | None:
+        """The newest play the bot suggested or would have played at or before `tick`."""
+        with self._lock:
+            return self._would_at_locked(int(tick))
+
     def suggestion_at(self, tick: int) -> Suggestion | None:
         """The latest suggestion made at or before `tick` (None if older than pair_max_age_ticks)."""
         with self._lock:
@@ -1365,7 +1447,8 @@ class ControlState:
                 play = as_own_play(p)
                 if play is None:
                     continue
-                a = self.attributor.classify(play, mode=self._mode, lookup=self._suggestion_at_locked)
+                a = self.attributor.classify(play, mode=self._mode, lookup=self._suggestion_at_locked,
+                                             would=self._would_at_locked)
                 self._account_locked(a)
                 out.append(a)
             for tap in self.attributor.expire(self._tick):
@@ -1380,7 +1463,8 @@ class ControlState:
         play = OwnPlay(int(card), int(tick), _opt_float(x_mt), _opt_float(y_mt), _opt_int(uid))
         with self._lock:
             self._tick = int(tick)
-            a = self.attributor.human(play, mode=self._mode, lookup=self._suggestion_at_locked)
+            a = self.attributor.human(play, mode=self._mode, lookup=self._suggestion_at_locked,
+                                      would=self._would_at_locked)
             self._account_locked(a)
             return a
 
@@ -1394,6 +1478,7 @@ class ControlState:
         with self._lock:
             self.attributor.reset()
             self._history.clear()
+            self._would.clear()
             self._tick = None
             self._last_logged = None
 
@@ -1441,7 +1526,7 @@ class ControlState:
                                    self._history[-1] if self._history else None,
                                    None if self._last_decision is None else dict(self._last_decision),
                                    None if self._last_human is None else dict(self._last_human),
-                                   dict(self.counts))
+                                   dict(self.counts), self._would[-1] if self._would else None)
 
     # -- inputs ---------------------------------------------------------------
     def _on_control_file(self, present: bool) -> None:

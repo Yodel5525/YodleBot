@@ -553,6 +553,7 @@ $RUN = ($IMG | Select-Object -Skip 1000 -First 40).FullName
 - `hud read` prints, per frame: the tick (20 a second, from 0 at 3:00), the elixir in thousandths, the hand, the next card and the tower HP. Compare a few with the images.
 - `vision_replay` runs the whole recording and prints how often the clock, elixir, hand, next card and towers were read.
 - Once the detector is trained (section 15), run `vision_replay` again without `--no-detector`. It adds detections and tracks per frame.
+- The whole runner (HUD, model, decisions, battle result) on the same recording is section 17 step 2.
 
 Send back:
 - `tmp\grid_check.png` and `tmp\hud_check.png`;
@@ -561,13 +562,12 @@ Send back:
 
 ## 17. Dry-run friendly (the bot watches, no taps)
 
-`scripts\vision_play.py` is the live runner. It runs the whole chain on the screen: capture, HUD, detector, tracker, the model and the decision. By default it taps nothing. It never presses Battle, OK or anything outside the arena, and it never starts or restarts MuMu.
+`scripts\vision_play.py` is the live runner. It runs the whole chain on the screen: capture, HUD, detector, tracker, the model and the decision. By default it taps nothing and opens no adb connection. It never presses Battle, OK or anything outside the arena, and it never starts or restarts MuMu.
 
 You need:
-- the detector pinned (section 15);
 - the templates complete (section 16);
-- `runs\tokens\live_big_hog\best.pt` (section 14);
-- MuMu at 2-4 cores and 3 GB, with its window large and uncovered.
+- `runs\tokens\live_big_hog\best.pt` and the `args.json` next to it (section 14);
+- for step 3, also the detector pinned (section 15), and MuMu at 2-4 cores and 3 GB, with its window large and uncovered.
 
 **1. Tests and controls.** After `git pull`:
 
@@ -579,14 +579,38 @@ You need:
 
 The last one tries the takeover controls without a battle. It never taps. Press F8 a few times, click the button in the small "Sparring bot" window, and create then delete `C:\hcr\MANUAL`. Each switch prints a line such as `MANUAL -> AUTO (hotkey)`.
 
-**2. Replay the recording first (MuMu not needed).** This runs the runner on the friendly you recorded in section 16. On a recording, taps are always refused.
+**2. Rehearse on the recording first (MuMu not needed).** The runner has never run end to end before. This runs all of it, the setup, the HUD, the model, the decisions, the battle and its result and the log, on the friendly you recorded on 2026-10-29. On a recording it refuses taps and touches neither MuMu nor adb. Its session goes to `reports\vision_play\replays\`, so `latency_probe --last 1` in step 4 still finds the live session.
+
+Run one heavy job at a time (section 3). Run the rehearsal before the detector training starts or after it ends, not during it. Without a pinned detector it runs with `detector NONE`: everything except the detector, the tracker and the events is tested, and the board stays empty for the model.
 
 ```powershell
-$REC = (Get-ChildItem reports\vision\recordings -Directory | Sort-Object Name | Select-Object -Last 1).FullName
-& $BB scripts\vision_play.py --source $REC --no-window
+$REC = 'C:\hcr\reports\vision\recordings\capture_20261029_195831'   # or its copy under reports\vision\gold\
+Test-Path "$REC\frames.jsonl"                                          # must print True
+& $BB scripts\vision_play.py --source $REC --replay-fast --no-window --hotkey none --seed 1
 ```
 
-It should start battle 1 a second after the clock runs, and print decisions in the status line (below).
+`--replay-fast` replays every image once, as fast as the chain runs: a few minutes for the 4,414 images. Check the setup lines:
+- `source     replay of ...capture_20261029_195831 (4414 images, as fast as the chain runs); no device, no adb`;
+- `taps       off (the source is a recording)`;
+- `decide     live; wait_keep 0.25 (wait bias 1.386); would-play every 10 ticks`. A `WARNING: no args.json` there means the trained share of waits is unknown: copy `args.json` next to `best.pt` (`--tap` refuses without it);
+- `detector   NONE (...)` until the detector is pinned. Once it is pinned: `... on cuda:0, half True, side joint, 310 classes, 0 unresolved, classes dc897910, imgsz 640`. A `WARNING` line under it means the sides are not joint or some detector names are not in the class list: send it back;
+- `hud        clock templates ok`;
+- `frame 747x1328` on the first frame. A `WARNING` after it means another frame size than the HUD was calibrated on.
+
+Then, on this recording:
+- `battle 1 started (tick 110, mode MANUAL)`, about 8 s into the recording;
+- status lines with `| would <card> -> (x, y) @<tick>`: what the bot would play now. In MANUAL it decides on nearly every tick and almost every decision is a wait, so on a wait it works this out at most every 10 ticks;
+- `battle 1 over (end screen) at tick 44..` (overtime), then `battle 1: WIN 1-0 (end screen + hud); record 1-0-0 (W-L-D)`;
+- `stopped: the frame source ended; 4414 frames, 0 taps, results {'win': 1}, errors -`.
+
+Then run it once in real time (about 6.5 minutes, the length of the recording). The frame rate and the frames it skips are then those of a live run:
+
+```powershell
+& $BB scripts\vision_play.py --source $REC --no-window --hotkey none --seed 1
+& $BB tools\latency_probe.py reports\vision_play\replays --last 1
+```
+
+Send back the setup lines, the battle, result and `stopped:` lines of both runs, and the latency probe output. `errors` other than `-` on the `stopped:` line, or a traceback, means something in the chain is broken: send the whole output.
 
 **3. The dry-run friendly.** Start the runner in the lobby, then start a friendly yourself and play it with the mouse as usual:
 
@@ -595,15 +619,18 @@ It should start battle 1 a second after the clock runs, and print decisions in t
 ```
 
 It first prints its setup. Check these lines:
-- `detector` names the pinned `best.pt` on `cuda:0`. `NONE (...)` means no detector: the board stays empty for the model.
+- `decide     live; wait_keep 0.25 ...`, with no `WARNING`.
+- `detector` names the pinned `best.pt` on `cuda:0`, `side joint`, `0 unresolved`. `NONE (...)` means no detector: the board stays empty for the model.
 - `hud        clock templates ok`. `MISSING` means section 16 is not done, and the bot never decides.
+- `source     printwindow (auto: a dry run opens no adb); ...`. Only `--tap` adds the adb fallback, after `scripts\emulator.py` has verified the device.
 - `taps       off (dry run: no --tap)`.
 - `hotkey     on: F8` and `window     on`.
+- `frame 747x1328` once the first frame is in.
 
 Then it prints a status line every second, for example:
 
 ```
-[battle 1] tick 1440 | elixir 2.3 | hand Log/HogRider/Skeletons/Fireball next IceSpirits | MANUAL | last Skeletons -> (8, 22) [manual] @1436 | 31 fps, 0 taps
+[battle 1] tick 1440 | elixir 2.3 | hand Log/HogRider/Skeletons/Fireball next IceSpirits | MANUAL | last Skeletons -> (8, 22) [manual] @1436 | would HogRider -> (14, 17) @1438 | 31 fps, 0 taps
 ```
 
 | Part | Meaning |
@@ -611,15 +638,16 @@ Then it prints a status line every second, for example:
 | `[battle 1]` | in battle 1. Outside a battle: `[menu]`, `[end]` (the end screen), or `[battle]` (a battle screen before the clock has run for a second) |
 | `tick 1440` | the battle clock in ticks: 20 a second, from 0 at 3:00 (1:48 left is 1440). `OT` in overtime; `-` when the clock is not read |
 | `elixir 2.3` | our elixir |
-| `hand ... next ...` | the hand, left to right, and the next card. `?` is a slot it cannot read. |
+| `hand ... next ...` | the hand, left to right, and the next card. `?` is a slot it cannot read, or an empty slot right after a play. |
 | `MANUAL` | who plays: `MANUAL` (you), `AUTO(dry)` (the bot, without `--tap`), `AUTO(tap)` (the bot taps), `STOPPED` |
 | `last ...` | the bot's last play: card, screen tile, what happened, and the tick. The tile is x 0-17 from the left and y 0-31 from the top; our half is y 17-31. `manual` is a suggestion only, `dry` would have played, `tap` tapped, `dropped` means the mode switched first. |
+| `would ...` | while the bot does not tap: what it would play now (its best card at its best tile), worked out on a wait at most every 10 ticks. It is never tapped. |
 | `31 fps, 0 taps` | frames processed per second, taps sent, and the error count if there are errors |
 
 During the battle:
-- Check that the hand, the elixir and the clock match the screen.
+- Check that the hand, the elixir and the clock match the screen. After you play two cards quickly, both slots must show the right new cards within about a second.
 - Press F8 once. The status shows `AUTO(dry)` and the decisions become `[dry]`. Nothing is tapped. Press F8 again to go back to `MANUAL`.
-- The control window shows the bot's suggestion while you play. Your own plays are logged next to what the bot would have played.
+- The control window shows the bot's suggestion while you play, and `would play ...` while it waits. Each of your plays is logged (`human_play`) next to the bot's suggestion at that moment and the newest play it would have made (`would`, `would_same_card`, `would_tile_dist`).
 - A `battle 1 over (clock reset)` line in the middle of the battle means a misread clock. Note when it happened.
 
 At the end it prints `battle 1 over (end screen) at tick ...` and then `battle 1: WIN 2-1 (...); record 1-0-0 (W-L-D)`. After 600 s it stops with `stopped: 600 s; ... frames, 0 taps, ...`. Ctrl+C stops it earlier.
@@ -632,7 +660,7 @@ Everything goes to `reports\vision_play\vision_play_<date>_<time>\frames.jsonl`,
 & $BB tools\latency_probe.py --last 1 --json reports\vision\latency_dryrun.json
 ```
 
-It prints the time of each stage (stale, perceive, decide, capture to decision) as median and p90 in ms, the frame rate, and how often the bot decided. `D: not measured` is expected here: D needs taps (section 18).
+It prints the time of each stage (stale, perceive, decide, capture to decision) as median and p90 in ms, the frame rate, and how often the bot decided. `D: not measured` is expected here: D needs taps (section 18). The token model decides on the CPU. If `decide` is slow or MuMu stutters, try `--torch-threads 2` (fewer CPU threads for the model) on the next run and compare.
 
 Send back:
 - the setup lines;

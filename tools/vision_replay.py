@@ -422,7 +422,9 @@ class ReplayPerception:
     detection types of recorded detections). ticks: TICKS_CLOCK (as live) or TICKS_TIME.
     recorded=True takes the recording's detections (step(recorded=VisionFrame)) instead of
     running the detector. step(detect=True) runs the detector on a battle-screen image even
-    without a tick (a labelled image is scored either way)."""
+    without a tick (a labelled image is scored either way). As live (LivePerception): the HUD
+    is never reset inside a battle (only at its end, or outside one after a gap), and a battle
+    joined in the middle primes the tracks on the board."""
 
     def __init__(self, *, hud_reader: Any, tracker: Any, deriver: Any, geometry: Any,
                  detector: Any = None, names: Names | None = None, ticks: str = TICKS_CLOCK,
@@ -442,12 +444,24 @@ class ReplayPerception:
         self._anchor: tuple[int, float] | None = None
         self._last_panel_t: float | None = None
         self._t_origin: float | None = None
+        self.in_battle = False
+        self.primed_until: int | None = None
+        self._last_tick: int | None = None
 
     def new_battle(self) -> None:
+        self.in_battle = True
+        tick = self._last_tick if self.ticks == TICKS_CLOCK else None    # time ticks: no battle clock
+        self.primed_until = (tick + VP.PRIME_TICKS if tick is not None and tick > VP.CLEAN_START_TICK
+                             else None)
         self.tracker.reset()
-        self.deriver.reset()
+        if self.primed_until is None:
+            self.deriver.reset()
+        else:
+            self.deriver.reset(prime_until_tick=self.primed_until)
 
     def end_battle(self) -> None:
+        self.in_battle = False
+        self.primed_until = None
         self.hud_reader.reset()
         self.tracker.reset()
         self.deriver.reset()
@@ -521,7 +535,8 @@ class ReplayPerception:
             vf.screen = SCREEN_MENU
             return step
         vf.screen = SCREEN_BATTLE
-        if self._last_panel_t is not None and t - self._last_panel_t > self.hud_reset_gap_s:
+        if (not self.in_battle and self._last_panel_t is not None
+                and t - self._last_panel_t > self.hud_reset_gap_s):
             self.hud_reader.reset()                 # back on a battle screen after a while
         self._last_panel_t = t
         vf.hud = self.hud_reader.read(img, t)
@@ -530,6 +545,8 @@ class ReplayPerception:
         vf.tick = vf.hud.clock_tick
         step.track_tick, step.tick_source = self.tick_at(t, vf.tick)
         tick = step.track_tick
+        if tick is not None:
+            self._last_tick = int(tick)
         res, dets = None, None
         if self.recorded:
             if recorded is not None:

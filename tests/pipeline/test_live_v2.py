@@ -433,9 +433,10 @@ def test_the_loop_feeds_the_observer_and_the_rows_show_it(tmp_path, rr):
         assert rows[t]["own_pending_land"].tolist() == f16(land), t
         assert rs_schema.V2.check_row(rows[t], buttons=2) == []
     assert rows[102]["own_pending_land"][0] == np.float16(0.55)
-    # one observer for the battle: the Giant counted, the Hog's landing ended its tap
+    # one observer for the battle, watching from the battle's first clock reading (tick 70; it
+    # started at 90): the Giant counted, the Hog's landing ended its tap
     [obs] = made
-    assert obs.opp.start_tick == 90 and obs.opp.recorded == 1
+    assert obs.opp.start_tick == 70 and not obs.opp.late and obs.opp.recorded == 1
     assert obs.own.landed_count == 1 and obs.own.taps == []
     # the tap's decision record says what the row was given
     [d] = TVP.decisions(res.records, CT.ACTION_TAP)

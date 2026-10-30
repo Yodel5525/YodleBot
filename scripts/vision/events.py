@@ -777,9 +777,15 @@ class EventDeriver:
         self.landing_stats = LandingStats()
         self.reset()
 
-    def reset(self, *, clear_landing_stats: bool = False) -> None:
+    def reset(self, *, clear_landing_stats: bool = False, prime_until_tick: int | None = None) -> None:
         """Forget the battle: tracks, plays, pending taps and opponent statistics.
-        Landing statistics are kept unless clear_landing_stats."""
+        Landing statistics are kept unless clear_landing_stats. prime_until_tick: a battle
+        joined in the middle (the live runner started, or restarted, mid-battle): every track
+        first seen at or before this tick is primed, already on the board and not a play.
+        The first update's tracks are primed either way (config.prime), but a tracker reset
+        with the deriver reports a track only from its second sighting, so without this the
+        units on the board would come out as plays one frame later."""
+        self._prime_until: int | None = None if prime_until_tick is None else int(prime_until_tick)
         self._recs: dict[int, _Rec] = {}
         self._plays: list[_Play] = []
         self._taps: list[OwnTap] = []
@@ -834,7 +840,8 @@ class EventDeriver:
             if rec is None:
                 rec = self._new_rec(tr, tick, t, tracker)
                 self._recs[tr.uid] = rec
-                if not self._primed:
+                if not self._primed or (self._prime_until is not None
+                                        and int(tr.first_seen_tick) <= self._prime_until):
                     rec.state, rec.how, rec.team = DONE, "primed", tr.team
                     rec.card = self.card_for(tr)
                     continue

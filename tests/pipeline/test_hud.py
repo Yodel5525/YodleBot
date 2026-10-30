@@ -888,6 +888,73 @@ def test_hand_tracker_waits_for_a_card_and_holds_unsure_slots():
     assert (st.hand, st.next) == ((100, 101, 102, 103), 104)
 
 
+def test_hand_refills_follow_the_play_order():
+    """The owner's friendly (frames 1035-1066): slot 1 was played, then slot 0, and slot 1 got
+    the next card. The prior expects the refills in play order, so two ambiguous refills come
+    out right (in slot-index order each was forced into the other's card)."""
+    tr = H.HandTracker(deck=DECK)
+    tr.update(reading([100, 101, 102, 103], 104), 0.0)
+    tr.cycle = [104, 105, 106, 107]                    # the order the cards come back in
+    tr.update(reading([100, VT.EMPTY_CARD, 102, 103], None), 1.0)      # slot 1 played first
+    st = tr.update(reading([VT.EMPTY_CARD, VT.EMPTY_CARD, 102, 103], None), 1.5)
+    assert st.hand == (VT.EMPTY_CARD, VT.EMPTY_CARD, 102, 103) and tr.left == {1: 101, 0: 100}
+    both = H.HandReading((slot(105, 0.6, {105: 0.6, 104: 0.5}), slot(104, 0.6, {104: 0.6, 105: 0.5}),
+                          slot(102), slot(103)), slot(None))
+    st = tr.update(both, 2.0)
+    assert st.hand == (105, 104, 102, 103) and st.corrections == 0
+    assert st.cycle == (106, 107, 101, 100) and tr.left == {}
+    assert [p[1:] for p in tr.plays] == [(1, 101), (0, 100)]
+
+
+def test_a_misread_refill_is_fixed_in_place_not_played():
+    """The prior forced the expected card into a refill whose art was the next one; three
+    frames of the right card within a second of the refill correct it in place: no phantom
+    play, and the forced card goes back to the front of the cycle."""
+    tr = H.HandTracker(deck=DECK)
+    tr.update(reading([100, 101, 102, 103], 104), 0.0)
+    tr.cycle = [104, 105, 106, 107]
+    tr.update(reading([100, 101, VT.EMPTY_CARD, 103], None), 1.0)
+    unsure = H.HandReading((slot(100), slot(101), slot(105, 0.6, {105: 0.6, 104: 0.5}), slot(103)),
+                           slot(None))
+    st = tr.update(unsure, 2.0)
+    assert st.hand[2] == 104 and st.corrections == 1          # the prior took the expected card
+    got = [tr.update(reading([100, 101, 105, 103], None), t).hand[2] for t in (2.1, 2.2, 2.3)]
+    assert got == [104, 104, 105]           # by votes (not at once, though 105 is the next card)
+    st = tr.state()
+    assert (st.fixes, st.cycle, st.next) == (1, (104, 106, 107, 102), 104)
+    assert tr.plays == [(1.0, 2, 102)]                         # no phantom play of 104
+
+
+def test_hand_slots_empty_at_the_start_are_dealt_without_the_prior():
+    """The owner's friendly dealt the hand over a second after the clock started: a slot empty
+    at the start is unknown (not a play waiting for the next card) and takes the card it reads;
+    reading empty again keeps it unknown. A frame with no card on which two or more cards
+    would leave at once (a deal, a covered panel) is held."""
+    tr = H.HandTracker(deck=DECK)
+    st = tr.update(reading([100, VT.EMPTY_CARD, VT.EMPTY_CARD, VT.EMPTY_CARD], 104), 0.0)
+    assert st.hand == (100, VT.EMPTY_CARD, VT.EMPTY_CARD, VT.EMPTY_CARD)
+    assert st.known == (True, False, False, False) and tr.pending == {}
+    dealt = H.HandReading((slot(100), slot(101, 0.6, {101: 0.6, 104: 0.5}), slot(VT.EMPTY_CARD),
+                           slot(VT.EMPTY_CARD)), slot(104))
+    st = tr.update(dealt, 0.25)
+    assert st.hand[:2] == (100, 101) and st.corrections == 0 and tr.plays == []
+    st = tr.update(reading([100, 101, 102, 103], 104), 0.5)
+    assert st.hand == (100, 101, 102, 103) and st.known == (True,) * 4
+    st = tr.update(reading([VT.EMPTY_CARD] * 4, None), 0.75)        # no card at all: held
+    assert st.hand == (100, 101, 102, 103) and tr.plays == []
+    tr.update(reading([VT.EMPTY_CARD, 101, 102, 103], 104), 1.0)     # one card leaves: a play
+    assert tr.plays == [(1.0, 0, 100)]
+
+
+def test_hand_slots_read_the_wrong_way_round_are_swapped():
+    tr = H.HandTracker(deck=DECK)
+    tr.update(reading([100, 101, 102, 103], 104), 0.0)
+    got = [tr.update(reading([101, 100, 102, 103], 104), t).hand[:2] for t in (0.25, 0.5, 0.75)]
+    assert got == [(100, 101), (100, 101), (101, 100)]
+    assert tr.state().swaps == 1 and tr.plays == []
+    assert tr.update(reading([101, 100, 102, 103], 104), 1.0).hand[:2] == (101, 100)
+
+
 # ---------------------------------------------------------------------------
 # Regions
 # ---------------------------------------------------------------------------
@@ -984,6 +1051,32 @@ def test_hud_reader_end_to_end():
     assert (hud.clock_tick, hud.elixir_milli) == (35, 6400)
     assert reader.report.summary()["clock"]["text"] == "2:59"
     VT.Hud.from_dict(json.loads(json.dumps(hud.to_dict())))      # the contract still round-trips
+
+
+def test_hud_reader_restarts_the_hand_once_the_clock_runs():
+    """The intro shows cards that are not the hand (and the owner's friendly then showed four
+    empty slots): on the third accepted clock reading the hand tracker and the elixir filter
+    start again, once per reset(), so an intro "play" is forgotten."""
+    reader = H.HudReader(full_store(), CARD_IDS, regions=regions())
+    intro = hud_frame()
+    paste(intro, FLAT, HAND_PX[1][0], HAND_PX[1][1])
+    reader.read(hud_frame(), 0.0)
+    assert not reader.report.hand_restarted
+    reader.read(intro, 0.25)
+    assert reader.hand.plays == [(0.25, 1, 101)] and not reader.report.hand_restarted
+    hud = reader.read(hud_frame(), 0.5)                   # the third accepted clock reading
+    assert reader.report.hand_restarted and reader.report.summary()["hand_restarted"] is True
+    assert hud.hand == [100, 101, 102, 103] and reader.hand.plays == [] and 101 not in reader.hand.cycle
+    assert hud.elixir_milli == 6400
+    reader.read(hud_frame(), 0.75)
+    assert not reader.report.hand_restarted and "hand_restarted" not in reader.report.summary()
+    reader.reset()
+    reader.read(hud_frame(), 1.0)
+    assert not reader.report.hand_restarted                 # counting again from the reset
+    off = H.HudReader(full_store(), CARD_IDS, regions=regions(), hand_restarts_at_clock=False)
+    for i, f in enumerate((hud_frame(), intro, hud_frame())):
+        off.read(f, 0.25 * i)
+    assert off.hand.plays == [(0.25, 1, 101)]
 
 
 def test_hud_reader_reads_the_elixir_count_through_the_bar_line():

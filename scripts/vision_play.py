@@ -3,6 +3,8 @@ r"""Friendly-only live runner: screen vision -> token model -> taps (V10, with V
     .venvs\buildabot\Scripts\python.exe scripts\vision_play.py                  dry run (the default)
     .venvs\buildabot\Scripts\python.exe scripts\vision_play.py --tap --start-mode auto
                                                                         taps, only while you watch
+    .venvs\buildabot\Scripts\python.exe scripts\vision_play.py --source <recorded session> --no-window
+                                                                        the whole loop offline (rehearsal)
 
 FRIENDLY BATTLES ONLY. A person starts every battle (clan chat or a friend's profile). This
 runner never navigates: it does not press Battle, OK, or anything outside the arena, and it has
@@ -11,8 +13,9 @@ the battle clock is read and running, the bottom HUD panel is there and the end 
 It never reads the game's memory (scripts/gamestate is not imported) and it never starts or
 restarts the emulator.
 
-DRY RUN BY DEFAULT. Decisions are made, shown and logged, nothing is tapped. --tap enables taps;
-use it only while you watch. Before the first tap scripts/emulator.verify() must pass (the serial
+DRY RUN BY DEFAULT. Decisions are made, shown and logged, nothing is tapped, and no adb is opened
+(--source auto is PrintWindow alone then; its adb fallback comes only with --tap, after
+emulator.verify). --tap enables taps; use it only while you watch. Before the first tap scripts/emulator.verify() must pass (the serial
 is the Clash Royale instance) and `adb shell wm size` must report 1080x1920. A file named STOP in
 the repo root ends the runner in any mode (it refuses to start while STOP exists). One runner at a
 time: reports/vision_play/vision_play.lock is held by the running process (the OS releases it if
@@ -22,7 +25,16 @@ TAKEOVER (scripts/vision/control.py). The runner starts in MANUAL unless --start
 bot keeps perceiving and deciding, and shows its suggestions (status line, control window) but does
 not tap. F8, the control window's button or a MANUAL file in the repo root switch to AUTO and
 back; a switch drops a tap decided before it. Own plays the bot did not tap are logged as the
-human's, next to what the bot would have played.
+human's, next to what the bot would have played: the runner decides on nearly every tick, so
+almost every decision is a wait; while it does not tap, a wait is followed (at most every
+--would-every ticks) by a second look that plays the gate's best card at its best tile
+(Decider.would, never tapped), and each human play is compared with the newest of those.
+
+REPLAY (--source <a session folder written by VisionRecorder>, e.g. capture --record's or a
+vision_play session's): the whole loop on the recording's images, on this process's clock, in
+real time or with --replay-fast as fast as it runs; taps are refused, no emulator or adb is
+touched, and the session goes to reports/vision_play/replays/replay_<time> (outside
+latency_probe's --last and the live sessions' image budget).
 
 UNKNOWN PLAYS (--unknown-plays, off by default; docs/NEW_CARDS_PLAN.md 2.2). An enemy unit no
 card of the event tables explains (a card the detector names and the tables lack, a hero's extra
@@ -47,9 +59,11 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      -> Tracker (own_classes = the deck's labels, vision_classes.ClassTable.deck_labels)
      -> EventDeriver (opponent plays, own landings; EventTables from data/rs_rows/spawn_primary.json)
   -> BattleState: a battle starts once the clock runs for a second with the panel on screen, and
-     ends on the end screen, a stopped clock (2.5 s), a clock reset or 8 s off the battle screen
+     ends on the end screen, a stopped clock (10 s), a clock reset or 8 s off the battle screen
   -> PublicMemory (an opponent play recorded at the tick perception first saw it; view(now, 0))
-  -> tools/public_state (the state obs_row reads) -> tools/rs_rows.obs_row with the checkpoint's
+  -> tools/public_state (the state obs_row reads; the row's hand shows a played slot's card in
+     flight and a pad for an unread slot, never hand token 1, which no training row held, while
+     decide still masks both) -> tools/rs_rows.obs_row with the checkpoint's
      row schema, picked by its meta "schema" (row_plan): rs_rows/legacy (--live-compat rows for
      live_big_hog) exactly as before; rs_rows/v2 (E14) also gets a public_state.LiveObserver
      per battle, fed every frame's opponent plays and our landings and each tap sent, whose
@@ -57,7 +71,8 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      until they land, at the checkpoint's --obs-delay) ride in the state to obs_row, and the
      spell tracks as spells in flight
   -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard;
-     a v2 model's ability buttons stay masked: our deck has none and the HUD reads none)
+     a v2 model's ability buttons stay masked: our deck has none and the HUD reads none), or
+     with --decide legacy the rule rs_eval measured (dry runs only)
   -> ControlState.suggest / should_tap -> ScreenGuard (the NEWEST captured frame, taken after the
      one decided on, must still show the battle screen: no tap lands on an end screen whose OK
      button covers hand slot 1) -> AdbTapper: ONE persistent `adb -s SERIAL shell`, a play is
@@ -117,10 +132,13 @@ from scripts.vision.geometry import check_frame_size  # noqa: E402
 from scripts.vision.tracker import observations_from_detections  # noqa: E402
 from scripts.vision.types import (  # noqa: E402
     EMPTY_CARD, OWN_TEAM, PHASE_ENDED, PHASE_OVERTIME, SCREEN_BATTLE, SCREEN_END, SCREEN_MENU,
-    Hud, VisionFrame, now)
+    Events, Hud, VisionFrame, now)
 
 STOP_FILE = ROOT / "STOP"
 REPORT_ROOT = ROOT / "reports" / "vision_play"
+#: Replays of recordings (--source <session>): their own root, outside latency_probe's --last
+#: and the live sessions' image budget (both read REPORT_ROOT's own session folders only).
+REPLAY_ROOT = REPORT_ROOT / "replays"
 LOCK_FILE = REPORT_ROOT / "vision_play.lock"
 #: Taps go to the device framebuffer (adb `input tap`), not to the captured frame.
 DEVICE_SIZE = (1080, 1920)
@@ -136,6 +154,8 @@ FRIENDLY_LEVEL = 11
 MIN_DECIDE_TICK = 90
 #: Pixels older than this when read (an occluded window, a stalled adb) are not decided on.
 MAX_STALE_S = 0.5
+#: The frame size the HUD templates and regions were measured at (the owner's PrintWindow).
+CALIBRATED_FRAME = (747, 1328)
 
 # ---------------------------------------------------------------------------
 # screen cues (normalised boxes; measured on the owner's 747x1328 frames, 2026-10-29)
@@ -242,16 +262,19 @@ class BattleState:
     Start: `start_frames` battle-screen frames with the clock read, uninterrupted by another
     screen, over which the tick advanced by `start_advance_ticks` (one displayed second): a
     clock frozen on the end screen or a paused game never starts a battle. Frames whose clock
-    is unread neither count nor interrupt.
+    is unread neither count nor interrupt. first_tick: the tick of the first of those frames
+    (the battle's first clock reading when the runner saw the battle begin).
     End: the end screen for `end_frames` frames; the clock read but not advancing for
-    `frozen_s` (the game is over); a clock that jumps back more than `reset_ticks` (a new
-    battle the end screen of which was missed); overtime 0:00; or `lost_s` without a
-    battle-screen frame. An unread clock alone ends nothing (the bot only stops deciding).
-    running(t): the clock advanced within `running_s` of t (decisions need it).
+    `frozen_s` (10 s: a game that froze for a few seconds, a lag spike with the HUD still up,
+    is a pause, and running() already stops the decisions after `running_s`; the recorded
+    friendly ended on its end screen 6 s after the last clock frame); a clock that jumps back
+    more than `reset_ticks` (a new battle the end screen of which was missed); overtime 0:00;
+    or `lost_s` without a battle-screen frame. An unread clock alone ends nothing (the bot only
+    stops deciding). running(t): the clock advanced within `running_s` of t (decisions need it).
     """
 
     def __init__(self, *, start_frames: int = 3, start_advance_ticks: int = 20, end_frames: int = 3,
-                 frozen_s: float = 2.5, lost_s: float = 8.0, running_s: float = 1.2,
+                 frozen_s: float = 10.0, lost_s: float = 8.0, running_s: float = 1.2,
                  reset_ticks: int = 200):
         self.start_frames = max(1, int(start_frames))
         self.start_advance_ticks = int(start_advance_ticks)
@@ -263,6 +286,7 @@ class BattleState:
         self.state = IDLE
         self.number = 0
         self.ended_reason: str | None = None
+        self.first_tick: int | None = None
         self.last_tick: int | None = None
         self.last_advance_t: float | None = None
         self._last_battle_t: float | None = None
@@ -322,6 +346,7 @@ class BattleState:
         if (len(self._cand) >= self.start_frames
                 and self._cand[-1][1] - self._cand[0][1] >= self.start_advance_ticks):
             self.state, self.number, self.ended_reason = IN_BATTLE, self.number + 1, None
+            self.first_tick = int(self._cand[0][1])
             self.last_tick, self.last_advance_t = int(tick), t
             self._last_battle_t, self._end_count = t, 0
             self._cand.clear()
@@ -656,6 +681,16 @@ class InstanceLock:
 # ---------------------------------------------------------------------------
 # perception
 # ---------------------------------------------------------------------------
+#: A battle the runner sees start later than this tick was joined in the middle (the runner
+#: started, or BattleState restarted, mid-battle): what is on the board then is not a play.
+CLEAN_START_TICK = 300
+#: ... tracks first seen within this many ticks of such a start are primed (events.py).
+PRIME_TICKS = 10
+#: obs_row's hand token is card + 2: a slot written as -2 is token 0 (pad, left out of the
+#: model's attention), never token 1 ("unknown card"), which no training hand ever held.
+ROW_PAD_CARD = -2
+
+
 class LivePerception:
     """Frame -> VisionFrame: screen cues, HUD, detector, HP bars, tracker and events.
 
@@ -665,6 +700,17 @@ class LivePerception:
     is read only on battle-screen frames, and the detector only runs when there is a tick to
     track on: the HUD clock's, or, while the clock is briefly unread, one extrapolated from
     the last reading (at most `max_extrapolate_s`).
+
+    The HUD's filters are reset at the end of a battle, and outside a battle when the battle
+    screen comes back after `hud_reset_gap_s` without it; never in a battle (new_battle ..
+    end_battle): a destroyed tower reads as rubble, no digits and no bar, which a fresh tower
+    filter takes for occlusion of a full tower, so a reset there would bring the tower back
+    for the rest of the battle (the clock and elixir filters bridge a gap by themselves).
+    new_battle resets the tracker and the deriver; a battle joined in the middle (its first
+    tick above CLEAN_START_TICK) primes what is on the board (the deriver's prime_until_tick).
+    A failing detector (DetectorError, CUDA out of memory) costs the frame its units only:
+    the HUD, the tick and the coasting tracks are still returned, `detect_errors` counts the
+    failures and `last_detect_error` keeps the last one.
     """
 
     def __init__(self, *, hud_reader: Any, tracker: Any, deriver: Any, geometry: Any,
@@ -679,16 +725,49 @@ class LivePerception:
         self._anchor: tuple[int, float] | None = None
         self._last_panel_t: float | None = None
         self.detect_frames = 0
+        self.detect_errors = 0
+        self.last_detect_error: BaseException | None = None
+        self.in_battle = False
+        self.primed_until: int | None = None
 
     def new_battle(self) -> None:
-        self.tracker.reset()
-        self.deriver.reset()
+        self.in_battle = True
+        tick = None if self._anchor is None else int(self._anchor[0])
+        self.primed_until = tick + PRIME_TICKS if tick is not None and tick > CLEAN_START_TICK else None
+        if self.tracker is not None:
+            self.tracker.reset()
+        if self.deriver is not None:
+            if self.primed_until is None:
+                self.deriver.reset()
+            else:
+                self.deriver.reset(prime_until_tick=self.primed_until)
 
     def end_battle(self) -> None:
+        self.in_battle = False
+        self.primed_until = None
         self.hud_reader.reset()
-        self.tracker.reset()
-        self.deriver.reset()
+        if self.tracker is not None:
+            self.tracker.reset()
+        if self.deriver is not None:
+            self.deriver.reset()
         self._anchor = None
+
+    def row_hand(self, hand: Sequence[int]) -> list[int]:
+        """The hand as the model's row shows it (the state decide() reads keeps -1, so the slot
+        stays masked): a slot waiting for its refill after a play shows the card that left it,
+        as RoyaleSim's state does while a play is in flight (the rows' and the evaluation's
+        view); an unread or unknown slot is ROW_PAD_CARD (token 0), never token 1."""
+        left = getattr(getattr(self.hud_reader, "hand", None), "left", None) or {}
+        out = []
+        for slot, c in enumerate(list(hand)[:4]):
+            c = int(c)
+            if c >= 0:
+                out.append(c)
+            elif slot in left and int(left[slot]) >= 0:
+                out.append(int(left[slot]))
+            else:
+                out.append(ROW_PAD_CARD)
+        return out
 
     def note_own_tap(self, card: int, tick: int, *, slot: int, aim_mt: Sequence[float] | None,
                      t: float | None) -> None:
@@ -723,7 +802,8 @@ class LivePerception:
             vf.screen = SCREEN_MENU
             return vf
         vf.screen = SCREEN_BATTLE
-        if self._last_panel_t is not None and t - self._last_panel_t > self.hud_reset_gap_s:
+        if (not self.in_battle and self._last_panel_t is not None
+                and t - self._last_panel_t > self.hud_reset_gap_s):
             self.hud_reader.reset()                  # back on a battle screen after a while
         self._last_panel_t = t
         vf.hud = self.hud_reader.read(rgb, t)
@@ -731,7 +811,14 @@ class LivePerception:
         tick = self._track_tick(vf.tick, t)
         if tick is None or self.detector is None:
             return vf
-        res = self.detector.detect(rgb)
+        try:
+            res = self.detector.detect(rgb)
+        except Exception as exc:                     # no units this frame; the HUD still counts
+            self.detect_errors += 1
+            self.last_detect_error = exc
+            if self.tracker is not None:
+                vf.tracks = list(self.tracker.tracks())
+            return vf
         units, spells, bars = res.units(), res.spells(), res.bars()
         reads = hpbars.read_unit_hp(rgb, [d.box for d in units], [b.box for b in bars])
         obs = observations_from_detections(list(units) + list(spells), self.geometry, res.frame_size)
@@ -746,6 +833,11 @@ class LivePerception:
 # ---------------------------------------------------------------------------
 # decisions
 # ---------------------------------------------------------------------------
+#: The would-play decision's cap: below any elixir, so it never draws a wait while a card is
+#: playable (rs_decide's cap rule), and plays the gate's best playable card at its best tile.
+WOULD_CAP_MILLI = -(10 ** 9)
+
+
 class Decider:
     """VisionFrame -> rs_decide.Decision through the public state and the model's row.
 
@@ -753,7 +845,15 @@ class Decider:
     -> the obs_row (tools/rs_rows); policy / legality / config / rng as rs_decide.decide
     takes them. Our pending taps are pruned against the HUD's hand first (rs_decide).
     observer(ctx) -> a new battle's public_state.LiveObserver (v2 rows; make_observer), None
-    for legacy rows: the runner keeps it in ctx.observer (observer_for)."""
+    for legacy rows: the runner keeps it in ctx.observer (observer_for).
+
+    would(): what the bot would play if it played now. The live runner decides on nearly every
+    tick, and its wait is drawn with p_wait ** (dt / 20), so almost every decision is a wait
+    and a human play would always be compared with one. would() decides the LAST decision's
+    row and state again with the cap rule at any elixir (WOULD_CAP_MILLI: no wait drawn while
+    a card is playable), on its own rng (the decisions' draws stay as they were): the gate's
+    best playable card at its best legal tile, or None (nothing playable or no legal tile).
+    It is never tapped."""
 
     def __init__(self, *, policy: Any, legality: Any, config: Any,
                  state_fn: Callable[[VisionFrame, BattleContext], dict],
@@ -769,6 +869,13 @@ class Decider:
         self.team = int(team)
         self.sub = int(sub)
         self.observer = observer
+        try:
+            base = config if config is not None else RD.DecideConfig()
+            self.would_config = base.replace(cap_milli=WOULD_CAP_MILLI)
+        except Exception:                            # a config that cannot be copied: no would()
+            self.would_config = None
+        self.would_rng = np.random.default_rng(0)
+        self._last: tuple[Mapping[str, Any], dict, int, list] | None = None
 
     def observer_for(self, ctx: BattleContext) -> Any:
         """The battle's LiveObserver (v2 rows), None for legacy rows."""
@@ -784,7 +891,17 @@ class Decider:
                       dt=RD.cadence_dt(now_tick, ctx.last_decision_tick), sub=self.sub)
         ctx.last_decision_tick = now_tick
         ctx.decisions += 1
+        self._last = (row, state, now_tick, list(ctx.pending))
         return d, state
+
+    def would(self) -> Any:
+        """The would-play Decision for the last decision's row and state (class doc), None."""
+        if self._last is None or self.would_config is None:
+            return None
+        row, state, tick, pending = self._last
+        d = RD.decide(self.policy, row, state, self.team, self.legality, self.would_config,
+                      rng=self.would_rng, pending=pending, tick=tick, dt=1, sub=self.sub)
+        return d if d.is_play else None
 
 
 # ---------------------------------------------------------------------------
@@ -817,16 +934,45 @@ def row_plan(meta: Mapping[str, Any] | None) -> RowPlan:
     return RowPlan(rs_schema.SCHEMA_LEGACY)
 
 
+#: The own player's key for the hand the ROW shows (LivePerception.row_hand); decide() reads
+#: "hand" and never this one.
+ROW_HAND_KEY = "row_hand"
+
+
 def make_state_fn(builder: Any, perception: Any, plan: RowPlan
                   ) -> Callable[[VisionFrame, BattleContext], dict]:
     """Decider's state_fn: builder.state (public_state.PublicStateBuilder) of the frame with
     the opponent cards seen, the creating card of each track and the elixir of our taps in
-    flight; for v2 rows also the battle's observer (ctx.observer)."""
+    flight; for v2 rows also the battle's observer (ctx.observer). With a perception that has
+    row_hand, the own player also gets ROW_HAND_KEY: the hand the row shows (row_state)."""
+    row_hand = getattr(perception, "row_hand", None)
+
     def state_fn(vf: VisionFrame, ctx: BattleContext) -> dict:
         kw = {"observer": ctx.observer} if plan.v2 else {}
-        return builder.state(vf, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
-                             pending_cost=sum(max(0, int(p.cost)) for p in ctx.pending), **kw)
+        state = builder.state(vf, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
+                              pending_cost=sum(max(0, int(p.cost)) for p in ctx.pending), **kw)
+        if callable(row_hand):
+            me = state["players"][OWN_TEAM]
+            me[ROW_HAND_KEY] = row_hand(me.get("hand") or ())
+        return state
     return state_fn
+
+
+def row_state(state: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The state obs_row reads: `state` itself, or, when the own player has ROW_HAND_KEY, a
+    shallow copy whose own hand is that one (the players list and the own player are copied;
+    nothing else is). Engine hands are never negative, so the rows of training and of the
+    evaluation never held hand token 1; live, an empty or unread slot would."""
+    players = state.get("players") if isinstance(state, Mapping) else None
+    if not players or len(players) <= OWN_TEAM:
+        return state
+    me = players[OWN_TEAM]
+    hand = me.get(ROW_HAND_KEY) if isinstance(me, Mapping) else None
+    if hand is None:
+        return state
+    players = list(players)
+    players[OWN_TEAM] = {**me, "hand": [int(c) for c in hand]}
+    return {**state, "players": players}
 
 
 def make_row_fn(obs_row: Callable[..., Mapping[str, Any]], sub: int, plan: RowPlan, *,
@@ -834,11 +980,12 @@ def make_row_fn(obs_row: Callable[..., Mapping[str, Any]], sub: int, plan: RowPl
                 row_inputs: Callable[[Mapping[str, Any]], dict] | None = None
                 ) -> Callable[[dict, dict, int], Mapping[str, Any]]:
     """Decider's row_fn: obs_row (tools/rs_rows.obs_row) of our side (OWN_TEAM) with the
-    checkpoint's unit tokens; for v2 rows also row_inputs(state) (public_state.row_inputs:
-    schema, opp_elixir and pending from the state's observer block)."""
+    checkpoint's unit tokens, on row_state(state) (the row's hand); for v2 rows also
+    row_inputs(state) (public_state.row_inputs: schema, opp_elixir and pending from the
+    state's observer block)."""
     if not plan.v2:
         def row_fn(state: dict, view: dict, tick: int) -> Mapping[str, Any]:
-            return obs_row(state, OWN_TEAM, sub, view, tick, live=live_compat,
+            return obs_row(row_state(state), OWN_TEAM, sub, view, tick, live=live_compat,
                            units=None if live_compat else units)
         return row_fn
     if row_inputs is None:
@@ -846,7 +993,7 @@ def make_row_fn(obs_row: Callable[..., Mapping[str, Any]], sub: int, plan: RowPl
         row_inputs = public_state.row_inputs
 
     def row_fn_v2(state: dict, view: dict, tick: int) -> Mapping[str, Any]:
-        return obs_row(state, OWN_TEAM, sub, view, tick, live=live_compat,
+        return obs_row(row_state(state), OWN_TEAM, sub, view, tick, live=live_compat,
                        units=None if live_compat else units, **row_inputs(state))
     return row_fn_v2
 
@@ -894,6 +1041,11 @@ class VisionPlay:
     out         where the status lines go (print)
     unknown_plays  the deriver reports UNKNOWN plays (--unknown-plays, N02): each battle's end
                 record then also counts them ("opp_unknown")
+    would_every_ticks  while the bot does not tap (MANUAL, a dry run, no tapper), a drawn wait
+                is followed, at most once per this many ticks, by Decider.would(): what the
+                bot would play now. It goes to ControlState.note_would, where each human play
+                is compared with it ("would" in the human_play record), to the frame record
+                ("would") and to the status line. 0: never.
     """
 
     def __init__(self, *, source: Any, perception: Any, decider: Decider, control: Any,
@@ -905,8 +1057,12 @@ class VisionPlay:
                  out: Callable[[str], Any] = print, poll_s: float = 0.002, max_error_logs: int = 50,
                  max_stale_s: float = MAX_STALE_S,
                  tap_guard: Callable[[Any], str | None] | None = None,
-                 unknown_plays: bool = False):
+                 unknown_plays: bool = False, would_every_ticks: int = 10):
         self.unknown_plays = bool(unknown_plays)
+        self.would_every_ticks = max(0, int(would_every_ticks or 0))
+        self._would: Any = None                        # the last would-play Suggestion
+        self._would_tick: int | None = None
+        self._frame_size_said = False
         self.source = source
         self.perception = perception
         self.decider = decider
@@ -1034,6 +1190,7 @@ class VisionPlay:
         self.frames += 1
         self._fps_frames += 1
         t0 = self.clock()
+        det_errors = getattr(self.perception, "detect_errors", 0)
         try:
             vf = self.perception.perceive(frame)
         except Exception as exc:                       # no VisionFrame: nothing is decided
@@ -1041,6 +1198,12 @@ class VisionPlay:
             return
         ms = {"stale": round(float(getattr(frame, "stale_s", 0.0)) * 1000.0, 2),
               "perceive": round((self.clock() - t0) * 1000.0, 2)}
+        if getattr(self.perception, "detect_errors", 0) != det_errors:
+            exc = getattr(self.perception, "last_detect_error", None)
+            self._error("detect_error", exc if isinstance(exc, BaseException) else RuntimeError(str(exc)),
+                        tick=vf.tick)
+        if not self._frame_size_said:
+            self._say_frame_size(vf)
         self.last_vf = vf
         out = None
         try:
@@ -1056,6 +1219,9 @@ class VisionPlay:
             self._end_battle(vf)
         if "start" in events:
             self._start_battle(vf)
+            # This frame's events came from the deriver BEFORE new_battle reset it: the plays
+            # in them are reported again by the fresh deriver, so they are not recorded twice.
+            vf.events = Events()
         if self.results.pending:
             if vf.screen == SCREEN_END:
                 self.results.end_frame(vf.hud.crowns, vf.t_capture)
@@ -1161,18 +1327,74 @@ class VisionPlay:
         rec = self.control.note_decision(s, tapped=tapped, **extra)
         if d.is_play or self.last_decision is None:   # the status line keeps the last play
             self.last_decision = rec
-        return {"decision": d.to_record(), "action": rec.get("action"), "px": px}
+        out = {"decision": d.to_record(), "action": rec.get("action"), "px": px}
+        if self._would_due(d, int(vf.tick)):
+            w = self._would_play(vf, ms)
+            if w is not None:
+                out["would"] = w.to_dict()
+        return out
+
+    def _would_due(self, d: Any, tick: int) -> bool:
+        """A drawn wait, while the bot does not tap, once per would_every_ticks."""
+        if not self.would_every_ticks or d.is_play or getattr(d, "reason", "") != RD.R_WAIT:
+            return False
+        if not callable(getattr(self.decider, "would", None)) or not hasattr(self.control, "note_would"):
+            return False
+        if self.tapper is not None and self.control.should_tap():
+            return False                               # AUTO with taps: no time for a second look
+        return self._would_tick is None or tick - self._would_tick >= self.would_every_ticks
+
+    def _would_play(self, vf: VisionFrame, ms: dict) -> Any:
+        """Decider.would() as a would-play Suggestion (ControlState.note_would), or None."""
+        self._would_tick = int(vf.tick)
+        t0 = self.clock()
+        try:
+            w = self.decider.would()
+        except Exception as exc:                       # a second look must never cost the frame
+            self._error("would_error", exc, tick=vf.tick)
+            return None
+        finally:
+            ms["would"] = round((self.clock() - t0) * 1000.0, 2)
+        if w is None:
+            return None
+        self._would = self.control.note_would(**w.suggest_kwargs())
+        return self._would
+
+    def _say_frame_size(self, vf: VisionFrame) -> None:
+        """The first frame's size, once: the HUD templates and boxes were measured at the
+        owner's 747x1328; another size (a resized MuMu window) reads through normalised boxes
+        and glyph scaling whose accuracy there is unmeasured."""
+        size = tuple(int(v) for v in (vf.frame_size or ()))
+        if len(size) != 2 or min(size) <= 0:
+            return
+        self._frame_size_said = True
+        line = f"frame {size[0]}x{size[1]}"
+        if size != CALIBRATED_FRAME:
+            line += (f" (WARNING: the HUD was calibrated on {CALIBRATED_FRAME[0]}x"
+                     f"{CALIBRATED_FRAME[1]} frames; check the status line's elixir and hand)")
+        self.out(line)
+        self._log("frame_size", size=list(size), calibrated=list(CALIBRATED_FRAME))
 
     def _start_battle(self, vf: VisionFrame) -> None:
         if self.results.pending:
             self._finish_result()
         n = self.battle.number
-        self.ctx = BattleContext(n, float(vf.t_capture), vf.tick)
+        # The observer (v2 rows) watches from the battle's first clock reading: the tracker and
+        # the deriver ran from then on (the detector runs once there is a tick), and the plays
+        # they saw before this frame are reported again after the reset below.
+        first = self.battle.first_tick if self.battle.first_tick is not None else vf.tick
+        self.ctx = BattleContext(n, float(vf.t_capture), first)
         self.perception.new_battle()
         self.control.new_battle()
         self.last_decision = None
-        self._log("battle_start", battle=n, tick=vf.tick, mode=self.control.mode)
-        self.out(f"battle {n} started (tick {vf.tick}, mode {self.control.mode.upper()})")
+        self._would = None
+        self._would_tick = None
+        primed = getattr(self.perception, "primed_until", None)
+        self._log("battle_start", battle=n, tick=vf.tick, first_tick=first, mode=self.control.mode,
+                  **({"joined": True, "primed_until": primed} if primed is not None else {}))
+        self.out(f"battle {n} started (tick {vf.tick}, mode {self.control.mode.upper()})"
+                 + (f"; joined in the middle: what is on the board until tick {primed} is not "
+                    "counted as plays" if primed is not None else ""))
         make = getattr(self.decider, "observer_for", None)
         if make is not None:
             try:
@@ -1266,8 +1488,13 @@ class VisionPlay:
             last = (f"{what} -> {tuple(tile)}" if tile else str(what)) + \
                 f" [{rec.get('action')}] @{rec.get('tick')}"
         errs = sum(self.errors.values())
+        would = ""
+        w = self._would
+        if w is not None and self.battle.in_battle:
+            would = f" | would {w.name or self.name(w.card)}" + (
+                f" -> {tuple(w.tile)}" if w.tile is not None else "") + f" @{w.tick}"
         return (f"[{where}] tick {tick} | elixir {elixir} | hand {hand} next {self.name(hud.next)} | "
-                f"{self.mode_label()} | last {last} | {self._fps:.0f} fps, {self.taps} taps"
+                f"{self.mode_label()} | last {last}{would} | {self._fps:.0f} fps, {self.taps} taps"
                 + (f", {errs} errors" if errs else ""))
 
 
@@ -1317,12 +1544,27 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--record-images", type=int, default=20, metavar="N",
                     help="save the frame image every N recorded frames (0: never)")
     ap.add_argument("--source", default="auto",
-                    help="auto | printwindow | adb | a recorded session to replay (taps refused)")
+                    help="auto | printwindow | adb | a recorded session to replay (taps refused). "
+                         "auto: PrintWindow, with the adb fallback only under --tap (after "
+                         "emulator.verify); a dry run never opens adb")
+    ap.add_argument("--replay-fast", action="store_true",
+                    help="with a recorded --source: every image once, as fast as the chain runs "
+                         "(default: in real time, newer images replace ones the loop was too slow for)")
     ap.add_argument("--geometry", default=None,
                     help="an ArenaGeometry JSON (default data/vision/geometry_default_1080x1920.json)")
     ap.add_argument("--no-window", dest="no_control_window", action="store_true",
                     help="no control window (the same as --no-control-window)")
     ap.add_argument("--seed", type=int, default=None, help="seed of the decision rng")
+    ap.add_argument("--decide", choices=(RD.MODE_LIVE, RD.MODE_LEGACY), default=RD.MODE_LIVE,
+                    help="the decision rule: live (default: pending-slot mask, fallback, cap rule, "
+                         "lane guard) or legacy (the rule rs_eval measured the 46%% with; dry runs "
+                         "only: it re-taps a card in flight, so --tap refuses it)")
+    ap.add_argument("--would-every", type=int, default=10, metavar="TICKS",
+                    help="while the bot does not tap, what it would play now is worked out on a wait "
+                         "at most once per this many ticks, for the human-versus-bot record (0: never)")
+    ap.add_argument("--torch-threads", type=int, default=0, metavar="N",
+                    help="CPU threads of the token model (torch.set_num_threads; 0: torch's own "
+                         "default). Fewer leaves more of the CPU to MuMu")
     ap.add_argument("--no-lane-guard", action="store_true", help="turn off the Cannon lane guard")
     ap.add_argument("--no-cap-rule", action="store_true",
                     help="allow waiting at full elixir with a playable card")
@@ -1393,6 +1635,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock.release()
 
 
+LIVE_SOURCES = ("auto", "printwindow", "adb")
+
+
+def is_replay(source: str) -> bool:
+    """--source names a recording (anything but auto, printwindow and adb)."""
+    return str(source) not in LIVE_SOURCES
+
+
+def detector_config_from_pin(det_mod: Any, weights: Any) -> Any:
+    """The live DetectorConfig at the pinned weights' training imgsz (train_detector.py writes
+    it into the pin's meta), or None (explicit --detector weights, no pin, no imgsz: the
+    DetectorConfig default, 640)."""
+    if weights is not None:
+        return None
+    doc = det_mod.read_pin()
+    imgsz = ((doc or {}).get("meta") or {}).get("imgsz")
+    if not imgsz:
+        return None
+    import dataclasses
+    return dataclasses.replace(det_mod.DetectorConfig(), imgsz=int(imgsz))
+
+
+def detector_lines(detector: Any, det_error: str | None, table: Any) -> list[str]:
+    """The setup lines of the detector: weights, digest, device, half, sides, classes, input
+    size; a WARNING line for sides that are not joint or names the class list lacks."""
+    if detector is None:
+        return [f"  detector   NONE ({det_error})"]
+    info = detector.info() if callable(getattr(detector, "info", None)) else {}
+    digest = str(info.get("classes_digest") or getattr(table, "digest", "") or "")[:8] or "?"
+    cfg = info.get("config") or {}
+    lines = [f"  detector   {detector.weights} sha256 {str(detector.sha256)[:12]} on {detector.device_desc}, "
+             f"half {info.get('half')}, side {info.get('side_mode')}, {info.get('model_classes')} classes, "
+             f"{len(info.get('unresolved_names') or ())} unresolved, classes {digest}, "
+             f"imgsz {cfg.get('imgsz')}"]
+    if info.get("side_mode") not in (None, "joint"):
+        lines.append(f"  WARNING    the detector's sides are {info.get('side_mode')!r}, not 'joint': "
+                     "enemy and own units are told apart by the deck rule only")
+    if info.get("unresolved_names"):
+        lines.append("  WARNING    detector names the class list cannot place (ignored): "
+                     + ", ".join(map(str, info["unresolved_names"])))
+    return lines
+
+
 def _main(args: argparse.Namespace) -> int:
     mods = import_live_modules()
     PS, RR, CK, RE = mods["public_state"], mods["rs_rows"], mods["rs_checkpoint"], mods["rs_engine"]
@@ -1400,28 +1685,42 @@ def _main(args: argparse.Namespace) -> int:
     DET, GEO, HUD = mods["scripts.vision.detector"], mods["scripts.vision.geometry"], mods["scripts.vision.hud"]
     REC, TPL, TRK = mods["scripts.vision.record"], mods["scripts.vision.templates"], mods["scripts.vision.tracker"]
 
+    replay = is_replay(args.source)
+    if args.replay_fast and not replay:
+        print("refusing to start: --replay-fast replays a recording (--source <session folder>)")
+        return 2
+    if replay and not Path(args.source).exists():
+        print(f"refusing to start: no recording at {args.source} (--source)")
+        return 2
+    if args.tap and args.decide != RD.MODE_LIVE:
+        print(f"refusing to start: --decide {args.decide} is for dry runs (it re-taps a card in "
+              "flight); drop --tap or --decide")
+        return 2
+
     # --- the engine and the model ------------------------------------------------
-    eng = RE.config_from_args(args)
     ckpt = Path(args.ckpt) if args.ckpt else default_ckpt()
     if not ckpt.is_file():
         print(f"no checkpoint at {ckpt} (--ckpt)")
         return 2
     import torch
-    blob = torch.load(str(ckpt), map_location="cpu")
-    meta = blob["meta"]
+    if args.torch_threads > 0:
+        torch.set_num_threads(int(args.torch_threads))
     try:
+        eng = RE.config_from_args(args)
+        blob = torch.load(str(ckpt), map_location="cpu")
+        meta = blob["meta"]
         plan = row_plan(meta)                           # legacy rows, or v2 (E14) rows
-    except ValueError as exc:
-        print(f"{ckpt}: {exc}")
+        live_compat = bool(meta.get("live_compat"))
+        units = meta.get("units_mode") or RR.UNITS_TYPES
+        if units == RR.UNITS_VISION and not live_compat:
+            RR.UNITS = RR.UNITS_VISION                  # _setup fills the class lookup
+        royalesim, _names, ids, cat = RR._setup(eng)
+        sub = int(royalesim.SUBTILE_PER_MILLITILE)
+        loaded = CK.load_policy(blob, eng)              # refuses another engine's vocabulary
+    except (RE.EngineError, ValueError, KeyError, FileNotFoundError) as exc:
+        print(f"refusing to start: {ckpt}: {_short(exc)}")
         return 2
     schema = plan.schema
-    live_compat = bool(meta.get("live_compat"))
-    units = meta.get("units_mode") or RR.UNITS_TYPES
-    if units == RR.UNITS_VISION and not live_compat:
-        RR.UNITS = RR.UNITS_VISION                      # _setup fills the class lookup
-    royalesim, _names, ids, cat = RR._setup(eng)
-    sub = int(royalesim.SUBTILE_PER_MILLITILE)
-    loaded = CK.load_policy(blob, eng)                  # refuses another engine's vocabulary
     policy = RD.TokenPolicyAdapter(loaded.model)
     names = [str(row[0]) for row in cat]
     missing = [n for n in args.deck if n not in ids]
@@ -1430,7 +1729,10 @@ def _main(args: argparse.Namespace) -> int:
         return 2
     deck_ids = [int(ids[n]) for n in args.deck]
     guard = () if args.no_lane_guard else RD.card_ids(cat, RD.GUARD_CARD_NAMES)
-    dcfg = RD.DecideConfig.live(RD.wait_bias_for(str(ckpt)), guard_cards=guard)
+    has_args_json = ckpt.with_name("args.json").is_file()
+    wait_keep = RD.wait_keep_for(str(ckpt))
+    wait_bias = RD.wait_bias_for(str(ckpt))
+    dcfg = RD.DecideConfig.for_mode(args.decide, wait_bias, guard_cards=guard)
     if args.no_cap_rule:
         dcfg = dcfg.replace(cap_milli=None)
     legality = RD.TowersOnlyLegality(eng, royalesim, catalogue=cat)
@@ -1442,15 +1744,18 @@ def _main(args: argparse.Namespace) -> int:
     tables = EV.EventTables.for_engine(spawn, class_of=EV.unit_class_map(table.doc),
                                        ignore=EV.cardless_classes(table.doc))
     geometry = GEO.load_geometry(args.geometry)
-    recorder = REC.VisionRecorder(REPORT_ROOT, prefix="vision_play", image_every=max(0, args.record_images))
     detector, det_error = None, None
     try:
-        detector = DET.Detector.load(args.detector, device=args.device, geometry=geometry, table=table)
+        det_cfg = detector_config_from_pin(DET, args.detector)
+        detector = DET.Detector.load(args.detector, device=args.device, geometry=geometry, table=table,
+                                     **({} if det_cfg is None else {"config": det_cfg}))
         detector.warmup()
     except Exception as exc:                           # no weights, no ultralytics, bad pin
         detector, det_error = None, _short(exc)
     store = TPL.TemplateStore()
-    hud_reader = HUD.HudReader(store, {n: ids[n] for n in args.deck}, deck=deck_ids)
+    # The hand boxes follow --geometry's card slots (the taps do too).
+    hud_reader = HUD.HudReader(store, {n: ids[n] for n in args.deck}, deck=deck_ids,
+                               regions=HUD.load_regions(geometry=geometry))
     tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck))
     # N02 (--unknown-plays): UNKNOWN plays and unknown units; without it, the calls as before
     unknown = bool(args.unknown_plays)
@@ -1474,18 +1779,20 @@ def _main(args: argparse.Namespace) -> int:
                       rng=np.random.default_rng(args.seed), sub=sub, observer=observer)
 
     # --- taps: only with --tap, a live source, a detector, and a verified emulator -------------
-    replay = args.source not in ("auto", "printwindow", "adb")
     taps = bool(args.tap)
     refusal = None
-    if taps and replay:
+    if replay:                                         # a recording is never tapped on
         taps, refusal = False, "the source is a recording"
     if taps and detector is None:
         taps, refusal = False, "no detector"
+    if taps and not has_args_json:
+        taps, refusal = False, (f"no args.json next to {ckpt.name}: the share of waits it trained on "
+                                "is unknown, so its wait rate would be off")
     adb, serial, instance = CAP.machine_settings()
     attributor = CT.PlayAttributor(max_lag_ticks=CT.MAX_LAG_TICKS + EV.EventConfig().team_wait_ticks)
     ctl = CT.ControlState.from_args(args, taps_enabled=taps, stop_file=STOP_FILE, names=names,
                                     attributor=attributor)
-    tapper = source = None
+    tapper = source = recorder = None
     try:
         if taps:
             emulator = mods["scripts.emulator"]
@@ -1497,21 +1804,48 @@ def _main(args: argparse.Namespace) -> int:
             except (TapError, OSError) as exc:          # OSError: adb itself would not start
                 print(f"refusing to tap: {_short(exc)}")
                 return 2
+        # A dry run never opens adb: "auto" adds its adb fallback only once the tapper has run
+        # emulator.verify (above). A recording is replayed on this process's clock ("rebased":
+        # its frames and this session's records share one clock).
+        kind = args.source
+        if kind == "auto" and tapper is None and sys.platform == "win32":
+            kind = "printwindow"
         try:
-            source = CAP.open_source(args.source, instance=instance, adb=adb, serial=serial)
+            if replay:
+                source = CAP.FileReplaySource(Path(args.source), realtime=not args.replay_fast,
+                                              timestamps="rebased")
+            else:
+                source = CAP.open_source(kind, instance=instance, adb=adb, serial=serial)
         except Exception as exc:
             print(f"cannot open the frame source {args.source!r}: {_short(exc)}")
             return 2
+        # Replays go to their own root, so they never become latency_probe's --last session and
+        # stay out of the live sessions' image budget.
+        recorder = REC.VisionRecorder(REPLAY_ROOT if replay else REPORT_ROOT,
+                                      prefix="replay" if replay else "vision_play",
+                                      image_every=max(0, args.record_images))
+        if replay:
+            where = (f"replay of {args.source} ({len(source)} images, "
+                     + ("as fast as the chain runs" if args.replay_fast else "in real time")
+                     + "); no device, no adb")
+        else:
+            where = (f"{kind}" + (" (auto: a dry run opens no adb)" if kind != args.source else "")
+                     + f"; device {serial} ({instance})")
+        threads = torch.get_num_threads() if callable(getattr(torch, "get_num_threads", None)) else "?"
         lines = [f"vision_play  session {recorder.session_dir}",
-                 f"  model      {ckpt} (schema {schema}, live_compat {live_compat}, units {units})",
+                 f"  model      {ckpt} (schema {schema}, live_compat {live_compat}, units {units}); "
+                 f"CPU, {threads} torch threads",
+                 f"  decide     {dcfg.name}; wait_keep {wait_keep:g} (wait bias {wait_bias:.3f})"
+                 + ("" if has_args_json else f"  WARNING: no args.json next to {ckpt.name}, the default")
+                 + (f"; would-play every {args.would_every} ticks" if args.would_every > 0 else ""),
                  f"  deck       {', '.join(args.deck)} (level {args.level})",
-                 "  detector   " + (f"{detector.weights} sha256 {str(detector.sha256)[:12]} on "
-                                     f"{detector.device_desc}" if detector is not None
-                                     else f"NONE ({det_error})"),
+                 *detector_lines(detector, det_error, table),
                  f"  hud        clock templates {'ok' if hud_reader.clock_reader.ready else 'MISSING'}"
-                 f" ({store.root})",
+                 f" ({store.root}); regions {hud_reader.regions.name}",
+                 "  rows       the row's hand: a played slot shows its card in flight, an unread one "
+                 "is a pad (decide still masks both)",
                  f"  geometry   {geometry.name}; taps in device pixels {DEVICE_SIZE[0]}x{DEVICE_SIZE[1]}",
-                 f"  source     {args.source}; device {serial} ({instance})",
+                 f"  source     {where}",
                  "  taps       " + ("ON (verified Clash Royale instance)" if tapper is not None else
                                      f"off ({refusal or 'dry run: no --tap'})")]
         if plan.v2:
@@ -1529,9 +1863,16 @@ def _main(args: argparse.Namespace) -> int:
         recorder.log("config", ckpt=str(ckpt), schema=schema, live_compat=live_compat, units=units,
                      deck=list(args.deck), deck_ids=deck_ids, level=args.level,
                      detector=None if detector is None else detector.info(), detector_error=det_error,
-                     geometry=geometry.name, source=args.source, serial=serial, taps=tapper is not None,
-                     tap_refusal=refusal, start_mode=args.start_mode, decide=dcfg.name,
-                     engine=eng.to_json(), vocab_drift=list(loaded.drift),
+                     geometry=geometry.name, source=args.source, source_kind="replay" if replay else kind,
+                     replay=None if not replay else {"path": str(args.source), "images": len(source),
+                                                     "realtime": not args.replay_fast},
+                     serial=serial, taps=tapper is not None, tap_refusal=refusal,
+                     start_mode=args.start_mode, decide=dcfg.name, wait_keep=wait_keep,
+                     wait_bias=round(wait_bias, 6), args_json=has_args_json,
+                     cap_milli=dcfg.cap_milli, lane_guard=sorted(int(c) for c in dcfg.guard_cards),
+                     would_every=args.would_every, torch_threads=threads,
+                     row_hand="in flight, else pad", engine=eng.to_json(),
+                     vocab_drift=list(loaded.drift),
                      clock_templates=bool(hud_reader.clock_reader.ready),
                      **({"rows": plan.to_json()} if plan.v2 else {}),
                      **({"unknown_plays": {"cost": deriver.config.unknown_cost}} if unknown else {}))
@@ -1546,7 +1887,7 @@ def _main(args: argparse.Namespace) -> int:
                             seconds=args.seconds, battles=args.battles,
                             out=lambda s: print(s, flush=True),
                             tap_guard=None if tapper is None else ScreenGuard(source),
-                            unknown_plays=unknown)
+                            unknown_plays=unknown, would_every_ticks=args.would_every)
         return runner.run()
     finally:
         if ctl is not None:
@@ -1558,7 +1899,8 @@ def _main(args: argparse.Namespace) -> int:
                 source.close()
             except Exception:
                 pass
-        recorder.close()
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

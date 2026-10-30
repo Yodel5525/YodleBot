@@ -236,11 +236,12 @@ def read_records(session_dir):
 
 
 def run_script(tmp_path, script, *, mode=CT.AUTO, taps=True, play_ticks=(100,), tapper=None,
-               size=(225, 400), on_read=None, decider=None, image_every=0, tap_guard=None):
+               size=(225, 400), on_read=None, decider=None, image_every=0, tap_guard=None,
+               perception=None):
     clock = FakeClock()
     rgb = np.zeros((size[1], size[0], 3), dtype=np.uint8)
     frames = [Frame(t, rgb, 0.0) for t, _ in script]
-    perception = FakePerception(script)
+    perception = FakePerception(script) if perception is None else perception
     control = CT.ControlState(mode, taps_enabled=taps, stop_file=tmp_path / "STOP", control_file=None,
                               names=NAMES, clock=clock)
     recorder = VisionRecorder(tmp_path / "rec", session="s", image_every=image_every, image_format="npy",
@@ -306,6 +307,9 @@ def test_tap_and_auto_tap_only_in_battle_at_device_pixels(tmp_path, size):
     [tapped] = [e for e in decided if e["action"] == CT.ACTION_TAP]
     assert tapped["decision"]["kind"] == RD.PLAY and tapped["px"]["tile"] == list(tile_px)
     assert {e["action"] for e in decided} == {CT.ACTION_TAP, CT.ACTION_WAIT}
+    # the bot taps: no second look on its waits (that is for MANUAL and dry runs)
+    assert not any("would" in f.get("extra", {}) for f in recs["frame"])
+    assert recs["frame_size"][0]["size"] == [225, 400]          # the scripted frames' own size
     # the end screen ended the battle; the result came from its crowns
     [end] = recs["battle_end"]
     assert end["reason"] == "end screen" and end["taps"] == 1
@@ -492,6 +496,68 @@ def test_status_line_every_second(tmp_path):
     assert status[2].startswith("[end] tick 122")
 
 
+def test_human_plays_are_compared_with_what_the_bot_would_play(tmp_path):
+    """MANUAL: nearly every decision is a wait, so on a wait (at most every 10 ticks) the bot
+    also works out what it would play now: the gate's best playable card at its best tile, on
+    its own rng. It is never tapped or logged as a decision; the human play is compared with
+    it, and the frames and the status line show it."""
+    musk = OwnLanding(card=5, slot=-1, tap_tick=120, land_tick=120, x_mt=9000.0, y_mt=25000.0, uid=7)
+    res = run_script(tmp_path, standard_script(own_at={120: [musk]}), mode=CT.MANUAL, taps=True,
+                     play_ticks=(100,))
+    assert res.tapper.calls == [] and [d["tick"] for d in decisions(res.records)] == [100]
+    would = [(f["extra"]["decision"]["tick"], f["extra"]["would"]) for f in res.records["frame"]
+             if "would" in f.get("extra", {})]
+    assert [t for t, _ in would] == [90, 102, 112]
+    w = would[0][1]
+    assert (w["card"], w["name"], w["slot"], w["tile"], w["reason"], w["gen"]) == (
+        7, "Log", 0, [13, 22], "would", -1)
+    [human] = res.records["human_play"]
+    assert human["bot"]["card"] == -1 and human["same_card"] is False      # the wait at tick 94
+    assert (human["would"]["card"], human["would"]["tick"], human["would_age_ticks"]) == (7, 90, 4)
+    assert human["would_same_card"] is False and human["would_tile_dist"] == 5.15
+    assert any("| would Log -> (13, 22) @" in line for line in res.lines)
+
+
+def test_the_start_frames_events_are_not_recorded_twice(tmp_path):
+    """The frame a battle starts on carries what the deriver reported BEFORE the start reset
+    it; the fresh deriver reports what is still on the board again, so that frame's events are
+    dropped."""
+    giant = OppPlay(card=10, tick=90, exec_tick=90, x_mt=4000.0, y_mt=8000.0)
+    captured = {}
+    res = run_script(tmp_path, standard_script(opp_at={90: [giant]}),
+                     decider=make_decider(FakePolicy(()), captured=captured))
+    views = dict(captured["views"])
+    assert views[90]["last"][0] == [] and views[120]["last"][0] == []
+    assert res.records["battle_end"][0]["opp_plays"] == 0
+
+
+class FlakyDetectorPerception(FakePerception):
+    """FakePerception whose detector fails on the frames of `fail_ticks`, as LivePerception
+    counts it (detect_errors, last_detect_error)."""
+
+    def __init__(self, script, fail_ticks):
+        super().__init__(script)
+        self.fail_ticks = set(fail_ticks)
+        self.detect_errors = 0
+        self.last_detect_error = None
+
+    def perceive(self, frame):
+        vf = super().perceive(frame)
+        if vf.tick in self.fail_ticks:
+            self.detect_errors += 1
+            self.last_detect_error = RuntimeError("CUDA out of memory")
+        return vf
+
+
+def test_a_failing_detector_is_logged_and_the_frame_still_decides(tmp_path):
+    script = standard_script()
+    res = run_script(tmp_path, script, play_ticks=(100,),
+                     perception=FlakyDetectorPerception(script, {100}))
+    [err] = res.records["detect_error"]
+    assert err["error"] == "RuntimeError: CUDA out of memory" and err["tick"] == 100
+    assert [t["tick"] for t in res.records["tap"]] == [100]
+
+
 def test_frames_and_images_are_recorded(tmp_path):
     """Battle and end-screen frames are written (31), menu frames only every 20th; an image every
     5 written frames."""
@@ -614,6 +680,85 @@ def test_live_perception_without_detector_reads_the_hud_only():
     assert vf.screen == SCREEN_BATTLE and vf.tick == 100 and vf.tracks == [] and vf.hud.hand == HAND
 
 
+def test_live_perception_resets_the_hud_only_outside_a_battle():
+    """A destroyed tower reads as rubble (no digits, no bar), which a fresh tower filter takes
+    for a full tower: seconds without the battle screen reset the HUD only outside a battle."""
+    hud = FakeHudReader([100, 200, 300])
+    p = VP.LivePerception(hud_reader=hud, tracker=None, deriver=None, geometry=GEOMETRY, detector=None)
+    p.perceive(Frame(1.0, battle_image(), 0.0))
+    p.new_battle()
+    p.perceive(Frame(10.0, battle_image(), 0.0))         # 9 s without the battle screen, in a battle
+    assert hud.resets == 0 and p.primed_until is None
+    p.end_battle()
+    assert hud.resets == 1
+    p.perceive(Frame(20.0, battle_image(), 0.0))         # outside a battle: back after 10 s
+    assert hud.resets == 2
+
+
+def test_live_perception_primes_the_board_of_a_battle_joined_in_the_middle():
+    """A battle seen starting at tick 5000 was joined in the middle: the Knight on the board then
+    is not an opponent play. At a clean start (tick 100) the same Knight is one."""
+    from scripts.vision.tracker import Tracker
+    size = (225, 400)
+    gx, gy = GEOMETRY.world_to_px(9000.0, 10000.0, size)
+    knight = Detection("Knight", 0.9, 0.9, (gx - 10.0, gy - 30.0, gx + 10.0, gy), (float(gx), float(gy)))
+
+    def run(first):
+        p = VP.LivePerception(hud_reader=FakeHudReader([first, first + 2, first + 4]),
+                              tracker=Tracker(own_classes={"HogRider"}),
+                              deriver=EV.EventDeriver(EV.EventTables({8: {"Knight": 1}}), own_deck=range(8)),
+                              geometry=GEOMETRY, detector=FakeDetector([knight], size))
+        p.perceive(Frame(1.0, battle_image(size), 0.0))
+        p.new_battle()                                   # the battle starts on this frame
+        plays = [op for i in (1, 2)
+                 for op in p.perceive(Frame(1.0 + 0.1 * i, battle_image(size), 0.0)).events.opp_plays]
+        return p, plays
+
+    joined, plays = run(5000)
+    assert joined.primed_until == 5000 + VP.PRIME_TICKS and plays == []
+    clean, plays = run(100)
+    assert clean.primed_until is None and [(op.card, op.tick) for op in plays] == [(8, 102)]
+
+
+def test_live_perception_survives_a_failing_detector():
+    from scripts.vision.tracker import Tracker
+
+    class Broken:
+        def detect(self, rgb):
+            raise RuntimeError("CUDA out of memory")
+
+    p = VP.LivePerception(hud_reader=FakeHudReader([100]), tracker=Tracker(own_classes={"HogRider"}),
+                          deriver=EV.EventDeriver(EV.EventTables({}), own_deck=range(8)),
+                          geometry=GEOMETRY, detector=Broken())
+    vf = p.perceive(Frame(1.0, battle_image(), 0.0))
+    assert vf.screen == SCREEN_BATTLE and vf.tick == 100 and vf.hud.hand == HAND and vf.tracks == []
+    assert p.detect_errors == 1 and str(p.last_detect_error) == "CUDA out of memory"
+
+
+def test_the_rows_hand_shows_the_card_in_flight_and_never_token_1():
+    """decide() reads the HUD's hand (-1: masked); the row shows a played slot's card in flight
+    (as RoyaleSim's state does until the play runs) and an unread slot as a pad, token 0:
+    obs_row's token is card + 2, and no training row ever held token 1."""
+    hud = FakeHudReader([100])
+    hud.hand = SimpleNamespace(left={1: 2})               # the Hog left slot 1
+    p = VP.LivePerception(hud_reader=hud, tracker=None, deriver=None, geometry=GEOMETRY)
+    assert p.row_hand([7, -1, 6, -1]) == [7, 2, 6, VP.ROW_PAD_CARD]
+    assert VP.LivePerception(hud_reader=FakeHudReader([]), tracker=None, deriver=None,
+                             geometry=GEOMETRY).row_hand([7, -1]) == [7, VP.ROW_PAD_CARD]
+    plan = VP.row_plan({"live_compat": True})
+    builder = SimpleNamespace(state=lambda vf, **kw: {"players": [{}, {"hand": [7, -1, 6, -1]}]})
+    perception = SimpleNamespace(track_cards=lambda tracks: {}, row_hand=p.row_hand)
+    state = VP.make_state_fn(builder, perception, plan)(battle_vf(1.0, 100), VP.BattleContext(1, 0.0, 90))
+    assert state["players"][1]["hand"] == [7, -1, 6, -1]           # what decide() masks by
+    seen = []
+    row_fn = VP.make_row_fn(lambda st, *a, **kw: seen.append(st["players"][1]["hand"]) or {}, 18, plan,
+                            live_compat=True, units="types")
+    row_fn(state, {}, 100)
+    assert seen == [[7, 2, 6, -2]] and [c + 2 for c in seen[0]] == [9, 4, 8, 0]
+    assert state["players"][1]["hand"] == [7, -1, 6, -1]           # the state itself is untouched
+    assert VP.row_state({"tick": 1}) == {"tick": 1}
+
+
 # ---------------------------------------------------------------------------
 # battle state and results
 # ---------------------------------------------------------------------------
@@ -637,6 +782,7 @@ def test_battle_state_starts_only_on_a_running_clock():
     events = [b.update(vf_at(20.0 + 0.05 * i, 30 + i)) for i in range(25)]
     assert events.index(["start"]) == 20 and events.count(["start"]) == 1   # tick 50 = 30 + 20
     assert b.number == 1 and b.last_tick == 54 and b.running(20.0 + 0.05 * 24)
+    assert b.first_tick == 30                    # the first clock reading of the run that started it
 
 
 def test_battle_state_start_list_stays_bounded_on_a_frozen_clock():
@@ -650,12 +796,15 @@ def test_battle_state_start_list_stays_bounded_on_a_frozen_clock():
 
 
 def test_battle_state_end_rules():
-    # a clock that is read but stops: over after 2.5 s; running() goes false after 1.2 s
+    # a clock that is read but stops: running() goes false after 1.2 s (no decisions); a few
+    # seconds are a pause (a lag spike with the HUD up), 10 s the end
     b = VP.BattleState()
     t = started(b)
     assert b.running(t + 1.0) and not b.running(t + 1.5)
-    assert b.update(vf_at(t + 2.0, 120)) == []
-    assert b.update(vf_at(t + 3.0, 120)) == ["end"] and b.ended_reason == "clock stopped"
+    assert b.update(vf_at(t + 2.0, 120)) == [] and b.update(vf_at(t + 3.0, 120)) == []
+    assert b.update(vf_at(t + 9.5, 120)) == [] and b.in_battle
+    assert b.update(vf_at(t + 10.5, 120)) == ["end"] and b.ended_reason == "clock stopped"
+    assert VP.BattleState(frozen_s=2.5).frozen_s == 2.5
     # an unread clock ends nothing; 8 s off the battle screen does
     b = VP.BattleState()
     t = started(b)
@@ -828,6 +977,11 @@ def test_command_line_defaults_are_safe():
     assert VP.build_parser().parse_args(["--no-window"]).no_control_window is True
     assert VP.build_parser().parse_args(["--no-control-window"]).no_control_window is True
     assert VP.build_parser().parse_args(["--deck", "hog 2.6"]).deck == VP.HOG26
+    assert (args.decide, args.would_every, args.replay_fast, args.torch_threads) == ("live", 10, False, 0)
+    assert VP.build_parser().parse_args(["--decide", "legacy"]).decide == "legacy"
+    with pytest.raises(SystemExit):
+        VP.build_parser().parse_args(["--decide", "sample"])           # RL's rule never plays live
+    assert [VP.is_replay(s) for s in ("auto", "printwindow", "adb", "reports/x")] == [False] * 3 + [True]
     with pytest.raises(SystemExit):
         VP.build_parser().parse_args(["--deck", "HogRider,Log"])
     assert VP.default_ckpt().as_posix().endswith("tokens/live_big_hog/best.pt")
@@ -848,6 +1002,185 @@ def test_main_refuses_while_stop_exists_or_another_runner_holds_the_lock(tmp_pat
         assert "another vision_play is running" in capsys.readouterr().out
     finally:
         holder.release()
+
+
+# ---------------------------------------------------------------------------
+# _main end to end on a recording: the offline rehearsal (runbook 17.1)
+# ---------------------------------------------------------------------------
+
+class ScriptedHud:
+    """HudReader's surface for _main: the clock runs 2 ticks a battle frame from tick 70; slot 3
+    reads empty while the hand tracker knows the Ice Spirits (card 4) left it."""
+
+    def __init__(self, store, card_ids, *, deck=None, regions=None):
+        self.card_ids, self.deck = dict(card_ids), list(deck or ())
+        self.clock_reader = SimpleNamespace(ready=True)
+        self.regions = SimpleNamespace(name="scripted")
+        self.hand = SimpleNamespace(left={3: 4})
+        self.reads = self.resets = 0
+
+    def read(self, rgb, t):
+        tick = 70 + 2 * self.reads
+        self.reads += 1
+        return Hud(hand=[7, 2, 6, -1], next=0, elixir_milli=7000, clock_tick=tick, phase=PHASE_REGULATION)
+
+    def reset(self):
+        self.resets += 1
+
+
+def write_session(root):
+    """A capture --record style session: 2 menu, 26 battle, 5 end-screen and 3 menu frames,
+    each with its image (npy), 0.1 s apart."""
+    rec = VisionRecorder(root, session="capture_test", image_every=1, image_format="npy",
+                         wall_clock=lambda: 0.0)
+    black = np.zeros((400, 225, 3), dtype=np.uint8)
+    images = [black] * 2 + [battle_image()] * 26 + [end_image()] * 5 + [black] * 3
+    for i, img in enumerate(images):
+        rec.write(VisionFrame(t_capture=round(500.0 + 0.1 * i, 4), frame_size=(225, 400)), img)
+    rec.close()
+    return rec.session_dir
+
+
+def fake_live_modules(calls):
+    """import_live_modules() for _main with torch, royalesim, the checkpoint, the HUD templates
+    and the detector replaced; capture (the replay source), geometry, record and the tracker are
+    the real ones. `calls` collects what reached the fakes."""
+    from scripts.vision import capture, geometry, record, tracker
+
+    class EngineError(RuntimeError):
+        pass
+
+    def obs_row(state, team, sub, view, tick, **kw):
+        calls.setdefault("row_hands", []).append(list(state["players"][team]["hand"]))
+        return {"tick": tick}
+
+    class Builder:
+        def __init__(self, *args, **kw):
+            calls["builder"] = sorted(kw)
+
+        def state(self, vf, **kw):
+            hand = list(vf.hud.hand)
+            me = {"hand": hand, "hand_costs": [COST.get(c, 0) if c >= 0 else 0 for c in hand],
+                  "elixir_milli": vf.hud.elixir_milli or 0, "next_card": vf.hud.next}
+            st = {"tick": vf.tick, "entities": [],
+                  "players": [{"hand": [], "hand_costs": [], "elixir_milli": 0}, me]}
+            calls.setdefault("states", []).append(st)
+            return st
+
+    def load_detector(*args, **kw):
+        raise RuntimeError("no detector weights (test)")
+
+    def verify(serial, adb):
+        calls["verify"] = (serial, adb)
+        raise AssertionError("a dry run never calls emulator.verify")
+
+    royalesim = SimpleNamespace(SUBTILE_PER_MILLITILE=18, CATALOGUE_FIELDS=())
+    ids = {n: i for i, n in enumerate(NAMES)}
+    cat = [[n] for n in NAMES]
+    table = SimpleNamespace(doc={"classes": [], "units": {}}, deck_labels=lambda deck: set(),
+                            digest="dc897910e1e8")
+    return {
+        "public_state": SimpleNamespace(PublicStateBuilder=Builder, LiveObserver=None,
+                                        row_inputs=lambda state: {}),
+        "rs_rows": SimpleNamespace(UNITS_TYPES="types", UNITS_VISION="vision", UNITS="types", F={},
+                                   SF=None, obs_row=obs_row, elixir_law=lambda eng: None,
+                                   _setup=lambda eng: (royalesim, list(NAMES), ids, cat)),
+        "rs_checkpoint": SimpleNamespace(
+            load_policy=lambda blob, eng: SimpleNamespace(model="the model", drift=())),
+        "rs_engine": SimpleNamespace(
+            EngineError=EngineError,
+            config_from_args=lambda args: SimpleNamespace(to_json=lambda: {"engine": "test"})),
+        "rs_spawn_table": SimpleNamespace(DEFAULT_PATH="spawn_primary.json",
+                                          ensure=lambda engine=None, rs=None: {"card_names": []}),
+        "vision_classes": SimpleNamespace(load=lambda: table),
+        "scripts.vision.capture": capture,
+        "scripts.vision.detector": SimpleNamespace(Detector=SimpleNamespace(load=load_detector),
+                                                   read_pin=lambda: None),
+        "scripts.vision.geometry": geometry,
+        "scripts.vision.hpbars": SimpleNamespace(),
+        "scripts.vision.hud": SimpleNamespace(HudReader=ScriptedHud, load_regions=lambda geometry=None: None),
+        "scripts.vision.record": record,
+        "scripts.vision.templates": SimpleNamespace(TemplateStore=lambda: SimpleNamespace(root="templates")),
+        "scripts.vision.tracker": tracker,
+        "scripts.emulator": SimpleNamespace(verify=verify),
+    }
+
+
+def rehearsal_env(tmp_path, monkeypatch, calls):
+    """main()'s files under tmp_path, the fake modules, a fake torch and a checkpoint with its
+    args.json (wait_keep 0.25, as live_big_hog's)."""
+    monkeypatch.setattr(VP, "STOP_FILE", tmp_path / "STOP")
+    monkeypatch.setattr(VP, "LOCK_FILE", tmp_path / "vision_play.lock")
+    monkeypatch.setattr(VP, "REPORT_ROOT", tmp_path / "reports")
+    monkeypatch.setattr(VP, "REPLAY_ROOT", tmp_path / "reports" / "replays")
+    monkeypatch.setattr(VP, "import_live_modules", lambda: fake_live_modules(calls))
+    monkeypatch.setattr(VP.RD, "TokenPolicyAdapter", lambda model: FakePolicy((100,)))
+    monkeypatch.setattr(VP.RD, "TowersOnlyLegality", lambda *a, **kw: (lambda slot, card, x, y: True))
+    torch = SimpleNamespace(load=lambda path, map_location=None: {"meta": {"live_compat": True}},
+                            set_num_threads=lambda n: calls.__setitem__("threads", n),
+                            get_num_threads=lambda: 4)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    ckpt = tmp_path / "runs" / "best.pt"
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(b"not a real checkpoint")
+    (ckpt.parent / "args.json").write_text(json.dumps({"wait_keep": 0.25}), encoding="utf-8")
+    return ckpt
+
+
+def test_main_rehearses_the_whole_loop_on_a_recording(tmp_path, monkeypatch, capsys):
+    """vision_play's _main end to end on a recorded session (--source <folder> --replay-fast):
+    the wiring, the setup lines, the config record, the replay source, the runner, a battle and
+    its result, the row's hand, a session under reports/vision_play/replays. No adb, no
+    emulator, no tap; the heavy modules are fakes (fake_live_modules)."""
+    calls = {}
+    ckpt = rehearsal_env(tmp_path, monkeypatch, calls)
+    session = write_session(tmp_path / "recordings")
+    rc = VP.main(["--source", str(session), "--replay-fast", "--no-window", "--hotkey", "none",
+                  "--manual-file", "none", "--ckpt", str(ckpt), "--record-images", "0", "--seed", "1",
+                  "--torch-threads", "2"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "source     replay of" in out and "(36 images, as fast as the chain runs); no device, no adb" in out
+    assert "taps       off (the source is a recording)" in out
+    assert "detector   NONE (RuntimeError: no detector weights (test))" in out
+    assert "decide     live; wait_keep 0.25 (wait bias 1.386); would-play every 10 ticks" in out
+    assert "CPU, 4 torch threads" in out and calls["threads"] == 2
+    assert "battle 1 started (tick 90, mode MANUAL)" in out
+    assert "battle 1: WIN 1-0" in out
+    assert "stopped: the frame source ended; 36 frames, 0 taps" in out and "errors -" in out
+    assert "verify" not in calls
+    # the session: under the replays root, not where latency_probe --last looks
+    assert sorted(p.name for p in (tmp_path / "reports").iterdir()) == ["replays"]
+    [replay] = list((tmp_path / "reports" / "replays").iterdir())
+    assert replay.name.startswith("replay_")
+    recs = read_records(replay)
+    [cfg] = recs["config"]
+    assert (cfg["source_kind"], cfg["replay"]["images"], cfg["replay"]["realtime"]) == ("replay", 36, False)
+    assert (cfg["taps"], cfg["tap_refusal"], cfg["decide"], cfg["wait_keep"], cfg["args_json"]) == (
+        False, "the source is a recording", "live", 0.25, True)
+    assert recs["battle_start"][0]["tick"] == 90 and recs["result"][0]["outcome"] == "win"
+    [d] = decisions(recs)
+    assert (d["tick"], d["card"], d["action"]) == (100, 2, CT.ACTION_MANUAL)
+    # the row's hand shows the Ice Spirits in flight; the state decide() masks by keeps -1
+    assert len(calls["row_hands"]) == 16 and all(h == [7, 2, 6, 4] for h in calls["row_hands"])
+    assert all(st["players"][1]["hand"] == [7, 2, 6, -1] for st in calls["states"])
+    assert not lock_left(tmp_path)
+
+
+def lock_left(tmp_path):
+    return (tmp_path / "vision_play.lock").exists()
+
+
+def test_main_refuses_a_bad_combination_before_anything_starts(tmp_path, monkeypatch, capsys):
+    calls = {}
+    rehearsal_env(tmp_path, monkeypatch, calls)
+    assert VP.main(["--replay-fast"]) == 2
+    assert "--replay-fast replays a recording" in capsys.readouterr().out
+    assert VP.main(["--source", str(tmp_path / "missing")]) == 2
+    assert "no recording at" in capsys.readouterr().out
+    assert VP.main(["--tap", "--decide", "legacy"]) == 2
+    assert "--decide legacy is for dry runs" in capsys.readouterr().out
+    assert calls == {} and not (tmp_path / "reports").exists()
 
 
 # ---------------------------------------------------------------------------
