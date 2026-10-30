@@ -4,6 +4,12 @@ check (tools/rs_checkpoint.py) and RSAgent.__init__ using it (tools/rs_eval.py).
 Pure tests compare fake checkpoint metas with fake engine lists; the RSAgent / load_policy
 ones also need torch, the rs_rows ones numpy. The `engine`-marked test checks a real
 engine's vocab.json against itself and against another card table.
+
+U01 (docs/SEASON_UPDATES.md 6.1): another card table is a note, not a refusal, when every
+card name (and unit type name, unless --live-compat) matches in id order; it stays an error
+next to any name difference. The royalesim version and, on the same table, card_table_fnv1a64
+are new warn-only notes. A refusal whose engine only added cards or unit types names
+tools/rs_vocab.py grow.
 """
 from __future__ import annotations
 
@@ -123,9 +129,13 @@ def test_every_difference_is_listed_cards_first(rc):
     (TARGET_REPORTED, None, False),                              # the engine does not say
 ])
 def test_card_table_comparison(rc, meta_table, engine_table, differs):
+    """The names match here, so another table is a note (U01), never an error; with a name
+    differing too it is an error (test_every_difference_is_listed_cards_first)."""
     meta = meta_for(card_table=meta_table)
-    errors, _ = rc.vocab_differences(meta, engine(rc, table=engine_table))
-    assert bool(errors) == differs
+    errors, notes = rc.vocab_differences(meta, engine(rc, table=engine_table))
+    assert errors == []
+    assert any(n.startswith("card table: ") for n in notes) == differs
+    assert rc.other_arm(meta, engine(rc, table=engine_table)) == differs
 
 
 def test_card_table_from_the_fingerprint_or_config(rc):
@@ -133,7 +143,12 @@ def test_card_table_from_the_fingerprint_or_config(rc):
     del meta["card_table"]
     meta["engine_fingerprint"] = {"card_table": "cards-15535.1"}
     assert rc.meta_card_table(meta) == "cards-15535.1"
-    assert rc.vocab_differences(meta, engine(rc))[0]
+    errors, notes = rc.vocab_differences(meta, engine(rc))
+    assert errors == [] and notes[0].startswith("card table: the checkpoint's rows were built "
+                                                "under cards-15535.1, the engine runs ")
+    assert rc.vocab_differences(meta, engine(rc, cards=swapped(NAMES, 0, 1)))[0][-1] == (
+        f"card table: the checkpoint's rows were built under cards-15535.1, the engine runs "
+        f"{TARGET_REPORTED}")
     del meta["engine_fingerprint"]
     meta["engine_config"] = {"card_table": "client15535"}
     assert rc.meta_card_table(meta) == "client15535"
@@ -200,6 +215,159 @@ def test_live_compat_units_are_only_warned_about(rc):
 
 
 # ---------------------------------------------------------------------------
+# U01: another card table with the same names, and the drift notes
+# ---------------------------------------------------------------------------
+
+OTHER = "cards-15535.1"
+
+
+def test_same_names_on_another_table_load_with_a_note(rc):
+    """docs/SEASON_UPDATES.md 6.1: the ids mean the same cards and units, so a balance update
+    no longer refuses the checkpoint; it says what it learned under."""
+    vocab = engine(rc, table=OTHER)
+    errors, notes = rc.vocab_differences(meta_for(), vocab)
+    assert errors == [] and notes == [
+        f"card table: the checkpoint's rows were built under {TARGET_REPORTED}, the engine runs "
+        f"{OTHER}; its card and unit type names are the engine's in id order, so it loads, with "
+        "what it learned under the other table's values"]
+    with pytest.warns(rc.VocabDriftWarning, match=r"^best\.pt: card table: .* so it loads"):
+        assert rc.check_meta(meta_for(), vocab, allow_drift=False, source="best.pt") == []
+
+
+def test_an_appended_card_still_refuses_and_names_grow(rc):
+    vocab = engine(rc, cards=NAMES + ("Witch",), table=OTHER)
+    with pytest.raises(rc.VocabMismatch) as exc:
+        rc.check_meta(meta_for(), vocab, allow_drift=False, source="runs/a/best.pt")
+    assert exc.value.differences == [
+        "cards: the checkpoint has 16, the engine 17; card 16 (token 18) is only in the "
+        "engine: 'Witch'",
+        f"card table: the checkpoint's rows were built under {TARGET_REPORTED}, the engine "
+        f"runs {OTHER}"]
+    text = str(exc.value)
+    assert ("Every card and unit type it knows is still in the engine, which has 1 card "
+            "appended (Witch): tools/rs_vocab.py grow runs/a/best.pt --out DIR carries it "
+            "across") in text
+    assert "Or rebuild the rows (tools/rs_rows.py)" in text and "--allow-vocab-drift" in text
+    # a blob has no path to name; the same engine table changes nothing about the refusal
+    with pytest.raises(rc.VocabMismatch, match="rs_vocab.py grow CKPT --out DIR"):
+        rc.check_meta(meta_for(), engine(rc, cards=NAMES + ("Witch",)))
+
+
+def test_a_removed_or_moved_card_gets_no_grow_hint(rc):
+    for meta, vocab in ((meta_for(cards=NAMES + ("Zap2",)), engine(rc, table=OTHER)),
+                        (meta_for(), engine(rc, cards=swapped(NAMES, 3, 4), table=OTHER))):
+        with pytest.raises(rc.VocabMismatch) as exc:
+            rc.check_meta(meta, vocab)
+        assert "rs_vocab" not in str(exc.value)
+        assert exc.value.differences[-1].startswith("card table: ")      # still an error
+    assert rc.grow_blockers(meta_for(cards=NAMES + ("Zap2",)), engine(rc)) == [
+        "1 card(s) it knows are not in the engine: 'Zap2'"]
+
+
+def test_a_types_checkpoint_with_changed_units_refuses_on_another_table(rc):
+    vocab = engine(rc, units=swapped(UNITS, 5, 6), table=OTHER)
+    with pytest.raises(rc.VocabMismatch) as exc:
+        rc.check_meta(meta_for(), vocab)
+    assert [d.split(" ")[0] for d in exc.value.differences] == ["unit", "card"]
+    # a unit type added (a new form's unit, sorted in by name): refused, grow named
+    added = engine(rc, units=UNITS[:3] + ("Giant_EV1",) + UNITS[3:], table=OTHER)
+    with pytest.raises(rc.VocabMismatch, match=r"1 unit type added \(Giant_EV1\)"):
+        rc.check_meta(meta_for(), added)
+
+
+def test_a_live_compat_checkpoint_on_another_table_only_notes(rc):
+    meta = meta_for(units=UNITS[:-1], live_compat=True)
+    vocab = engine(rc, units=UNITS + ("Witch",), table=OTHER)
+    errors, notes = rc.vocab_differences(meta, vocab)
+    assert errors == [] and len(notes) == 2
+    assert "live-compat" in notes[0]
+    assert notes[1].endswith("; its card names are the engine's in id order, so it loads, with "
+                             "what it learned under the other table's values")
+    with pytest.warns(rc.VocabDriftWarning):
+        assert rc.check_meta(meta, vocab) == []
+    with pytest.raises(rc.VocabMismatch):                     # its cards still count
+        rc.check_meta(meta_for(cards=swapped(NAMES, 0, 1), live_compat=True), vocab)
+
+
+def test_royalesim_version_drift_is_a_note(rc):
+    meta = meta_for(engine_fingerprint={"version": "0.1.42", "card_table": TARGET_REPORTED},
+                    version="0.1.42")
+    newer = rc.EngineVocab(NAMES, UNITS, TARGET_REPORTED, {"version": "0.1.43"})
+    errors, notes = rc.vocab_differences(meta, newer)
+    assert errors == [] and notes == [
+        "royalesim: the checkpoint's rows were built under royalesim 0.1.42, the engine is "
+        "0.1.43; the ids are checked, the simulation may differ"]
+    same = rc.EngineVocab(NAMES, UNITS, TARGET_REPORTED, {"version": "0.1.42"})
+    assert rc.vocab_differences(meta, same) == ([], [])
+    assert rc.vocab_differences(meta, engine(rc)) == ([], [])          # the engine does not say
+    unknown = meta_for(version="?")                                      # vocab_record's "unknown"
+    assert rc.vocab_differences(unknown, newer) == ([], [])
+    assert rc.meta_version(meta_for(version="0.1.40")) == "0.1.40"     # no fingerprint
+    with pytest.warns(rc.VocabDriftWarning, match="royalesim 0.1.42, the engine is 0.1.43"):
+        assert rc.check_meta(meta, newer) == []
+
+
+def test_card_table_fnv_drift_is_a_note_on_the_same_table(rc):
+    old, new = "15bb4e60e69d05f3", "87cca9def6207621"
+    meta = meta_for(engine_fingerprint={"card_table": TARGET_REPORTED, "card_table_fnv1a64": old})
+    assert rc.meta_fnv(meta) == old
+    moved = rc.EngineVocab(NAMES, UNITS, TARGET_REPORTED, card_table_fnv1a64=new)
+    errors, notes = rc.vocab_differences(meta, moved)
+    assert errors == [] and notes == [
+        f"card table bytes: the checkpoint's rows were built under {TARGET_REPORTED} with "
+        f"FNV-1a 64 {old}, the engine's has {new}: the same table, other values"]
+    # the same bytes, an FNV recorded as an int or in upper case, or one side not saying
+    for fnv in (old, int(old, 16), old.upper()):
+        assert rc.vocab_differences(meta, rc.EngineVocab(NAMES, UNITS, TARGET_REPORTED,
+                                                         card_table_fnv1a64=fnv)) == ([], [])
+    assert rc.vocab_differences(meta, engine(rc)) == ([], [])
+    # from the engine's fingerprint when the Battle did not report it
+    fp = rc.EngineVocab(NAMES, UNITS, TARGET_REPORTED, {"card_table_fnv1a64": new})
+    assert rc.vocab_differences(meta, fp)[1] == notes
+    # another table: the table note says it; no second note on its bytes
+    other = rc.EngineVocab(NAMES, UNITS, OTHER, card_table_fnv1a64=new)
+    errors, notes = rc.vocab_differences(meta, other)
+    assert errors == [] and [n.split(":")[0] for n in notes] == ["card table"]
+    with pytest.warns(rc.VocabDriftWarning, match="card table bytes"):
+        assert rc.check_meta(meta, moved) == []
+
+
+class FnvBattle(FakeBattle):
+    def card_table(self):
+        return TARGET_REPORTED
+
+    def card_table_fnv1a64(self):
+        return "87CCA9DEF6207621"
+
+
+def test_engine_vocab_reads_the_battles_fnv(rc):
+    vocab = rc.engine_vocab(FnvBattle())
+    assert (vocab.card_table_fnv1a64, vocab.fnv) == ("87cca9def6207621", "87cca9def6207621")
+    assert "(fnv1a64 87cca9def6207621)" in vocab.describe()
+    assert rc.engine_vocab(ReportingBattle()).fnv is None
+    rows = meta_for(engine_fingerprint={"card_table_fnv1a64": "15bb4e60e69d05f3"})
+    assert rc.EngineVocab.from_vocab(rows).fnv == "15bb4e60e69d05f3"
+    assert rc.vocab_differences(rows, vocab)[1][0].startswith("card table bytes: ")
+
+
+def test_name_changes(rc):
+    same = rc.name_changes(NAMES, NAMES)
+    assert same.same and same.describe("card") == "the same"
+    grown = rc.name_changes(NAMES, NAMES + ("Witch", "Bats"))
+    assert (grown.added, grown.removed, grown.moved, grown.appended) == (("Witch", "Bats"), (), (),
+                                                                         True)
+    assert grown.describe("card") == "2 cards appended (Witch, Bats)"
+    inserted = rc.name_changes(UNITS, UNITS[:3] + ("Giant_EV1",) + UNITS[3:])
+    assert inserted.added == ("Giant_EV1",) and not inserted.appended
+    assert len(inserted.moved) == len(UNITS) - 3 and inserted.moved[0] == (UNITS[3], 3, 4)
+    assert inserted.describe("unit type") == f"1 unit type added (Giant_EV1), {len(UNITS) - 3} moved"
+    gone = rc.name_changes(NAMES, NAMES[1:])
+    assert gone.removed == (NAMES[0],) and len(gone.moved) == len(NAMES) - 1
+    many = rc.name_changes((), NAMES[:5])
+    assert many.describe("card") == ("5 cards appended (Cannon, Fireball, HogRider, ... 2 more)")
+
+
+# ---------------------------------------------------------------------------
 # the engine's vocabulary
 # ---------------------------------------------------------------------------
 
@@ -230,8 +398,11 @@ def test_engine_vocab_from_a_battle_or_a_vocab(rc):
     from_rows = rc.engine_vocab(meta_for())                      # a vocab.json-like mapping
     assert (from_rows.cards, from_rows.units, from_rows.card_table) == \
         (NAMES, UNITS, TARGET_REPORTED)
-    with pytest.raises(rc.VocabMismatch):                        # rows of one table, engine of another
-        rc.check_meta(meta_for(), battle)
+    # rows of one table, engine of another: the same names load with a note (U01) ...
+    with pytest.warns(rc.VocabDriftWarning, match="card table"):
+        assert rc.check_meta(meta_for(), battle) == []
+    with pytest.raises(rc.VocabMismatch, match="card table"):    # ... other names do not
+        rc.check_meta(meta_for(cards=swapped(NAMES, 0, 1)), battle)
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +465,12 @@ def test_the_rows_vocabulary_survives_into_a_checkpoint(rc, rr, fake_royalesim):
     cat, units, cfg, fp = _rows_inputs(rc)
     meta = tt.checkpoint_meta(rr.vocab_record(cat, units, cfg, fp, {}, False), 16, 1, 2)
     assert rc.check_meta(meta, cfg) == []
+    other = rc.rs_engine.EngineConfig(card_table="client15535")
+    with pytest.warns(rc.VocabDriftWarning, match="card table"):    # the fake's names: a note
+        assert rc.check_meta(meta, other) == []
+    meta["cards"] = {c: i + 2 for i, c in enumerate(swapped(NAMES, 0, 1))}
     with pytest.raises(rc.VocabMismatch, match="card table"):
-        rc.check_meta(meta, rc.rs_engine.EngineConfig(card_table="client15535"))
+        rc.check_meta(meta, other)
 
 
 # ---------------------------------------------------------------------------
@@ -359,9 +534,13 @@ def test_rsagent_loads_through_the_check(rc, torch, rs_eval, fake_royalesim, tmp
         drifted = rs_eval.RSAgent(str(bad), seed=0, allow_drift=True)
     assert len(drifted.vocab_drift) == 1
 
-    # the agent's own engine, when given, is the one checked
+    # the agent's own engine, when given, is the one checked: another table with the same
+    # names loads with a note (U01); with other names it refuses and names the table
+    other = rs_engine.EngineConfig(card_table="client15535")
+    with pytest.warns(rc.VocabDriftWarning, match="card table"):
+        assert rs_eval.RSAgent(str(good), engine=other).vocab_drift == []
     with pytest.raises(rc.VocabMismatch, match="card table"):
-        rs_eval.RSAgent(str(good), engine=rs_engine.EngineConfig(card_table="client15535"))
+        rs_eval.RSAgent(str(bad), engine=other)
 
 
 def test_rs_checkpoint_builds_battles_only_through_rs_engine():
@@ -390,6 +569,15 @@ def test_cli_checks_checkpoints(rc, torch, fake_royalesim, tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"MISMATCH {bad} does not fit this engine: unit type 5 (token 7)" in out
     assert rc.main([str(good), "--engine-config", str(tmp_path / "none.json")]) == 2
+    # U01: another table with the same names is ok, its note printed under it
+    noted = tmp_path / "noted.pt"
+    save_checkpoint(torch, noted, meta_for(card_table=OTHER))
+    capsys.readouterr()
+    assert rc.main([str(noted)]) == 0
+    out = capsys.readouterr().out
+    assert f"ok       {noted} (1 note)\n" in out
+    assert (f"  note   card table: the checkpoint's rows were built under {OTHER}, the engine "
+            "runs client160402017_20261019; its card and unit type names") in out
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +602,17 @@ def test_engine_rows_vocabulary_fits_its_engine_only(rc, rr):
     assert vocab["card_table"] == battle.card_table()
     assert rc.check_meta(vocab, cfg) == []
     other = rs_engine.EngineConfig(card_table="client15535", level=11, tower_level=11)
-    with pytest.raises(rc.VocabMismatch) as exc:
-        rc.check_meta(vocab, other)
-    assert any(d.startswith("card table: ") for d in exc.value.differences)
+    # The tables' unit lists differ (237 unit types on 15535), so this refuses and names the
+    # table; were every name the same, the other table would be a note (U01).
+    errors, notes = rc.vocab_differences(vocab, rc.engine_vocab(other))
+    if errors:
+        with pytest.raises(rc.VocabMismatch) as exc:
+            rc.check_meta(vocab, other)
+        assert any(d.startswith("card table: ") for d in exc.value.differences)
+    else:
+        assert any(n.startswith("card table: ") for n in notes)
+    # the engine's last card appended after a checkpoint's: refused, grow named
+    short = dict(vocab, cards={c: t for c, t in vocab["cards"].items()
+                               if t < len(vocab["cards"]) + 1})
+    with pytest.raises(rc.VocabMismatch, match="rs_vocab.py grow"):
+        rc.check_meta(short, cfg)
