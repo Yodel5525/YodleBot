@@ -35,7 +35,9 @@ Per update (one call per processed frame):
    the sum reaches ``decide_llr`` and then held: it flips only when the sum
    crosses ``flip_llr`` the other way (the sum is capped at ``llr_cap``).
    Deck membership is a hard rule on top: a reported label that our deck
-   cannot produce (``own_classes``) is an enemy.
+   cannot produce (``own_classes``) is an enemy. inherit_team(uid, team) pins a
+   track's team from outside: the event deriver found it is a unit the tracker
+   lost under an older uid of that team (events.EventConfig.own_reid_cross_team).
 
 Conventions are those of scripts/vision/types.py: world millitiles, the live
 bot is RoyaleSim team 1 and defends high y; teams OWN_TEAM / ENEMY_TEAM /
@@ -412,6 +414,22 @@ class Tracker:
         if self.own_classes is not None and state.label not in self.own_classes:
             return ENEMY_TEAM
         return state.vote_team
+
+    def inherit_team(self, uid: int, team: int) -> bool:
+        """Keep track `uid` on `team` (OWN_TEAM or ENEMY_TEAM): it is a unit already known under
+        an older uid of that team, which the tracker lost (the event deriver's cross-team re-
+        acquisition, scripts/vision/events.py EventConfig.own_reid_cross_team). The vote is set
+        to `team` and the evidence to ``flip_llr`` that way (cue "inherit"), so the team flips
+        back only once fresh contrary evidence adds up to 2 x flip_llr. The deck rule still
+        comes first (team_of): a label our deck cannot put down stays the enemy's. False for a
+        uid the tracker does not hold or a team that is neither."""
+        t = self._tracks.get(int(uid))
+        if t is None or team not in (OWN_TEAM, ENEMY_TEAM):
+            return False
+        target = self.config.flip_llr if team == ENEMY_TEAM else -self.config.flip_llr
+        self._add_cue(t, "inherit", target - t.team_llr)
+        t.vote_team = team
+        return True
 
     # -- internals ------------------------------------------------------------
     def _report(self, t: TrackState, tick: float) -> Track:

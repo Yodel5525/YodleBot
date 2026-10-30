@@ -292,8 +292,9 @@ def test_event_config_from_the_unknown_flags():
     parse = VP.build_parser().parse_args
     args = parse([])
     assert (args.unknown_plays, args.unknown_cost) == (False, None)
-    assert VP.event_config(args) is None                           # the deriver's defaults, as before
-    assert VP.event_config(parse(["--unknown-plays"])) == EV.EventConfig(unknown_plays=True)
+    assert VP.event_config(args) == EV.EventConfig.live()           # the live guards (GUARDS)
+    assert VP.event_config(parse(["--legacy-opp-plays"])) is None  # the deriver's defaults, as before
+    assert VP.event_config(parse(["--unknown-plays"])) == EV.EventConfig.live(unknown_plays=True)
     cfg = VP.event_config(parse(["--unknown-plays", "--unknown-cost", "0"]))
     assert (cfg.unknown_plays, cfg.unknown_cost) == (True, 0)
     assert VP.event_config(parse(["--unknown-plays", "--unknown-cost", "6"])).unknown_cost == 6

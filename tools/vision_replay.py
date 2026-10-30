@@ -65,6 +65,11 @@ enemy tracks no card explained, by class). --unknown-cost sets the elixir each i
 (default events.UNKNOWN_PLAY_COST, 4; the summary's "unknown_plays" says which). Leave them out
 to replay the default chain.
 
+OPPONENT-PLAY GUARDS. The deriver runs with events.LIVE_GUARDS, as vision_play does live (the
+events module doc, GUARDS: a play once its track was seen 10 ticks, a lost unit re-found under
+another label, no play from a unit first seen past the river); --legacy-opp-plays replays the
+rules as they were before, to compare. The summary's "opp_guards" says which ran.
+
 Not here: fitting the perception noise profile (V11's fit_noise_profile, from these errors
 and own-tap ground truth) needs E17's profile format, which is not built yet.
 
@@ -580,7 +585,8 @@ class ReplayPerception:
         obs = observations_from_detections(units + spells, self.geometry, (w, h))
         hpbars.annotate_observations(obs[:len(units)], reads)
         vf.tracks = self.tracker.update(obs, tick)
-        vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker)
+        vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker,
+                                        towers=getattr(vf.hud, "towers", None))
         return step
 
 
@@ -1113,6 +1119,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--unknown-cost", type=int, default=None, metavar="ELIXIR",
                     help="with --unknown-plays: the elixir each UNKNOWN play is charged (default: "
                          "events.UNKNOWN_PLAY_COST, as vision_play)")
+    VP.add_opp_guard_args(ap)
     ap.add_argument("--no-detector", action="store_true", help="screen cues and HUD only")
     ap.add_argument("--recorded", action="store_true",
                     help="use the recording's detections (a vision_play session) instead of the detector")
@@ -1138,7 +1145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"detector settings: {exc}")
         return 2
     try:
-        ev_config = VP.event_config(args)         # None: the live default (no --unknown-plays)
+        ev_config = VP.event_config(args)         # the live one (None: --legacy-opp-plays alone)
     except ValueError as exc:
         print(f"UNKNOWN plays: {exc}")
         return 2
@@ -1217,6 +1224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  detector   {det_note}")
     print(f"  hud        clock templates {'ok' if hud_reader.clock_reader.ready else 'MISSING'}; ticks from the {ticks}")
     print(f"  card ids   {ids_from}; deck {', '.join(deck)}")
+    print(f"  opp plays  {VP.opp_guard_line(ev_config)}")
     if unknown:
         print(f"  unknown    UNKNOWN plays on (card -1, {ev_config.unknown_cost} elixir each)")
     if labels is not None:
@@ -1233,6 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if det_config is not None:
             summary["detector_config"] = {"conf": det_config.conf, "imgsz": det_config.imgsz,
                                           "max_det": det_config.max_det, "used": detector is not None}
+        summary["opp_guards"] = EV.guard_settings(ev_config)
         if unknown:
             summary["unknown_plays"] = {"cost": ev_config.unknown_cost}
         recorder.log("replay_summary", **summary)

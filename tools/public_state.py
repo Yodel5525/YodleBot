@@ -770,6 +770,14 @@ class OpponentElixir:
     skipped and counted in `unpriced` (an UNKNOWN play without a cost, too); the count is then
     not exact. Training rows price an unknown play differently: rs_rows / rs_eval skip it (not
     paid, exactness kept), so a count with UNKNOWN plays is one the model has not seen.
+
+    A play the bar could not have paid is still paid (the bar stops at 0) and counted in
+    `unaffordable` (rs_elixir.ElixirCounter.unaffordable); the count is then not exact for the
+    rest of the battle (opp_exact 0). It is the diagnostic of phantom plays: on the owner's
+    2026-10-29 friendly the plays perception reported cost 375 elixir against ~121 earnable and 85
+    of 103 were unaffordable, 15 of 39 with scripts/vision/events.LIVE_GUARDS. It is not a
+    filter: early phantoms drain the bar, so rejecting what it cannot pay loses real plays.
+    summary() gives the counts for a battle's record.
     """
 
     def __init__(self, catalogue: Sequence[Sequence[Any]], *,
@@ -796,6 +804,18 @@ class OpponentElixir:
         play (not blind, not late, every play priced, no UNKNOWN play)."""
         return bool(self.counter.exact and not self.blind and not self.late
                     and not self.unpriced and not self.unknown)
+
+    @property
+    def unaffordable(self) -> int:
+        """Plays paid so far that the bar could not have paid (the count's own measure)."""
+        return int(self.counter.unaffordable)
+
+    def summary(self) -> dict[str, Any]:
+        """The counts of the battle so far: plays recorded, unaffordable, unpriced, UNKNOWN,
+        still waiting for their tick, and whether the bar is exact."""
+        return {"recorded": self.recorded, "unaffordable": self.unaffordable,
+                "unpriced": self.unpriced, "unknown": self.unknown, "waiting": len(self._waiting),
+                "exact": self.exact}
 
     def record(self, plays: Iterable[Any]) -> int:
         """Log the opponent plays `plays` (OppPlay); returns how many were taken."""

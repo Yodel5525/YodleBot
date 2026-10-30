@@ -37,6 +37,14 @@ real time or with --replay-fast as fast as it runs; taps are refused, no emulato
 touched, and the session goes to reports/vision_play/replays/replay_<time> (outside
 latency_probe's --last and the live sessions' image budget).
 
+OPPONENT-PLAY GUARDS (on by default; --legacy-opp-plays turns them off). The event deriver runs
+with scripts/vision/events.LIVE_GUARDS (EventConfig.live(); the events module doc, GUARDS): an
+enemy unit is a play only once its track was seen for 10 ticks (named by the label it has then,
+reported 0.5 s later, still dated at its first sighting), a lost enemy unit may come back under
+another label while it keeps moving the same way, and a unit first seen past the river (no
+princess tower of the other side down in its lane: the HUD's tower reads) walked there and is
+not a play. On the owner's 2026-10-29 friendly: 103 opponent plays of 27 cards -> 39 of 18.
+
 UNKNOWN PLAYS (--unknown-plays, off by default; docs/NEW_CARDS_PLAN.md 2.2). An enemy unit no
 card of the event tables explains (a card the detector names and the tables lack, a hero's extra
 unit, a misread) is reported as an UNKNOWN play, card -1: the model reads it as row token 1 in
@@ -859,7 +867,8 @@ class LivePerception:
             hpbars.annotate_observations(obs[:len(units)], reads)
             vf.tracks = self.tracker.update(obs, tick)
             vf.detections = list(res.detections)
-            vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker)
+            vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker,
+                                            towers=getattr(vf.hud, "towers", None))
         except Exception as exc:                     # no units this frame; the HUD still counts
             self.detect_errors += 1
             self.last_detect_error = exc
@@ -1465,7 +1474,7 @@ class VisionPlay:
         self.results.open(n, self.battle.ended_reason, float(vf.t_capture), hud.crowns,
                           last_tick=self.battle.last_tick, towers=towers, **stats)
         self._log("battle_end", battle=n, reason=self.battle.ended_reason, tick=self.battle.last_tick,
-                  hud_crowns=list(hud.crowns), towers=towers, **stats)
+                  hud_crowns=list(hud.crowns), towers=towers, **stats, **self._opp_diagnostics(ctx))
         self.out(f"battle {n} over ({self.battle.ended_reason}) at tick {self.battle.last_tick}")
         try:
             if keeps_towers(self.battle.ended_reason):   # perhaps the same battle coming back
@@ -1475,6 +1484,23 @@ class VisionPlay:
         except Exception as exc:
             self._error("perception_error", exc)
         self.ctx = None
+
+    def _opp_diagnostics(self, ctx: Any) -> dict[str, Any]:
+        """The battle_end record's view of the opponent plays: how the deriver explained the
+        enemy tracks (OppStats.summary: plays, the guards' dropped / late / relabelled, ...) and,
+        for v2 rows, the elixir count's summary (OpponentElixir.summary: plays it could not have
+        paid, the phantom-play diagnostic). Nothing it cannot read."""
+        out: dict[str, Any] = {}
+        try:
+            stats = getattr(getattr(self.perception, "deriver", None), "opp_stats", None)
+            if hasattr(stats, "summary"):
+                out["opp_events"] = stats.summary()
+            opp = getattr(getattr(ctx, "observer", None), "opp", None)
+            if hasattr(opp, "summary"):
+                out["opp_elixir"] = opp.summary()
+        except Exception as exc:
+            self._error("diagnostics_error", exc)
+        return out
 
     def _finish_result(self) -> None:
         rec = self.results.finish()
@@ -1632,6 +1658,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --unknown-plays: the elixir each UNKNOWN play is charged (default "
                          f"{EV.UNKNOWN_PLAY_COST}, the mean cost of the cards with no KataCR class; an "
                          "unlinked child or ability unit really costs 0, so the gate picks it)")
+    add_opp_guard_args(ap)
     CT.add_control_args(ap)
     import rs_engine
     rs_engine.add_engine_args(ap)
@@ -1655,17 +1682,49 @@ def _say(lines: Iterable[str]) -> None:
         print(line, flush=True)
 
 
+def add_opp_guard_args(ap: argparse.ArgumentParser) -> None:
+    """--legacy-opp-plays (tools/vision_replay.py has it too)."""
+    ap.add_argument("--legacy-opp-plays", action="store_true",
+                    help="derive opponent plays by the rules as they were before the guards "
+                         "(events.LIVE_GUARDS off: a play on a track's 2nd sighting, rule 1 by the "
+                         "same label only, plays past the river); default: the guards on")
+
+
 def event_config(args: argparse.Namespace) -> "EV.EventConfig | None":
-    """The deriver's EventConfig from --unknown-plays and --unknown-cost: None (the defaults, the
-    call as before) without --unknown-plays; with it, rule 6 on, each UNKNOWN play charged
-    --unknown-cost (default events.UNKNOWN_PLAY_COST). ValueError for --unknown-cost without
+    """The deriver's EventConfig: EventConfig.live() (events.LIVE_GUARDS on), with rule 6 on and
+    each UNKNOWN play charged --unknown-cost (default events.UNKNOWN_PLAY_COST) under
+    --unknown-plays. --legacy-opp-plays: the guards off, so None (the defaults, the call as
+    before the guards) without --unknown-plays. ValueError for --unknown-cost without
     --unknown-plays or below 0. tools/vision_replay.py uses it too."""
     cost = getattr(args, "unknown_cost", None)
-    if not args.unknown_plays:
+    over: dict[str, Any] = {}
+    if args.unknown_plays:
+        over["unknown_plays"] = True
         if cost is not None:
-            raise ValueError("--unknown-cost applies to --unknown-plays")
-        return None
-    return EV.EventConfig(unknown_plays=True, **({} if cost is None else {"unknown_cost": cost}))
+            over["unknown_cost"] = cost
+    elif cost is not None:
+        raise ValueError("--unknown-cost applies to --unknown-plays")
+    if getattr(args, "legacy_opp_plays", False):
+        return EV.EventConfig(**over) if over else None
+    return EV.EventConfig.live(**over)
+
+
+def opp_guard_line(config: "EV.EventConfig | None") -> str:
+    """The setup line of the opponent-play guards (vision_play and vision_replay print it)."""
+    g = EV.guard_settings(config)
+    if not g["on"]:
+        return "legacy rules (--legacy-opp-plays): a play on a track's 2nd sighting"
+    parts = []
+    if g["min_play_age_ticks"]:
+        parts.append(f"an enemy unit is a play once seen for {g['min_play_age_ticks']} ticks")
+    if g["reid_any_label"]:
+        parts.append("a lost one may come back under another label")
+    if g["deploy_zone_mt"] is not None:
+        parts.append(f"no play from a unit first seen over {g['deploy_zone_mt']:g} mt past the "
+                     "river centre")
+    if g["own_reid_cross_team"] or g["own_recent_ticks"]:
+        parts.append("our classes re-found as ours")
+    return "guards on: " + "; ".join(parts)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1921,6 +1980,7 @@ def _main(args: argparse.Namespace) -> int:
         if plan.v2:
             lines.append(f"  v2 rows    opponent elixir counted from the plays seen; our taps in flight "
                          f"until they land (--obs-delay {plan.obs_delay} ticks); spells in flight")
+        lines.append("  opp plays  " + opp_guard_line(deriver.config))
         if unknown:
             lines.append(f"  unknown    ON: an enemy unit no card explains is an UNKNOWN play (token 1, "
                          f"{deriver.config.unknown_cost} elixir, count not exact)")
@@ -1945,6 +2005,7 @@ def _main(args: argparse.Namespace) -> int:
                      vocab_drift=list(loaded.drift),
                      clock_templates=bool(hud_reader.clock_reader.ready),
                      **({"rows": plan.to_json()} if plan.v2 else {}),
+                     opp_guards=EV.guard_settings(deriver.config),
                      **({"unknown_plays": {"cost": deriver.config.unknown_cost}} if unknown else {}))
         if detector is None:
             recorder.log("no_detector", error=det_error)
