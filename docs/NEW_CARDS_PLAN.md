@@ -568,6 +568,7 @@ From the 1,176 collection-mode sides:
 - Slot 3 takes an evolution, a hero, a champion or a base card (1,020, 116, 15 and 25 sides).
 - Slots 4-8 take base cards only. Champions sat only in slots 2 and 3; two champions together, once.
 - So: at most 2 evolutions, at most 2 heroes and champions together, at most 3 special cards, as 1.10 says.
+- The owner confirmed the rule on 2026-10-30: two evolutions and one hero, or one evolution and two heroes; never three of one kind; fewer is allowed. That statement did not mention champions; the data shows a champion taking a hero's place.
 - Every capture deck in 4.4-4.5, and every deck its fallbacks can produce (73 variants), follows these rules with 8 different cards.
 
 #### 4.8.4 Forms: how they are read, and where -ev1 or -hero could be wrong
