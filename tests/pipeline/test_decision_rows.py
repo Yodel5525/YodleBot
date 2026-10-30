@@ -317,6 +317,30 @@ def test_decision_plan_by_hand(rr):
     assert not exact.exact(1, 500)
 
 
+def test_jittered_taps_keep_each_sides_order(rr, monkeypatch):
+    """One player taps in order: under jitter a play's tap is never before its side's previous
+    tap, so the plays a row sees pending land no later than its own (as the live runner's sent
+    plays do). The draws are fixed here: HogRider 21, IceSpirits 27, red's Knight 27."""
+    def fixed(delays):
+        return lambda tag, n, rule=None, stream=0: (list(delays)[:n] if stream == 0
+                                                     else [24] * n)
+    queue = [(300, 0, "HogRider", 0, 0), (303, 0, "IceSpirits", 0, 0), (305, 1, "Knight", 0, 0)]
+    rule = rr.DecisionRule(24, 3)
+    monkeypatch.setattr(rr, "tap_delays", fixed([21, 27, 27]))
+    plan = rr.DecisionPlan(queue, [4, 6, 10], [], TAG, rule)
+    # raw taps 279, 276, 278: the IceSpirits' 276 would come before the HogRider's 279
+    assert plan.play_taps == [279, 279, 278] and plan.play_clamped == [False] * 3
+    assert plan.events == [(278, 0, 2), (279, 0, 0), (279, 0, 1)]
+    assert plan.pending(0, 279) == [] and plan.pending(0, 276) == []
+    assert plan.pending(0, 280) == [(4, 20), (6, 23)]
+    assert plan.pending(1, 279) == [(10, 26)]                     # the other side keeps its draw
+    # taps already in order are left alone
+    monkeypatch.setattr(rr, "tap_delays", fixed([27, 21, 24]))
+    plan = rr.DecisionPlan(queue, [4, 6, 10], [], TAG, rule)
+    assert plan.play_taps == [273, 282, 281]
+    assert plan.pending(0, 282) == [(4, 18)]
+
+
 def test_obs_row_pending_columns_and_hand_exact(rr, engine):
     engine()
     rr._setup(cfg(rr))

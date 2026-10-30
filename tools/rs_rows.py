@@ -130,7 +130,9 @@ the rows before E11. `--obs-delay D --obs-delay-jitter J` observes each play whe
 tapped it: tap = exec - D_i, D_i = D + an integer drawn uniformly from [-J, J], floored at tick
 0 (tap_delays: one draw per play in queue order from numpy default_rng([tap_seed(tag), 0]), the
 seed the first 16 hex digits of sha1(replay tag); presses, under --presses on, from stream 1,
-so --presses leaves the plays' taps alone). J <= D, and D + J < HORIZON. The engine still runs
+so --presses leaves the plays' taps alone), and never before the tap of the side's previous
+play (one player taps in order, so the plays a row sees pending land no later than its own;
+only jitter could swap two plays of a side). J <= D, and D + J < HORIZON. The engine still runs
 every action at its recorded tick with no command delay, and the loop also stops at every tap,
 so a row at tick t shows state(t), the board about D ticks before its play lands, and the
 memory view(t, max(BOARD_LAG, L)), L = --mem-lag (alias --opp-lag; --mem-lag legacy is refused).
@@ -265,8 +267,8 @@ EXACT_PLAYS, EXACT_MIRROR_WINDOW, MIRROR = 4, 8, "Mirror"
 STREAM_PLAYS, STREAM_PRESSES = 0, 1
 #: decision_rule: the settings a DecisionRule's JSON carries, and the keys that only describe it.
 _DECISION_KEYS = ("delay", "jitter", "wait_window")
-_DECISION_NOTES = ("seed", "streams", "tap_floor", "pending_slots", "pending_scale",
-                   "pending_rule", "hand_exact")
+_DECISION_NOTES = ("seed", "streams", "tap_floor", "tap_order", "pending_slots",
+                   "pending_scale", "pending_rule", "hand_exact")
 
 
 @dataclass(frozen=True)
@@ -286,7 +288,9 @@ class DecisionRule:
         return {"delay": self.delay, "jitter": self.jitter, "wait_window": self.wait_window,
                 "seed": "int(sha1(replay_tag)[:16], 16)",
                 "streams": {"plays": STREAM_PLAYS, "presses": STREAM_PRESSES},
-                "tap_floor": 0, "pending_slots": PENDING_SLOTS, "pending_scale": PENDING_SCALE,
+                "tap_floor": 0,
+                "tap_order": "per side in execution order: never before the previous play's tap",
+                "pending_slots": PENDING_SLOTS, "pending_scale": PENDING_SCALE,
                 "pending_rule": "own plays with tap < t <= exec, soonest first",
                 "hand_exact": (f"honest: >= {EXACT_PLAYS} plays run, the last {EXACT_PLAYS} "
                                f"distinct, no {MIRROR} in the last {EXACT_MIRROR_WINDOW}")}
@@ -418,9 +422,18 @@ class DecisionPlan:
         self.max_delay = rule.delay + rule.jitter
         delays = tap_delays(tag, len(queue), rule, STREAM_PLAYS)
         pdelays = tap_delays(tag, len(presses), rule, STREAM_PRESSES)
-        self.play_taps = [max(0, int(q[0]) - d) for q, d in zip(queue, delays)]
+        raw = [int(q[0]) - d for q, d in zip(queue, delays)]
+        self.play_clamped = [t < 0 for t in raw]
+        # One player taps in order: a play's tap is never before the tap of its side's previous
+        # play (queue order), so the plays a row sees pending all land no later than its own,
+        # as for the live runner's own sent plays. Without jitter that holds anyway; with it,
+        # two plays of a side within 2 J ticks could otherwise swap.
+        self.play_taps, last_tap = [], {}
+        for q, t in zip(queue, raw):
+            t = max(0, t, last_tap.get(int(q[1]), 0))
+            last_tap[int(q[1])] = t
+            self.play_taps.append(t)
         self.press_taps = [max(0, int(p[0]) - d) for p, d in zip(presses, pdelays)]
-        self.play_clamped = [int(q[0]) - d < 0 for q, d in zip(queue, delays)]
         self.press_clamped = [int(p[0]) - d < 0 for p, d in zip(presses, pdelays)]
         self.events = sorted([(t, 0, k) for k, t in enumerate(self.play_taps)]
                              + [(t, 1, k) for k, t in enumerate(self.press_taps)])
