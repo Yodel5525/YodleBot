@@ -230,6 +230,29 @@ other counts are of the rows the shards hold (the matches' "decision" and "obser
 counts are of their rows before the thinning). Without the flag nothing is thinned and
 vocab.json says None, as before. tools/rs_rows_compact.py turns the shards into the per-column
 files sim/train_tokens.py --memmap reads.
+
+Perception noise (E17; tools/perception_noise.py): without `--noise` (the default, or `--noise
+none`) a row reads the engine's state as it is, so the rows, vocab.json and manifest.json are
+byte-identical to the rows before E17. `--noise PROFILE` (a profile JSON, or "default":
+data/noise/default_prior.json; `--noise-only KINDS` keeps some of its kinds, `--noise-seed N` is
+the run seed) observes every row through one perception_noise.MatchNoise per match, seeded by
+match_seed(replay tag, N), so a match gets the same noise whatever shard or worker builds it. Its
+model is bound once per process to the Battle's unit types and catalogue, F and the sub-tile
+scale (noise_model). Each row (play, press and wait rows, at execution or at the tap) is obs_row
+of observe(state, acting team), the state that side's screen reader would report (units dropped,
+moved, confused, collapsed to the base form, phantoms, bars, towers, own elixir, ...), with the
+tick its clock reads (tick + tick_shift: the time scalars and opp_last_age; ages floor at 0); the
+row keeps the true "tick", from which the outcome window, the trust cuts and the wait sampling
+count. A recorded play goes into the memory as the OTHER seat perceives it (play_seen: missed, a
+few ticks late, or as the unknown card, token 1); under --schema v2 the opponent's counted elixir
+is fed what that memory got (a play it missed or could not name is not counted, a late one is
+counted when seen), so opp_elixir agrees with opp_seen / opp_last as it does in tools/rs_eval.py.
+The engine still runs every recorded play, own hands, own pending plays and hand_exact stay
+exact, and presses are seen as they ran. rows_for's info and manifest.json get "noise" (the
+MatchNoise counts: observations, units, dropped, plays, plays_missed, ...; like "decision" and
+"observation", counted before any wait thinning); vocab.json gets
+"perception_noise" (perception_noise.vocab_entry: schema, name, digest, seed, kinds and the whole
+profile), which sim/train_tokens.py copies into every checkpoint's meta.
 """
 from __future__ import annotations
 
@@ -252,6 +275,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
+import perception_noise as PN  # noqa: E402  (E17: numpy, rs_engine and vision_classes only)
 import rs_cards  # noqa: E402
 import rs_elixir  # noqa: E402
 import rs_engine  # noqa: E402
@@ -357,6 +381,14 @@ SELECT_SALT = 18
 #: The parquet columns the scan (scan_part) and the payload pass (selected_payloads) read.
 SCAN_COLUMNS = ("replay_tag", "game_mode", "payload_json")
 PAYLOAD_COLUMNS = ("replay_tag", "payload_json")
+
+#: --noise (module doc, "Perception noise"): None, a perfect observer (the rows before E17), or the
+#: perception_noise.NoiseProfile every row is observed through; NOISE_SEED is --noise-seed. build
+#: and main set them like the settings above.
+NOISE = None
+NOISE_SEED = 0
+#: noise_model's NoiseModels of this process, by profile digest, sub, field index and vocabulary.
+_NOISE_MODELS: dict = {}
 
 
 def press_vocab(presses) -> dict:
@@ -1094,7 +1126,7 @@ def trust_stats(rows, infos, rule=None) -> dict:
     infos carry "presses" (--presses on), also "presses": press_rows (rows with a press label)
     and the matches' rs_presses.PressLog counts summed. When they carry "decision" (E11,
     --obs-delay > 0), also "decision": those counts summed; "observation" (E14, --schema v2)
-    likewise."""
+    and "noise" (E17, --noise) likewise."""
     rule = trust_rule(rule)
     hog = [r for r in rows if r["hog"]]
     st = {"rows": len(rows), "play_rows": sum(1 for r in rows if r["action"][0]),
@@ -1123,6 +1155,11 @@ def trust_stats(rows, infos, rule=None) -> dict:
         for i in infos:
             merge_stats(observation, i.get("observation", {}))
         st["observation"] = observation
+    if any("noise" in i for i in infos):                # E17, --noise
+        noise: dict = {}
+        for i in infos:
+            merge_stats(noise, i.get("noise", {}))
+        st["noise"] = noise
     return st
 
 
@@ -1155,9 +1192,9 @@ def manifest(totals: dict, shards, skipped, rule=None, wait_keep=None) -> dict:
     rows; None with no rows), wait_rows, the skipped matches by reason, the trust rule and the
     shard entries (shard_entry, in shard order). Under --trust v2 also trusted_v2 and its
     rates, cuts_v2 and princess_votes; with press counts in `totals` (--presses on) also
-    "presses"; with decision counts (--obs-delay > 0) also "decision". With `wait_keep`
-    (--wait-keep-at-build, E18) also "wait_thinning": keep, and the waits kept and dropped
-    (build's counts in `totals`)."""
+    "presses"; with decision counts (--obs-delay > 0) also "decision"; with noise counts (E17,
+    --noise) also "noise". With `wait_keep` (--wait-keep-at-build, E18) also "wait_thinning":
+    keep, and the waits kept and dropped (build's counts in `totals`)."""
     rule = trust_rule(rule)
     wait_keep = wait_keep_value(wait_keep)
     n, hog, plays = totals.get("rows", 0), totals.get("hog_rows", 0), totals.get("play_rows", 0)
@@ -1180,6 +1217,8 @@ def manifest(totals: dict, shards, skipped, rule=None, wait_keep=None) -> dict:
         out["decision"] = totals["decision"]
     if "observation" in totals:
         out["observation"] = totals["observation"]
+    if "noise" in totals:
+        out["noise"] = totals["noise"]
     if wait_keep is not None:
         thin = totals.get("wait_thinning", {})
         out["wait_thinning"] = {"keep": wait_keep, "kept": int(thin.get("kept", 0)),
@@ -1214,6 +1253,11 @@ def describe_manifest(man: dict) -> str:
         w = man["wait_thinning"]
         text += (f"; waits kept at build with p {w['keep']:g}: {w['kept']:,} kept, "
                  f"{w['dropped']:,} dropped")
+    if "noise" in man:
+        n = man["noise"]
+        text += (f"; noise: {n.get('dropped', 0) + n.get('hidden_new', 0):,} of "
+                 f"{n.get('units', 0):,} units unseen, {n.get('phantoms', 0):,} phantoms, "
+                 f"{n.get('plays_missed', 0):,} of {n.get('plays', 0):,} plays missed")
     return text
 
 
@@ -1500,6 +1544,78 @@ def thin_waits(rows, tag, keep) -> tuple:
     return kept, len(rows) - len(kept)
 
 
+# ---------------------------------------------------------------------------
+# E17: perception noise (module doc, "Perception noise")
+# ---------------------------------------------------------------------------
+
+def noise_profile(value):
+    """--noise as rows_for, build and tools/rs_eval.py take it: None, or a word for no noise
+    ("none", "off", ...: perception_noise.NO_NOISE), gives None, a perfect observer; anything
+    else a perception_noise.NoiseProfile: a profile (also one of another import of that module,
+    read through its to_dict()), its JSON dict, a profile file or "default" (the shipped prior).
+    An all-zero profile stays a profile (the hooks run and change nothing). ValueError /
+    FileNotFoundError as NoiseProfile.load raises them; TypeError for anything else."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in PN.NO_NOISE:
+        return None
+    if isinstance(value, PN.NoiseProfile):
+        return value
+    if not isinstance(value, (str, Path, dict)) and callable(getattr(value, "to_dict", None)):
+        value = value.to_dict()
+    return PN.as_profile(value)
+
+
+def noise_seed_value(value) -> int:
+    """--noise-seed as rows_for, build and tools/rs_eval.py take it: an int (numpy integers too;
+    negative ones are fine, perception_noise.match_seed hashes it). ValueError otherwise."""
+    if isinstance(value, bool):
+        raise ValueError(f"--noise-seed: an int, got {value!r}")
+    try:
+        return int(operator.index(value))
+    except TypeError:
+        raise ValueError(f"--noise-seed: an int, got {value!r}") from None
+
+
+def noise_model(profile, battle, sub):
+    """The perception_noise.NoiseModel of `profile` (noise_profile; None gives None) bound to
+    `battle`'s unit_types_json() and catalogue_json(), the field index F (_setup) and `sub`
+    (royalesim.SUBTILE_PER_MILLITILE). Built once per profile and vocabulary in a process
+    (_NOISE_MODELS): binding reads the vision class table. Raises what NoiseModel raises (a kind
+    the engine cannot bind); the names it could not resolve are in its `unresolved`."""
+    profile = noise_profile(profile)
+    if profile is None:
+        return None
+    if F is None:
+        raise RuntimeError("--noise: _setup() fills the field index F before a model is bound")
+    units, cards = battle.unit_types_json(), battle.catalogue_json()
+    vocab = hashlib.sha1(f"{units}\n{cards}".encode("utf-8")).hexdigest()
+    key = (profile.digest(), int(sub), tuple(sorted(F.items())), vocab)
+    model = _NOISE_MODELS.get(key)
+    if model is None:
+        model = _NOISE_MODELS[key] = PN.NoiseModel(
+            profile, unit_types=json.loads(units), catalogue=json.loads(cards), fields=F,
+            sub=int(sub))
+    return model
+
+
+def noise_vocab(profile, seed=0) -> dict:
+    """vocab_record keywords for --noise: none for no noise (the vocab.json of the rows before
+    E17), else {"perception_noise": perception_noise.vocab_entry(profile, seed)}."""
+    profile = noise_profile(profile)
+    if profile is None:
+        return {}
+    return {"perception_noise": PN.vocab_entry(profile, noise_seed_value(seed))}
+
+
+def describe_noise(profile, seed=0) -> str:
+    """For the console: the profile's kinds (NoiseProfile.describe) and the run seed."""
+    profile = noise_profile(profile)
+    if profile is None:
+        return "none (a perfect observer, as before)"
+    return f"{profile.describe()}\n        seeded per match by its replay tag, run seed {seed}"
+
+
 def _setup(engine=None):
     """(royalesim, IL_Replay key -> card name, card name -> id, catalogue rows) under
     `engine` (an rs_engine.EngineConfig or its to_json(); None = rs_engine.active()).
@@ -1659,7 +1775,8 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
         "next": (p["next_card"] + 2) if p.get("next_card", -1) >= 0 else 0,
         "opp_seen": np.asarray(seen + [0] * (8 - len(seen)), dtype=np.int16),
         "opp_last": np.asarray([c for c, _ in last] + [0] * (4 - len(last)), dtype=np.int16),
-        "opp_last_age": np.asarray([min(1.0, (tick - t) / 400) for _, t in last]
+        # Ages floor at 0: only a noisy clock (E17, a tick read early) makes one negative.
+        "opp_last_age": np.asarray([max(0.0, min(1.0, (tick - t) / 400)) for _, t in last]
                                    + [1.0] * (4 - len(last)), dtype=np.float16),
     }
     if forms is not None:
@@ -1681,7 +1798,7 @@ def obs_row(state, team, sub, mem, tick, live=None, units=None, visibility=None,
 
 
 def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, presses=None,
-             info=None, decision=None, schema=None):
+             info=None, decision=None, schema=None, noise=None, noise_seed=None):
     """Rows of one match. `engine` as in _setup; the battle runs without command delay,
     since the recorded ticks are the ticks the plays executed. `decision` as --obs-delay
     (decision_rule; None: DECISION): a delay > 0 observes each play and press at its tap,
@@ -1698,7 +1815,12 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
     with a delay also info["decision"], the counts manifest.json sums (module doc). `schema`
     as --schema (schema_mode; None: ROW_SCHEMA): "v2" gives rs_schema.V2's rows (module doc,
     "Schema v2"), the opponent's elixir counted by a SeenElixir at the memory view's lag, and
-    info["observation"] (rows, opp_inexact, spell_rows); legacy calls obs_row as before."""
+    info["observation"] (rows, opp_inexact, spell_rows); legacy calls obs_row as before.
+    `noise` as --noise (noise_profile; None: NOISE, "none": no noise) and `noise_seed` as
+    --noise-seed (None: NOISE_SEED): with a profile every row is obs_row of the state the acting
+    side perceives, the memory and (v2) the opponent's counted elixir get each play as the other
+    side perceives it, and info["noise"] has the match's MatchNoise counts (module doc,
+    "Perception noise"); without one nothing of this runs and obs_row is called as before."""
     lag = mem_lag_value(MEM_LAG if mem_lag is None else mem_lag)
     legacy = lag == MEM_LEGACY
     drule = decision_rule(DECISION if decision is None else decision)
@@ -1711,6 +1833,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                          "legacy is the order before E08")
     rule = trust_rule(trust)
     press_on = rs_presses.press_mode(PRESSES if presses is None else presses) == rs_presses.PRESS_ON
+    noise_prof = noise_profile(NOISE if noise is None else noise)
+    nseed = noise_seed_value(NOISE_SEED if noise_seed is None else noise_seed)
     royalesim, names, ids, cat = ctx
     sub = royalesim.SUBTILE_PER_MILLITILE
     battle = payload["battle"]
@@ -1761,6 +1885,13 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             forms=[[forms[seat_of[t]][i] for i in perm[seat_of[t]]] for t in (0, 1)],
             levels=[[levels[seat_of[t]][i] for i in perm[seat_of[t]]] for t in (0, 1)],
             tower_levels=[tower, tower])
+    # E17 (--noise): one MatchNoise for the match, seeded by its tag; both sides observe through
+    # it (its per-unit decisions are kept per observer). None: a perfect observer, as before.
+    nz = None
+    if noise_prof is not None:
+        nz = PN.MatchNoise(noise_model(noise_prof, b, sub),
+                           PN.match_seed((payload.get("source") or {}).get("replay_tag", ""),
+                                         nseed))
     rec_crowns = {rs[0]: battle["team"]["crowns"], rs[1]: battle["opponent"]["crowns"]}
     result = str(battle.get("result", "")).lower()
     won_team = 1.0 if result in ("victory", "win") else 0.0 if result in ("defeat", "loss") else 0.5
@@ -1829,15 +1960,38 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             kw["hand_exact"] = hist.exact(team, tick)
         return kw
 
+    def look(state, team, view, tick, **kw):
+        """obs_row of `team`'s row at `tick`. E17 (--noise): of the state `team`'s screen reader
+        reports, at the tick its clock reads; the row keeps the true tick, from which the
+        outcome window and the trust cuts count. Without noise, obs_row exactly as before."""
+        if nz is None:
+            return obs_row(state, team, sub, view, tick, **kw)
+        seen = nz.observe(state, team)              # sets nz.tick_shift
+        row = obs_row(seen, team, sub, view, tick + nz.tick_shift, **kw)
+        row["tick"] = tick
+        return row
+
+    def record(team, token, tick):
+        """`team`'s play of row token `token`, run on `tick`, into the memory: as it ran, or (E17
+        --noise) as the other side perceives it (MatchNoise.record's draws: missed, recorded
+        late, or as the unknown card). The (token, tick) the memory got; None: missed."""
+        if nz is None:
+            mem.record(team, token, tick)
+            return token, tick
+        seen = nz.model.play_seen(team, token, tick, nz.rng, stats=nz.stats)
+        if seen is not None:
+            mem.record(team, seen[0], seen[1])
+        return seen
+
     def drow(state, team, view, tick):
         """A decision-time row of `team` at `tick`: obs_row with its pending plays and honest
-        hand_exact (the one place E17's noise hook wraps for these rows)."""
+        hand_exact (through look, E17's noise hook)."""
         pending = plan.pending(team, tick)
         exact = plan.exact(team, tick)
         dstat["pending_rows"] += int(bool(pending))
         dstat["exact_rows"] += int(exact)
-        return obs_row(state, team, sub, view, tick, **pkw[team], pending=pending,
-                       hand_exact=exact, **vkw(team, tick, True))
+        return look(state, team, view, tick, **pkw[team], pending=pending, hand_exact=exact,
+                    **vkw(team, tick, True))
 
     while tick <= end:
         state = json.loads(b.state_json())
@@ -1905,16 +2059,18 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             ex, ey = rs_orient.to_engine(x, y, sub)
             ox, oy = own(ex, ey, team, sub)
             if plan is None:                        # E11: decision-time rows were taken above
-                row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                              **pkw[team], **vkw(team, tick))
+                row = look(state, team, mem.view(tick, 0) if legacy else known, tick,
+                           **pkw[team], **vkw(team, tick))
                 row["action"] = (cid + 2, int(min(17, max(0, ox // 1000))), int(min(31, max(0, oy // 1000))))
                 rows.append(row)
+            # The recorded tick is the tick it ran (E17: the memory gets what the other side
+            # saw). Recorded above the hand check, which reads no memory: the rows of before.
+            seen = record(team, cid + 2, tick)
             if cid in hand:
                 cmds.append((team, hand.index(cid), ex, ey))
-                sent_plays.append((team, cid))      # E14: counted once the engine runs it
+                sent_plays.append((team, cid, seen))    # E14: counted once the engine runs it
             elif cut > tick:
                 cut, cut_why = tick, CUT_HAND
-            mem.record(team, cid + 2, tick)        # the recorded tick is the tick it ran
         # E10: this tick's presses, after its plays: a row each (action (0, 0, 0), press =
         # button + 1) and the command (team, HAND_SIZE + button, 0, 0). A press no single
         # button is behind is not sent, and cuts trust.
@@ -1930,8 +2086,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                     cut, cut_why = tick, CUT_PRESS
                 continue
             if plan is None:                        # E11: its row was taken at its tap
-                row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                              **pkw[team], **vkw(team, tick))
+                row = look(state, team, mem.view(tick, 0) if legacy else known, tick,
+                           **pkw[team], **vkw(team, tick))
                 row["action"] = (0, 0, 0)
                 row["press"] = button + 1
                 rows.append(row)
@@ -1949,8 +2105,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                     continue
                 soon = any(tick < t <= tick + 10 for t in soon_ticks[team])
                 if team not in acting and not soon and tick > 0:
-                    row = obs_row(state, team, sub, mem.view(tick, 0) if legacy else known, tick,
-                                  **pkw[team], **vkw(team, tick))
+                    row = look(state, team, mem.view(tick, 0) if legacy else known, tick,
+                               **pkw[team], **vkw(team, tick))
                     row["action"] = (0, 0, 0)
                     rows.append(row)
         nxt = queue[i][0] if i < len(queue) else end + 1
@@ -1974,9 +2130,13 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
                 if cut > tick:
                     cut, cut_why = tick, CUT_REFUSED
             elif seen_elixir is not None and k < len(sent_plays):
-                # E14: a play the engine ran is on the board, and its side has paid for it.
-                who, cid = sent_plays[k]
-                seen_elixir.record(who, tick, cid)
+                # E14: a play the engine ran is on the board, and its side has paid for it. E17:
+                # counted as the memory got it; a play missed, or not named (token 1), is not.
+                who, cid, seen = sent_plays[k]
+                if nz is None:
+                    seen_elixir.record(who, tick, cid)
+                elif seen is not None and seen[0] >= rs_memory.TOKEN_OFFSET:
+                    seen_elixir.record(who, seen[1], seen[0] - rs_memory.TOKEN_OFFSET)
         tick += step
     if rule.v2:
         # E09: the first divergence is the earliest of the legacy cut, the first tick an engine
@@ -2025,6 +2185,8 @@ def rows_for(payload: dict, ctx, engine=None, *, mem_lag=None, trust=None, press
             info["decision"] = dstat
         if ostat is not None:
             info["observation"] = ostat
+        if nz is not None:
+            info["noise"] = dict(sorted(nz.stats.items()))
     return rows, "ok"
 
 
@@ -2040,7 +2202,7 @@ SCHEMA = "rs_rows/legacy"
 def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, schema=SCHEMA,
                  obs_delay=0, obs_delay_jitter=0, opp_lag=0, wait_keep_at_build=None,
                  opp_memory=None, classes=None, visibility=None, trust=None, presses=None,
-                 decision=None, selection=None):
+                 decision=None, selection=None, perception_noise=None):
     """vocab.json: the id maps of the rows and how they were made.
 
     The keys it had before E04 come first, unchanged: n_cards, n_units, live_compat, cards
@@ -2091,6 +2253,9 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
                           builder kept that share of the waits
       selection           with `selection` (E18, selection_record; None for the legacy pick):
                           how the matches were picked
+      perception_noise    with `perception_noise` (E17, perception_noise.vocab_entry; noise_vocab
+                          gives the keyword, none without --noise): the profile and run seed
+                          every row was observed under
 
     sim/train_tokens.py copies all of it into every checkpoint's meta, and
     tools/rs_checkpoint.load_policy checks cards, units and card_table against the engine
@@ -2158,6 +2323,8 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
         rec["wait_thinning"] = wait_rule(wait_keep_at_build)
     if selection is not None:
         rec["selection"] = dict(selection)
+    if perception_noise is not None:
+        rec["perception_noise"] = dict(perception_noise)
     if rows_v2:
         rec["schema_spec"] = rs_schema.V2.to_json(BUTTONS)
         extra = list(TRUST_FIELDS) if v2 else []
@@ -2174,7 +2341,7 @@ def vocab_record(cat, unit_types, cfg, fp, card_map, live, *, version=None, sche
 
 def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, units=None,
           mem_lag=None, visibility=None, trust=None, presses=None, stats=False,
-          decision=None, schema=None, wait_keep_at_build=None):
+          decision=None, schema=None, wait_keep_at_build=None, noise=None, noise_seed=None):
     """One shard, shard-<batch_id>.npz in `out_dir` (else OUT), from IL_Replay payload texts.
     `units` / `mem_lag` / `visibility` / `trust` / `presses` / `decision` / `schema` /
     `wait_keep_at_build` as --units / --mem-lag / --visibility / --trust (trust_rule) /
@@ -2186,11 +2353,14 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
     schema v2 (E14) the shard has rs_schema.V2's columns (shard_columns, with trusted_v2 under
     --trust v2), each cast to its dtype. With a wait share (E18) each match's rows go through
     thin_waits before they are stacked. A delay or schema v2 with mem_lag "legacy" is refused
-    (ValueError) before any match. Returns (batch_id, rows, skipped by reason); with `stats`,
-    also the shard's trust_stats, which main merges into manifest.json (with a wait share it
-    has "wait_thinning": the waits kept and dropped)."""
+    (ValueError) before any match. `noise` / `noise_seed` as --noise (noise_profile: a profile,
+    its to_dict(), a path, "default"; "none" turns it off) / --noise-seed, kept as NOISE /
+    NOISE_SEED (None: keep the module's); main passes the profile as its to_dict(). A profile
+    the engine cannot bind is refused (noise_model's error) before any match. Returns (batch_id,
+    rows, skipped by reason); with `stats`, also the shard's trust_stats, which main merges into
+    manifest.json (with a wait share it has "wait_thinning": the waits kept and dropped)."""
     global LIVE, OUT, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
-    global WAIT_KEEP_AT_BUILD
+    global WAIT_KEEP_AT_BUILD, NOISE, NOISE_SEED
     units = UNITS if units is None else units
     unit_mode(units, live)
     lag = MEM_LAG if mem_lag is None else mem_lag_value(mem_lag)
@@ -2201,6 +2371,8 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
     name = schema_mode(ROW_SCHEMA if schema is None else schema)
     keep = wait_keep_value(WAIT_KEEP_AT_BUILD if wait_keep_at_build is None
                            else wait_keep_at_build)
+    prof = noise_profile(NOISE if noise is None else noise)
+    nseed = noise_seed_value(NOISE_SEED if noise_seed is None else noise_seed)
     if drule.on and lag == MEM_LEGACY:
         raise ValueError("--obs-delay: decision-time rows read the memory dated at execution; "
                          "--mem-lag legacy is the order before E08")
@@ -2209,9 +2381,16 @@ def build(batch_id, payload_texts, live=False, out_dir=None, engine=None, *, uni
                          "legacy is the order before E08")
     LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES = live, units, lag, vis, rule, press
     DECISION, ROW_SCHEMA, WAIT_KEEP_AT_BUILD = drule, name, keep
+    NOISE, NOISE_SEED = prof, nseed
     if out_dir:
         OUT = Path(out_dir)
     ctx = _setup(engine)
+    if NOISE is not None:
+        # E17: bound here once, so a profile this engine cannot bind fails the shard, not every
+        # match as an "error" skip; rows_for finds the model in _NOISE_MODELS.
+        royalesim = ctx[0]
+        noise_model(NOISE, rs_engine.make_battle(rs_engine.resolve(engine).undelayed(), royalesim),
+                    royalesim.SUBTILE_PER_MILLITILE)
     rows, tags, skipped, infos = [], [], {}, []
     waits_kept = waits_dropped = 0
     for text in payload_texts:
@@ -2328,6 +2507,7 @@ def main() -> int:
                          "before, schema rs_rows/legacy; 'v2' (E14) adds spells in flight, the "
                          "opponent's counted elixir, own pending plays, hand evolution, the "
                          "ability buttons and unit form and burrow (schema rs_rows/v2)")
+    PN.add_noise_args(ap)                          # E17: --noise, --noise-only, --noise-seed
     ap.add_argument("--out", type=Path, default=None)
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
@@ -2349,21 +2529,31 @@ def main() -> int:
         _nonneg(args.select_seed, "--select-seed")
         if args.batch < 1 or args.workers < 1:
             raise ValueError("--batch and --workers must be 1 or more")
+        noise = PN.profile_from_args(args)          # E17: None without --noise
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
     global OUT, LIVE, UNITS, MEM_LAG, VISIBILITY, TRUST, PRESSES, DECISION, ROW_SCHEMA
-    global WAIT_KEEP_AT_BUILD
+    global WAIT_KEEP_AT_BUILD, NOISE, NOISE_SEED
     LIVE = args.live_compat
     UNITS, MEM_LAG, VISIBILITY, TRUST = args.units, args.mem_lag, args.visibility, rule
     PRESSES = args.presses
     DECISION = decision
     ROW_SCHEMA = schema
     WAIT_KEEP_AT_BUILD = wait_keep
+    NOISE, NOISE_SEED = noise, args.noise_seed
     if args.out:
         OUT = args.out
     royalesim, names, ids, cat = _setup(cfg)
     vocab_battle = rs_engine.make_battle(cfg, royalesim)
+    unresolved = []
+    if NOISE is not None:
+        # E17: bound once here, so a profile this engine cannot bind stops the run at once.
+        try:
+            unresolved = noise_model(NOISE, vocab_battle,
+                                     royalesim.SUBTILE_PER_MILLITILE).unresolved
+        except (ValueError, FileNotFoundError) as exc:
+            ap.error(f"--noise: {exc}")
     fp = rs_engine.fingerprint(vocab_battle, royalesim, cfg)
     print(f"engine: {cfg.describe()}\n        {rs_engine.summary(fp)}", flush=True)
     card_map = rs_cards.describe(names)
@@ -2384,6 +2574,10 @@ def main() -> int:
     if WAIT_KEEP_AT_BUILD is not None:
         print(f"waits:  each kept with p {WAIT_KEEP_AT_BUILD:g}, seeded by the match tag",
               flush=True)
+    if NOISE is not None:
+        print(f"noise:  {describe_noise(NOISE, NOISE_SEED)}", flush=True)
+        for what in unresolved:
+            print(f"        not bound: {what}", flush=True)
     t0 = time.time()
     parts = sorted((CORPUS / "replays").glob("part-*.parquet"))
     if args.limit_parts:
@@ -2412,7 +2606,7 @@ def main() -> int:
         wait_keep_at_build=WAIT_KEEP_AT_BUILD, selection=selection,
         classes=VCT if UNITS == UNITS_VISION else None,
         **memory_vocab(MEM_LAG), **visibility_vocab(VISIBILITY), **trust_vocab(TRUST),
-        **press_vocab(PRESSES), **decision_vocab(DECISION))),
+        **press_vocab(PRESSES), **decision_vocab(DECISION), **noise_vocab(NOISE, NOISE_SEED))),
         encoding="utf-8")
     n_batches = -(-len(picked) // args.batch)
     total, skipped, totals, shards = 0, {}, {}, []
@@ -2422,7 +2616,9 @@ def main() -> int:
             return pool.submit(build, k, b, LIVE, str(OUT), cfg.to_json(), units=UNITS,
                                mem_lag=MEM_LAG, visibility=VISIBILITY, trust=TRUST.to_json(),
                                presses=PRESSES, stats=True, decision=DECISION.to_json(),
-                               schema=ROW_SCHEMA, wait_keep_at_build=WAIT_KEEP_AT_BUILD)
+                               schema=ROW_SCHEMA, wait_keep_at_build=WAIT_KEEP_AT_BUILD,
+                               noise=None if NOISE is None else NOISE.to_dict(),
+                               noise_seed=NOISE_SEED)
 
         # E18, pass 2: the picked payloads a part at a time, at most 2 x workers batches out.
         jobs = chunked(selected_payloads(picked, parts), args.batch)

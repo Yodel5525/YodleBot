@@ -72,6 +72,25 @@ has the ability buttons after the four slots; rs_decide masks them (its button_m
 search agent reads the four slots only, so no seat presses yet. A legacy checkpoint (no schema
 in its meta, or rs_rows/legacy) is played exactly as before.
 
+Perception noise (E17; tools/perception_noise.py, tools/rs_rows.py --noise): without `--noise`
+(the default, or `--noise none`) every seat reads the engine's state, as before, and the results
+are those of before. `--noise PROFILE` (a profile JSON or "default"; `--noise-only KINDS`,
+`--noise-seed N`) makes the AGENT seat (mode agent, the RSAgent.act seat) a screen reader: play()
+gives it a perception_noise.MatchNoise for the match (agent.noise, seeded by match_seed(replay
+tag, N)), pushes every state the match goes through into its history, and RSAgent.act first
+replaces the state with noise.observe(state, team), so the look-ahead (--lead -N rebuilds from
+what the screen shows), the row (at the tick its clock reads, tick + lead + tick_shift; the
+opponent's counted elixir stays at the true tick + lead) and rs_decide's masks (the HUD's
+elixir) all read it; the match battle and check_deploy stay the engine's. The other side's plays
+(the ghost's and the reactive opponent's) go into the memory as that seat perceives them
+(MatchNoise.record: missed, late, or the unknown card). `--opponent-noise PROFILE` does the same
+for the reactive opponent seat (--opponent-ckpt; seeded by match_seed(tag + "|opponent", N)), and
+the agent's plays then reach the memory through it; by default the opponent sees perfectly, so
+the screen prices the agent's perception only. --pro (no agent seat), --search (its own act) and
+--shadow (a re-drive of the true state) are refused with --noise. A noisy run says so in its
+name; reports/rs_ghost.jsonl then records "noise" (perception_noise.vocab_entry) and the summed
+counts ("noise_stats"; per match in each row's "noise"), and likewise "opponent_noise".
+
 The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
 """
 from __future__ import annotations
@@ -93,6 +112,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import rs_rows as RR  # noqa: E402
 from royalesim_redrive import CORPUS, base_key, deal_order  # noqa: E402
+import perception_noise as PN  # noqa: E402  (E17; rs_rows imports it too)
 import rs_decide  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_memory  # noqa: E402
@@ -137,6 +157,9 @@ class RSAgent:
     _seen = None
     _seen_fed = None
     _seen_team = None
+    # E17 (--noise): a perception_noise.MatchNoise play() sets for the match; act() then decides
+    # on what it observes (module doc, "Perception noise"). None: the engine's state, as before.
+    noise = None
 
     _CAT = None
 
@@ -501,6 +524,14 @@ class RSAgent:
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
         self._team = team
+        # E17 (--noise): first, the state this seat's screen reader reports, so the look-ahead,
+        # the row and rs_decide's masks (the HUD's elixir) all read it; the row at the tick its
+        # clock reads. Without noise, the state and tick as before.
+        noise = getattr(self, "noise", None)
+        shift = 0
+        if noise is not None:
+            state = noise.observe(state, team)
+            shift = noise.tick_shift
         if getattr(self, "hold_pending", False) and battle.pending_commands(team):
             # Our own last tap has not landed yet. Deciding again now means
             # deciding on a board that does not show it - the double-play the
@@ -508,7 +539,7 @@ class RSAgent:
             self.ahead(battle, state)        # keep the velocity memory current
             return None
         view = self.ahead(battle, state)
-        row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live,
+        row = RR.obs_row(view, team, sub, mem, tick + self.lead + shift, live=self.live,
                          visibility=self.visibility,
                          **self.v2_kw(state, team, mem, tick + self.lead, royalesim))
         aim = self._spell_aim(view, team, sub) if getattr(self, "spell_aim", False) else None
@@ -697,6 +728,26 @@ class RSSearchAgent(RSAgent):
 
 
 
+def check_noise_seats(noise, opp_noise, mode_, opp_ckpt="", shadow=False) -> None:
+    """ValueError when a perception-noise profile (E17; None: none) goes to a seat that is not
+    there or does not decide through RSAgent.act (module doc, "Perception noise"): `noise`, the
+    agent seat's, needs mode "agent" (--pro has no agent seat; the --search agents have an act()
+    of their own) and no shadow (rs_shadow re-drives the engine's true state); `opp_noise` needs
+    a reactive opponent, `opp_ckpt` (the ghost replays commands and sees nothing)."""
+    if noise is not None:
+        if mode_ == "pro":
+            raise ValueError("--noise is the agent seat's perception; --pro has no agent seat")
+        if mode_ != "agent":
+            raise ValueError(f"--noise: the {mode_} agent decides in an act() of its own, which "
+                             "has no perception-noise hook; leave out --search")
+        if shadow:
+            raise ValueError("--noise: --shadow re-drives the engine's true state; leave out one "
+                             "or the other")
+    if opp_noise is not None and not opp_ckpt:
+        raise ValueError("--opponent-noise is the reactive opponent's perception: give "
+                         "--opponent-ckpt (the ghost replays its commands and sees nothing)")
+
+
 def skip_record(tag, mode_, why, detail=""):
     """What play() returns for a match it does not play: {"tag", "mode", "skipped": why,
     "detail"}. It has no "result" or "records", so callers that keep only played
@@ -714,12 +765,17 @@ def split_results(results):
 
 def play(args):
     """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
-    shadow, spell_aim, engine, mem_lag, decide, visibility]); `engine` (an rs_engine config's
-    to_json()) becomes this process's rs_engine.active() config, else the active one is used.
-    `mem_lag` as --mem-lag (missing or None: rs_memory.BOARD_LAG; module doc). `decide` as
-    --decide (missing or None: legacy), for both RSAgent seats. `visibility` as --visibility
-    (missing or None: each RSAgent seat keeps its checkpoint's; module doc); a seat that sees
-    public checks royalesim.STATUS_BITS first (rs_rows.check_status_bits)."""
+    shadow, spell_aim, engine, mem_lag, decide, visibility, noise, opponent_noise,
+    noise_seed]); `engine` (an rs_engine config's to_json()) becomes this process's
+    rs_engine.active() config, else the active one is used. `mem_lag` as --mem-lag (missing or
+    None: rs_memory.BOARD_LAG; module doc). `decide` as --decide (missing or None: legacy), for
+    both RSAgent seats. `visibility` as --visibility (missing or None: each RSAgent seat keeps
+    its checkpoint's; module doc); a seat that sees public checks royalesim.STATUS_BITS first
+    (rs_rows.check_status_bits). `noise` / `opponent_noise` as --noise / --opponent-noise (a
+    profile's to_dict(), a path, "default"; missing, None or "none": a perfect observer, as
+    before) and `noise_seed` as --noise-seed (missing or None: 0); ValueError for noise on a
+    seat that is not there or does not decide through RSAgent.act (module doc, "Perception
+    noise"). A noisy seat's counts are in the result's "noise" / "opponent_noise"."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
@@ -730,6 +786,11 @@ def play(args):
     visibility = args[13] if len(args) > 13 else None
     if visibility is not None:
         RR.visibility_mode(visibility)
+    # E17: each seat's perception noise profile (None: a perfect observer) and the run seed.
+    noise = RR.noise_profile(args[14] if len(args) > 14 else None)
+    opp_noise = RR.noise_profile(args[15] if len(args) > 15 else None)
+    noise_seed = RR.noise_seed_value(args[16] if len(args) > 16 and args[16] is not None else 0)
+    check_noise_seats(noise, opp_noise, mode_, opp_ckpt, args[8] if len(args) > 8 else False)
     mem_lag = RR.mem_lag_value(args[11] if len(args) > 11 and args[11] is not None
                                else rs_memory.BOARD_LAG)
     legacy = mem_lag == RR.MEM_LEGACY
@@ -834,6 +895,16 @@ def play(args):
             s = seat_of[hog_team if seat is agent else ghost_team]
             seat.buttons = rs_presses.side_buttons([ids[c] for c in dealt[s]],
                                                    [forms[s][i] for i in perm[s]], champs)
+    # E17: the MatchNoise of the seat deciding for each team (None: it sees the engine's state,
+    # and every play reaches the memory as it runs, as before).
+    noises = {hog_team: None, ghost_team: None}
+    tag = p["source"]["replay_tag"]
+    for seat, team, prof, key in ((agent, hog_team, noise, tag),
+                                  (opponent, ghost_team, opp_noise, f"{tag}|opponent")):
+        if seat is not None and prof is not None:
+            seat.noise = noises[team] = PN.MatchNoise(RR.noise_model(prof, b, sub),
+                                                      PN.match_seed(key, noise_seed))
+    watching = [nz for nz in noises.values() if nz is not None]
     scripted = [(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]
                 if (mode_ == "pro" or rs[s] == ghost_team) and not
                 (opponent is not None and rs[s] == ghost_team)]
@@ -844,12 +915,25 @@ def play(args):
     # decision of a tick reads the one view taken before anything is sent. Legacy dates a
     # play when it is sent and reads the memory at each decision (the dict before E08).
     mem = rs_memory.PublicMemory()
+
+    def record(team, card, when):
+        """`team`'s play of row token `card`, run on `when`, into the memory: as it runs, or
+        (E17) as the other team's seat perceives it when that seat has noise (its MatchNoise
+        may miss the play, date it late or not name it)."""
+        nz = noises[1 - team]
+        if nz is None:
+            mem.record(team, card, when)
+        else:
+            nz.record(mem, team, card, when)
+
     runs_after = 0 if legacy else delay
     i, tick, n_agent = 0, 0, 0
     while tick < 6200:
         state = json.loads(b.state_json())
         if state["game_over"]:
             break
+        for nz in watching:
+            nz.push(state)            # E17: every state the match goes through (board lag)
         known = None if legacy else mem.view(tick, mem_lag)
         cmds = []
         while i < len(scripted) and scripted[i][0] <= tick:
@@ -859,7 +943,7 @@ def play(args):
             cid = ids[card]
             if cid in hand:
                 cmds.append((team, hand.index(cid), *rs_orient.to_engine(x, y, sub)))
-                mem.record(team, cid + 2, tick + runs_after)
+                record(team, cid + 2, tick + runs_after)
         if agent is not None and getattr(agent, "shadow", None) is not None:
             agent.shadow.observe(state)
         if agent is not None and tick % DECIDE == 0 and tick >= 90:
@@ -873,7 +957,7 @@ def play(args):
                     agent.shadow.own_play(tick + delay, state["players"][hog_team]["hand"][cmd[1]],
                                           cmd[2], cmd[3])
                 card = state["players"][hog_team]["hand"][cmd[1]]
-                mem.record(hog_team, card + 2, tick + runs_after)
+                record(hog_team, card + 2, tick + runs_after)
                 n_agent += 1
         if opponent is not None and tick % DECIDE == 0 and tick >= 90:
             cmd = opponent.act(b, state, ghost_team, mem.view(tick, 0) if legacy else known,
@@ -881,7 +965,7 @@ def play(args):
             if cmd is not None:
                 cmds.append(cmd)
                 card = state["players"][ghost_team]["hand"][cmd[1]]
-                mem.record(ghost_team, card + 2, tick + runs_after)
+                record(ghost_team, card + 2, tick + runs_after)
         nxt = scripted[i][0] if i < len(scripted) else 6000
         step = max(1, min(nxt, (tick // DECIDE + 1) * DECIDE) - tick)
         b.step(cmds, step)
@@ -892,13 +976,18 @@ def play(args):
     real_hog = (("win" if real in ("victory", "win") else "loss" if real in ("defeat", "loss") else "draw")
                 if hog_seat == 0 else
                 ("loss" if real in ("victory", "win") else "win" if real in ("defeat", "loss") else "draw"))
-    return {"tag": p["source"]["replay_tag"], "mode": mode_, "real": real_hog,
-            "game_over": state["game_over"], "end_tick": state["tick"],
-            "result": "win" if w == hog_team else "loss" if w in (0, 1) else "draw",
-            "crowns": [state["players"][hog_team]["crowns"], state["players"][1 - hog_team]["crowns"]],
-            "agent_plays": n_agent,
-            "records": getattr(agent, "records", None),
-            "hog_team": hog_team}
+    out = {"tag": p["source"]["replay_tag"], "mode": mode_, "real": real_hog,
+           "game_over": state["game_over"], "end_tick": state["tick"],
+           "result": "win" if w == hog_team else "loss" if w in (0, 1) else "draw",
+           "crowns": [state["players"][hog_team]["crowns"], state["players"][1 - hog_team]["crowns"]],
+           "agent_plays": n_agent,
+           "records": getattr(agent, "records", None),
+           "hog_team": hog_team}
+    # E17: only for a noisy seat, so the result without noise is the dict of before.
+    for key, team in (("noise", hog_team), ("opponent_noise", ghost_team)):
+        if noises[team] is not None:
+            out[key] = dict(sorted(noises[team].stats.items()))
+    return out
 
 
 def main() -> int:
@@ -943,18 +1032,39 @@ def main() -> int:
                          "default: each checkpoint's own (its vocab 'visibility'; legacy before "
                          "E12). 'legacy' every living unit; 'public' no invisible or hidden "
                          "enemy, in the rows, the rebuilt look-ahead and spell aim")
+    PN.add_noise_args(ap)              # E17: --noise (the agent seat), --noise-only, --noise-seed
+    ap.add_argument("--opponent-noise", default=None, metavar="PROFILE",
+                    help="perception noise of the reactive opponent seat (--opponent-ckpt), as "
+                         "--noise (default: none, it sees the engine's state; --noise-only does "
+                         "not apply to it)")
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
+    mode_ = ("pro" if args.pro else "search_rebuild" if args.search and args.rebuild
+             else "search" if args.search else "agent")
     try:
         cfg = rs_engine.config_from_args(args)
+        noise = PN.profile_from_args(args)                   # None without --noise
+        opp_noise = RR.noise_profile(args.opponent_noise)
+        check_noise_seats(noise, opp_noise, mode_, args.opponent_ckpt, args.shadow)
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
     rs_engine.set_active(cfg)
     import pyarrow.parquet as pq
     royalesim, names, ids, cat = RR._setup(cfg)
-    fp = rs_engine.fingerprint(rs_engine.make_battle(cfg.undelayed(), royalesim), royalesim, cfg)
+    vocab_battle = rs_engine.make_battle(cfg.undelayed(), royalesim)
+    fp = rs_engine.fingerprint(vocab_battle, royalesim, cfg)
     print(f"engine: {cfg.delayed(args.delay).describe()}\n        {rs_engine.summary(fp)}",
           flush=True)
+    for what, prof in (("noise", noise), ("opponent noise", opp_noise)):
+        if prof is None:
+            continue
+        try:        # bound once here, so a profile this engine cannot bind stops the run now
+            model = RR.noise_model(prof, vocab_battle, royalesim.SUBTILE_PER_MILLITILE)
+        except (ValueError, FileNotFoundError) as exc:
+            ap.error(f"--{what.replace(' ', '-')}: {exc}")
+        print(f"{what}: {RR.describe_noise(prof, args.noise_seed)}", flush=True)
+        for name in model.unresolved:
+            print(f"        not bound: {name}", flush=True)
     import rs_checkpoint
     if args.allow_vocab_drift:
         rs_checkpoint.set_allow_drift(True)          # the workers inherit it
@@ -986,15 +1096,18 @@ def main() -> int:
                 break
         if len(picked) >= args.matches:
             break
-    mode_ = ("pro" if args.pro else "search_rebuild" if args.search and args.rebuild
-             else "search" if args.search else "agent")
+    # E17: the noise slots only when a seat has noise, so the tasks are otherwise as before.
+    extra = ()
+    if noise is not None or opp_noise is not None:
+        extra = (None if noise is None else noise.to_dict(),
+                 None if opp_noise is None else opp_noise.to_dict(), args.noise_seed)
     t0 = time.time()
     with ProcessPoolExecutor(args.workers, initializer=rs_engine.set_active,
                              initargs=(cfg.to_json(),)) as pool:
         rows, skipped = split_results(list(pool.map(
             play, [(t, args.ckpt, mode_, k, args.opponent_ckpt, args.delay, args.lead,
                     args.hold_pending, args.shadow, args.spell_aim, cfg.to_json(), args.mem_lag,
-                    args.decide, args.visibility)
+                    args.decide, args.visibility) + extra
                    for k, t in enumerate(picked)])))
     if skipped:
         print(f"  skipped matches: {dict(skipped)} (orient = a side's troop plays are off "
@@ -1014,6 +1127,9 @@ def main() -> int:
             + (f" mem-lag {args.mem_lag}" if args.mem_lag != rs_memory.BOARD_LAG else "")
             + (f" decide {args.decide}" if args.decide != rs_decide.MODE_LEGACY else "")
             + (f" visibility {args.visibility}" if args.visibility is not None else "")
+            + (f" noise {noise.name}" if noise is not None else "")
+            + (f" opponent-noise {opp_noise.name}" if opp_noise is not None else "")
+            + (f" noise-seed {args.noise_seed}" if extra and args.noise_seed else "")
             + (f" vs reactive {Path(args.opponent_ckpt).parent.name}" if args.opponent_ckpt else " vs ghost"))
     real_w = sum(r["real"] == "win" for r in rows)
     print(f"  real result of the Hog player in these matches: {real_w}/{len(rows)} "
@@ -1033,6 +1149,16 @@ def main() -> int:
         record["decide"] = args.decide
     if args.visibility is not None:              # likewise: only when given
         record["visibility"] = args.visibility
+    for key, prof in (("noise", noise), ("opponent_noise", opp_noise)):
+        if prof is None:                         # E17: likewise, only for a noisy seat
+            continue
+        stats: dict = {}
+        for r in rows:
+            RR.merge_stats(stats, r.get(key) or {})
+        record[key] = PN.vocab_entry(prof, args.noise_seed)
+        record[f"{key}_stats"] = dict(sorted(stats.items()))
+        print(f"  {key.replace('_', ' ')}: "
+              + (", ".join(f"{k} {v:,}" for k, v in sorted(stats.items())) or "nothing observed"))
     with out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return 0
