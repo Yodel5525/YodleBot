@@ -128,19 +128,17 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - E13: opponent elixir counter.
 - R03: league pool and deck sampling.
 
-**Batch 3: live path first** (reordered 2026-10-29 to reach a first friendly sooner; in progress)
-- E08: opponent memory updated only when a play lands.
-- E16: one shared class list for vision and the model.
-- V09: detector wrapper and dataset prep that keep the side column.
-- V04: opponent-play detection.
-- V12: takeover toggle.
-- V07: screen readers for clock, elixir, tower HP, hand and HP bars (done, calibrated on the owner's recorded friendly).
-- Then, once batch 2 lands:
-  - V05: screen-to-simulator state converter;
-  - V06: shared decision function;
-  - V10: `scripts/vision_play.py`, the friendly-only live runner;
-  - V11: latency probe;
-  - wiring the new modules into the row builder and the evaluator.
+**Batch 3: live path first** (code done 2026-10-30, not yet run on the PC; PC steps in `docs/SPARRING_RUNBOOK.md` sections 15-18)
+- E08: opponent memory updated only when a play lands (`tools/rs_memory.py`). Wired into the row builder and the evaluator (`--mem-lag`).
+- E16: one shared class list for vision and the model (`data/vision/classes.json`). Wired into the row builder (`rs_rows --units vision`).
+- V04: opponent-play and own-landing detection (`scripts/vision/events.py`).
+- V05: screen-to-simulator state converter (`tools/public_state.py`).
+- V06: shared decision function (`tools/rs_decide.py`); `rs_eval --decide live` uses it.
+- V07: screen readers for clock, elixir, tower HP, hand and HP bars, calibrated on the owner's recorded friendly.
+- V09: detector wrapper and dataset prep that keep the side column. Training pins the weights by SHA-256.
+- V10: `scripts/vision_play.py`, the friendly-only live runner. Dry run by default; `--tap` only while the owner watches; STOP file; `emulator.verify` before the adb shell opens; no tap once the end screen shows.
+- V11 (partial): the latency probe (`tools/latency_probe.py`, the decision-to-board delay D) and offline perception replay with precision and recall (`tools/vision_replay.py`). The noise-profile fit waits for E17's format (batch 5).
+- V12: takeover toggle (F8, an always-on-top control window, a MANUAL file), wired into the runner. The runner starts in MANUAL.
 
 **Batch 4: training-row correctness**
 - E03: fidelity grid.
@@ -155,6 +153,7 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 - E17: perception-noise model.
 - E18: full-corpus memory-mapped training with mirroring.
 - Upgrading V06 to the v2 model.
+- V11 (rest): fit the perception-noise profile from replay errors and the bot's own taps.
 
 **Batch 6: evaluation and RL**
 - L02: general match runner.
@@ -166,11 +165,11 @@ Each change has an ID. Full specs live in the session's plan; one-line summaries
 
 ## First-match milestone (bot plays a friendly against you)
 
-1. **Code:** batches 2 and 3 land on the branch.
-2. **First model, on the PC, about half a day.** Build `--live-compat` rows, where each unit is identified by the card that created it, which is what screen vision can supply. Train the author's token model on them and fine-tune on Hog 2.6.
-3. **Detector, on the PC, overnight (6-10 h GPU).** Train it on the public KataCR detection dataset (`vendor/CR-Detection-Dataset`). Our own friendlies fill gaps later.
-4. **One calibration friendly.** Check the screen geometry and capture the HUD templates (digits, hand-card art).
-5. **Dry-run friendly:** the bot only watches and logs. Then a friendly where it plays, with the takeover toggle available.
+1. **Code:** batches 2 and 3 land on the branch (done).
+2. **First model, on the PC, about half a day** (done 2026-10-29; see Results so far). Build `--live-compat` rows, where each unit is identified by the card that created it, which is what screen vision can supply. Train the author's token model on them and fine-tune on Hog 2.6.
+3. **Detector, on the PC, overnight (6-10 h GPU).** Train it on the public KataCR detection dataset (`vendor/CR-Detection-Dataset`). Our own friendlies fill gaps later. Runbook section 15.
+4. **One calibration friendly.** Check the screen geometry and capture the HUD templates (digits, hand-card art). Runbook section 16.
+5. **Dry-run friendly:** the bot only watches and logs. Then a friendly where it plays, with the takeover toggle available. Runbook sections 17 and 18.
 
 This first version is deliberately simple. It uses landing-time rows and no RL, so expect it to be clearly weaker than the final bot. Batches 4-6 then make it stronger.
 

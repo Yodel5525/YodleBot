@@ -10,7 +10,7 @@ This file covers only what exists on the `sparring` branch today. Steps whose sc
 
 - **Friendly battles only.** You start every battle yourself, from clan chat or a friend's profile. Nothing in this repo presses Battle or queues ladder or any other matchmade mode, and there is no option that would.
 - **The bot account is the second account ("Yodle2").** Never your main account.
-- **Do not run the original author's launchers:** `bot.cmd`, `run.ps1`, `scripts\supervisor.py`, `scripts\mumu_overnight_bot.py`, `scripts\mumu_buildabot_native.py`, `scripts\gamestate\live_play.py`. They can no longer queue (change P03). But they belong to his old pipeline: a rule bot, and a memory reader that is out of scope. The sparring bot's live runner comes in a later batch.
+- **Do not run the original author's launchers:** `bot.cmd`, `run.ps1`, `scripts\supervisor.py`, `scripts\mumu_overnight_bot.py`, `scripts\mumu_buildabot_native.py`, `scripts\gamestate\live_play.py`. They can no longer queue (change P03). But they belong to his old pipeline: a rule bot, and a memory reader that is out of scope. The sparring bot's live runner is `scripts\vision_play.py` (sections 17 and 18).
 - Nothing here starts or restarts MuMu. You start the emulator yourself.
 
 Shorthand used below. Paste it into each new PowerShell window:
@@ -21,14 +21,18 @@ $RG = 'C:\hcr\.venvs\royalegym\Scripts\python.exe'   # engine venv: CPU torch, r
 $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, royalesim, vision
 ```
 
-## Status on this PC (2026-10-29)
+## Status on this PC (2026-10-30)
 
 | Step | State |
 |---|---|
 | 1-4: driver, tools, resources, clone | done; the fork is at `C:\hcr` on `sparring`, with a sparse checkout |
 | 6: venvs | both exist. `royalegym` has royalesim 0.1.42, numpy 2.5.4, pyarrow 26.0.0. `buildabot` has torch 2.14.1+cu130 and torchvision 0.29.1+cu130. Run `setup_windows.ps1` once anyway: it keeps what is right and adds the rest. |
+| 5, 7, 8, 12 | done in the batch 1 first run: setup READY, selfcheck 12/12, tests passing after one fix |
+| 9: account and deck | done: Yodle2, Hog 2.6, all base cards |
 | 11: IL_Replay | done; 104 files, 1,888 MB, hash-checked |
-| 5, 7-10, 12 | to do |
+| 14: first model | done: `runs\tokens\live_big_hog\best.pt` (Hog card 66.8%, tile-within-1 55.7%) |
+| 10, 13 | not reported back. Section 16 covers what step 10 was for. |
+| 15-18: detector, calibration, dry run, first friendly with taps | to do |
 
 ## 1. GPU driver
 
@@ -323,12 +327,362 @@ Each epoch prints `val card ... near ...` and `hog card ... near ...`. The autho
 
 Send back the last lines of each step: the row counts, the per-epoch `val` lines, and both win rates with their intervals.
 
+## 15. Detector (overnight, MuMu closed)
+
+The bot sees units on the board with a YOLO detector. It is trained on the public KataCR detection dataset: about 640 MB of labelled frames from 2024. Our own friendlies fill its gaps later.
+
+**Close MuMu and the browser first.** Training uses the GPU and most of the RAM.
+
+**1. Get the dataset (once).**
+
+```powershell
+cd C:\hcr
+git clone --depth 1 https://github.com/wty-yy/Clash-Royale-Detection-Dataset.git vendor\CR-Detection-Dataset
+Test-Path vendor\CR-Detection-Dataset\images\part2\ClashRoyale_detection.yaml    # must print True
+```
+
+`vendor\` is gitignored. The dataset can also live on another drive: then add `--source D:\datasets\CR-Detection-Dataset` to the next command.
+
+**2. Convert it to the YOLO layout.** This takes a few minutes and writes `tmp\yolo\`:
+
+```powershell
+& $BB scripts\prepare_yolo_dataset.py
+```
+
+The images are hard-linked, not copied, so it needs almost no extra disk. Each class is a unit label plus a side (ally or enemy). It should print 155 labels x 2 sides = 310 classes, then any names the class list does not know.
+
+**3. Train.** This runs overnight, about 6-10 hours on the RTX 4070 SUPER: yolov8s, 640 px, batch 32, up to 150 epochs. It stops early once the score has not improved for 30 epochs.
+
+```powershell
+& $BB scripts\train_detector.py
+```
+
+- The first run downloads the starting weights, `yolov8s.pt` (about 22 MB).
+- `--epochs 60` gives a quicker first model.
+- If the GPU runs out of memory, add `--batch 16`. If RAM runs low, add `--workers 2`.
+- Without CUDA it stops with exit code 2 instead of training on the CPU for days. Then check steps 1 and 6.
+- If the PC restarts during the run, resume it:
+
+  ```powershell
+  & $BB scripts\train_detector.py --model tmp\yolo\runs\cr_detector\weights\last.pt --resume
+  ```
+
+**Where the weights land.** `tmp\yolo\runs\cr_detector\weights\best.pt`, with `best.pt.sha256` next to it and `detector_manifest.json` in the run folder.
+
+When training ends it **pins** best.pt: it writes the path and the SHA-256 to `data\vision\detector_pin.json`. That is how the live runner and the replay tool find the detector:
+- by default they load the pinned file, and refuse it if its SHA-256 has changed;
+- `--detector <file>` uses another file for one run;
+- `& $BB -m scripts.vision.detector pin <file>` pins another file;
+- a new training run pins its own best.pt. `--no-pin` keeps the old pin.
+
+**4. Check it.**
+
+```powershell
+& $BB -m scripts.vision.detector info
+& $BB -m scripts.vision.detector image $I     # $I: one battle frame from a recording (section 16, step 3)
+```
+
+`info` must show:
+- the pinned weights and their `sha256`;
+- `"device_desc": "cuda:0 NVIDIA GeForce RTX 4070 SUPER ..."` and `"half": true`;
+- `"side_mode": "joint"`;
+- an empty `"unresolved_names"`, and no `NOT in the vision class list` line.
+
+`image` lists each detection with its class, confidence, P(enemy) and tile. Our own units should have P(enemy) below 0.5. Nothing should be detected in the card bar.
+
+Send back:
+- the output of `prepare_yolo_dataset`;
+- the first and last 30 lines of the training;
+- `tmp\yolo\runs\cr_detector\results.csv`;
+- the output of `info` and of one `image`.
+
+## 16. Calibration friendly: geometry, HUD and templates
+
+The HUD readers match small crops of the game's own digits and card art, taken from your client. Nothing ships them. Without clock templates the bot cannot read the clock, so it never decides.
+
+You record one friendly, then build everything from the recording. MuMu is only needed for the recording, so this can be done before the detector is trained. If the friendly you recorded on 2026-10-29 is still under `reports\vision\recordings`, you can use it and skip step 2.
+
+**Before the friendly:**
+- MuMu instance: 2-4 cores and 3 GB (step 3).
+- Make the MuMu window as tall as the screen allows. Frames are captured at the window's size: 747x1328 on this PC.
+- Keep the window uncovered. A fully covered window stops updating.
+
+**1. Check the capture.** In the lobby:
+
+```powershell
+cd C:\hcr
+New-Item -ItemType Directory -Force C:\hcr\tmp | Out-Null
+& $BB -m scripts.vision.capture --source auto --seconds 10
+& $BB -m scripts.vision.geometry check --size 747x1328
+```
+
+The first prints the frame size and rate: on this PC `(747, 1328)` at about 57 fps. Give `check` the size it printed. It must say `ok: ... is 9:16 portrait`.
+
+**2. Record one friendly.** Start the recording in the lobby, then start a friendly yourself and play it to the end:
+
+```powershell
+& $BB -m scripts.vision.capture --source auto --seconds 400 --record reports\vision\recordings
+```
+
+It prints `recording to ...\capture_<date>_<time>` and keeps an image every 5 frames. It only reads pixels. During the friendly, try to get:
+- every card in hand at least once, and greyed out (not enough elixir);
+- a frame just after a play, while that slot is empty;
+- damage on several towers, so the tower numbers show many digits;
+- overtime, if the game gets there (optional).
+
+**3. Pick frames.** Set these once in the PowerShell window:
+
+```powershell
+$REC = (Get-ChildItem reports\vision\recordings -Directory | Sort-Object Name | Select-Object -Last 1).FullName
+$IMG = Get-ChildItem "$REC\images" -Filter *.jpg | Sort-Object Name
+$IMG.Count
+explorer "$REC\images"
+```
+
+Find a clear mid-battle frame in Explorer and point `$I` at it, for example `$I = "$REC\images\00001200.jpg"`.
+
+**4. Geometry.** Draw the tile grid on that frame:
+
+```powershell
+& $BB -m scripts.vision.geometry overlay --image $I --out tmp\grid_check.png
+```
+
+Open `tmp\grid_check.png`:
+- the white grid must sit on the arena floor: 18 tiles across, 32 down;
+- the blue lines mark the river;
+- red circles mark the tower centres, the bridge ends and the river's corners at the arena edges;
+- green crosses mark the four card slots.
+
+Taps use this geometry, scaled to the device's 1080x1920. If the grid is off by more than about a quarter tile, refit it:
+
+```powershell
+& $BB -m scripts.vision.geometry template --size 747x1328 --out tmp\points.json
+notepad tmp\points.json      # set each "px" to where that point is on $I; drop points you cannot see
+& $BB -m scripts.vision.geometry fit --points tmp\points.json --out data\vision\geometry_pc.json
+& $BB -m scripts.vision.geometry overlay --image $I --geometry data\vision\geometry_pc.json --out tmp\grid_check_pc.png
+```
+
+Then add `--geometry data\vision\geometry_pc.json` to every `vision_play.py` command in sections 17 and 18.
+
+**5. HUD boxes.**
+
+```powershell
+& $BB -m scripts.vision.hud overlay --image $I --out tmp\hud_check.png
+```
+
+Open `tmp\hud_check.png`:
+- yellow: the clock digits, the "Time left" label, the elixir number and the elixir bar;
+- cyan: the tower numbers and bars;
+- magenta: the four hand cards and the next card.
+
+Each box must cover its number or card. The defaults were measured on your 2026-10-29 frames, so they should fit. If one is off, write your own copy and fix that box:
+
+```powershell
+& $BB -m scripts.vision.hud regions --size 747x1328 --out data\vision\hud_regions_pc.json
+notepad data\vision\hud_regions_pc.json     # fix the "px" box [x0, y0, x1, y1] of the region that is off
+& $BB -m scripts.vision.hud overlay --image $I --out tmp\hud_check.png
+```
+
+The readers use `hud_regions_pc.json` automatically when it exists. Do not edit `hud_regions_1080x1920.json`.
+
+**6. Templates.** Open the frame, read what it shows, and store it. An example frame: the clock at 1:48, 2 elixir, a hand of Log, Hog Rider (greyed), Skeletons and Fireball (greyed), Ice Spirits next, and tower numbers 3052 and 2101 (theirs) and 3052 and 2731 (ours):
+
+```powershell
+& $BB -m scripts.vision.templates digits --image $I --font clock --text 1:48
+& $BB -m scripts.vision.templates digits --image $I --font elixir --text 2
+& $BB -m scripts.vision.templates digits --image $I --font tower --region tower_enemy_left --text 3052
+& $BB -m scripts.vision.templates digits --image $I --font tower --region tower_enemy_right --text 2101
+& $BB -m scripts.vision.templates digits --image $I --font tower --region tower_own_right --text 2731
+& $BB -m scripts.vision.templates hand --image $I --cards Log,HogRider,Skeletons,Fireball --variants base,greyed,base,greyed --next IceSpirits
+& $BB -m scripts.vision.templates label --image $I --label regulation
+```
+
+- Card names are the simulator's: `HogRider`, `Musketeer`, `Cannon`, `IceGolemite`, `IceSpirits`, `Skeletons`, `Fireball`, `Log`. Slots go left to right; `-` skips one.
+- On a frame right after a play: `& $BB -m scripts.vision.templates empty --image $I --slot 2`, with the number (0-3) of the empty slot.
+- In overtime: `& $BB -m scripts.vision.templates label --image $I --label overtime`.
+- `found 5 glyphs ... but the text has 4 characters` means the box or the frame is not clean. Try another frame, or crop by hand with `--box x0,y0,x1,y1`.
+
+Repeat on other frames until this shows `complete` for all three fonts, and `base, greyed` for every card:
+
+```powershell
+& $BB -m scripts.vision.templates list --deck HogRider,Musketeer,Cannon,IceGolemite,IceSpirits,Skeletons,Fireball,Log
+```
+
+The templates are stored under `data\vision\templates\`.
+
+**7. Read the recording back.** This sends 40 frames from the middle of the battle through the HUD readers. `--dt 0.09` is the time between them: one image every 5 frames at 57 fps.
+
+```powershell
+$RUN = ($IMG | Select-Object -Skip 1000 -First 40).FullName
+& $BB -m scripts.vision.hud read --image $RUN --deck HogRider,Musketeer,Cannon,IceGolemite,IceSpirits,Skeletons,Fireball,Log --dt 0.09
+& $BB tools\vision_replay.py $REC --no-detector
+```
+
+- `hud read` prints, per frame: the tick (20 a second, from 0 at 3:00), the elixir in thousandths, the hand, the next card and the tower HP. Compare a few with the images.
+- `vision_replay` runs the whole recording and prints how often the clock, elixir, hand, next card and towers were read.
+- Once the detector is trained (section 15), run `vision_replay` again without `--no-detector`. It adds detections and tracks per frame.
+
+Send back:
+- `tmp\grid_check.png` and `tmp\hud_check.png`;
+- the `templates list` output;
+- both outputs of step 7.
+
+## 17. Dry-run friendly (the bot watches, no taps)
+
+`scripts\vision_play.py` is the live runner. It runs the whole chain on the screen: capture, HUD, detector, tracker, the model and the decision. By default it taps nothing. It never presses Battle, OK or anything outside the arena, and it never starts or restarts MuMu.
+
+You need:
+- the detector pinned (section 15);
+- the templates complete (section 16);
+- `runs\tokens\live_big_hog\best.pt` (section 14);
+- MuMu at 2-4 cores and 3 GB, with its window large and uncovered.
+
+**1. Tests and controls.** After `git pull`:
+
+```powershell
+& $RG -m pytest tests/pipeline -q
+& $BB -m pytest tests/pipeline -q
+& $BB -m scripts.vision.control --seconds 60
+```
+
+The last one tries the takeover controls without a battle. It never taps. Press F8 a few times, click the button in the small "Sparring bot" window, and create then delete `C:\hcr\MANUAL`. Each switch prints a line such as `MANUAL -> AUTO (hotkey)`.
+
+**2. Replay the recording first (MuMu not needed).** This runs the runner on the friendly you recorded in section 16. On a recording, taps are always refused.
+
+```powershell
+$REC = (Get-ChildItem reports\vision\recordings -Directory | Sort-Object Name | Select-Object -Last 1).FullName
+& $BB scripts\vision_play.py --source $REC --no-window
+```
+
+It should start battle 1 a second after the clock runs, and print decisions in the status line (below).
+
+**3. The dry-run friendly.** Start the runner in the lobby, then start a friendly yourself and play it with the mouse as usual:
+
+```powershell
+& $BB scripts\vision_play.py --seconds 600
+```
+
+It first prints its setup. Check these lines:
+- `detector` names the pinned `best.pt` on `cuda:0`. `NONE (...)` means no detector: the board stays empty for the model.
+- `hud        clock templates ok`. `MISSING` means section 16 is not done, and the bot never decides.
+- `taps       off (dry run: no --tap)`.
+- `hotkey     on: F8` and `window     on`.
+
+Then it prints a status line every second, for example:
+
+```
+[battle 1] tick 1440 | elixir 2.3 | hand Log/HogRider/Skeletons/Fireball next IceSpirits | MANUAL | last Skeletons -> (8, 22) [manual] @1436 | 31 fps, 0 taps
+```
+
+| Part | Meaning |
+|---|---|
+| `[battle 1]` | in battle 1. Outside a battle: `[menu]`, `[end]` (the end screen), or `[battle]` (a battle screen before the clock has run for a second) |
+| `tick 1440` | the battle clock in ticks: 20 a second, from 0 at 3:00 (1:48 left is 1440). `OT` in overtime; `-` when the clock is not read |
+| `elixir 2.3` | our elixir |
+| `hand ... next ...` | the hand, left to right, and the next card. `?` is a slot it cannot read. |
+| `MANUAL` | who plays: `MANUAL` (you), `AUTO(dry)` (the bot, without `--tap`), `AUTO(tap)` (the bot taps), `STOPPED` |
+| `last ...` | the bot's last play: card, screen tile, what happened, and the tick. The tile is x 0-17 from the left and y 0-31 from the top; our half is y 17-31. `manual` is a suggestion only, `dry` would have played, `tap` tapped, `dropped` means the mode switched first. |
+| `31 fps, 0 taps` | frames processed per second, taps sent, and the error count if there are errors |
+
+During the battle:
+- Check that the hand, the elixir and the clock match the screen.
+- Press F8 once. The status shows `AUTO(dry)` and the decisions become `[dry]`. Nothing is tapped. Press F8 again to go back to `MANUAL`.
+- The control window shows the bot's suggestion while you play. Your own plays are logged next to what the bot would have played.
+- A `battle 1 over (clock reset)` line in the middle of the battle means a misread clock. Note when it happened.
+
+At the end it prints `battle 1 over (end screen) at tick ...` and then `battle 1: WIN 2-1 (...); record 1-0-0 (W-L-D)`. After 600 s it stops with `stopped: 600 s; ... frames, 0 taps, ...`. Ctrl+C stops it earlier.
+
+Everything goes to `reports\vision_play\vision_play_<date>_<time>\frames.jsonl`, with an image every 20 recorded frames.
+
+**4. Latency.** It reads the log only; MuMu is not needed:
+
+```powershell
+& $BB tools\latency_probe.py --last 1 --json reports\vision\latency_dryrun.json
+```
+
+It prints the time of each stage (stale, perceive, decide, capture to decision) as median and p90 in ms, the frame rate, and how often the bot decided. `D: not measured` is expected here: D needs taps (section 18).
+
+Send back:
+- the setup lines;
+- about ten status lines spread over the battle;
+- the battle and result lines, and the `stopped:` line;
+- the latency probe output;
+- anything that did not match the screen.
+
+## 18. First friendly with taps (you watch the whole time)
+
+Only while you sit at the PC and watch MuMu for the whole battle. Tell your clanmate it is a bot test.
+
+You need:
+- a clean dry run (section 17): clock, hand and elixir read right, sensible suggestions, no errors;
+- MuMu at 1080x1920 with no override size (step 7). The runner checks `wm size` and refuses another size;
+- no `C:\hcr\STOP` file. The runner will not start while it exists.
+
+**1. Start it in MANUAL.** In the lobby:
+
+```powershell
+& $BB scripts\vision_play.py --tap --battles 1
+```
+
+Before it opens the adb shell, `scripts\emulator.py` must confirm that the serial is the Clash Royale instance. The setup must then show `taps       ON (verified Clash Royale instance)`. If it prints `refusing to tap: ...`, nothing is tapped: send that line back.
+
+It starts in **MANUAL**: it watches and suggests, but does not tap.
+
+**2. Hand over with F8.** Start the friendly yourself. Once the status line shows `[battle 1]` and the clock is running, press **F8**, or the window's "Hand back to the bot" button:
+- The window turns green, `AUTO: the bot plays`, and the status shows `AUTO(tap)`.
+- Each play is two taps: the card, then the tile.
+- **To take over,** press F8 again. The window turns orange, `MANUAL: you play`. A tap the bot already decided is dropped. Press F8 to hand back.
+- Keep your hands off MuMu while the bot plays. Press F8 first.
+- The `MANUAL` file does the same from a console: `New-Item -ItemType File -Force C:\hcr\MANUAL` switches to MANUAL, and `Remove-Item C:\hcr\MANUAL` back to AUTO.
+- While the runner runs, F8 belongs to it: other programs do not get the key.
+
+**3. Stop.** Any of these works, in any mode:
+- Ctrl+C in the runner's window;
+- the STOP file, from a second PowerShell window:
+
+  ```powershell
+  New-Item -ItemType File -Force C:\hcr\STOP | Out-Null
+  ```
+
+  The runner ends. Delete the file before the next run: `Remove-Item C:\hcr\STOP`.
+
+With `--battles 1` it also stops by itself after the result of the first battle.
+
+**4. Watch the whole time:**
+- The first taps: the card and tile the status line names must be what lands. Taps go to device pixels (1080x1920) through one adb shell.
+- The end: the runner only taps while the battle screen is up, and it never presses OK. You press OK yourself. If a tap lands after the clock has stopped, press F8 and send it back.
+- A `battle 1 over (clock reset)` line in the middle of a battle is a misread clock: send it back.
+- Do not watch replays or spectate clan battles while the runner runs with `--tap`. Stop it first.
+
+**5. The real delay.** After the battle:
+
+```powershell
+& $BB tools\latency_probe.py --last 1 --json reports\vision\latency.json
+```
+
+`D = N ticks` is the delay from the bot's decision to its unit on the board, measured on this PC. The simulator evaluation in section 14 assumed 21 ticks. D needs at least 5 troop or building plays by the bot; with fewer, it says so.
+
+Send back:
+- the setup lines;
+- the status lines around the first taps and around each F8;
+- the result line and the `stopped:` line;
+- `reports\vision\latency.json`;
+- what you saw.
+
+Later, once you trust it:
+- `--start-mode auto` starts with the bot in control;
+- leaving out `--battles` keeps it running across several friendlies. STOP or Ctrl+C ends it.
+- The mode carries over from one battle to the next. If it is AUTO when a friendly starts, the bot plays it. Press F8 between battles if you want to start the next one yourself.
+
+Do not commit `reports\vision_play\`, `reports\vision\`, `STOP` or `MANUAL`. They are not gitignored, and the recordings show account names.
+
 ## If something breaks
 
 Paste these back to the cloud session:
 - the full error;
 - `& $BB scripts\selfcheck.py --json`;
-- `reports\freeze-royalegym.txt` and `reports\freeze-buildabot.txt`.
+- `reports\freeze-royalegym.txt` and `reports\freeze-buildabot.txt`;
+- for the live runner: its console output, and the session folder name under `reports\vision_play\`.
 
 ## Later steps (coming in a later batch)
 
@@ -338,6 +692,6 @@ These need code that is not on the branch yet. Each one gets exact commands here
 |---|---|---|
 | 2. Engine re-baseline | spawn tables for both card tables; then a fidelity grid over 2,000 validation matches (`tools/rs_fidelity_grid.py`), which picks the RoyaleSim card table and writes `data/engine.json` | E01, E03, E06 |
 | 4. Decision-time models | v2 rows on the vision class list, with delay and noise; memory-mapped training; the league evaluation | E11-E18, L01-L03 |
-| 5. Screen perception | detector dataset and training; HUD readers (clock, elixir, tower HP, hand) | V07, V09 |
-| 6. Live friendlies | `scripts/vision_play.py`: dry run by default; `--tap` only while you watch; stops when `C:\hcr\STOP` exists. Plus a latency probe to measure the real delay. | V04-V06, V10, V11 |
+| 5. Screen perception, second pass | label frames from our own friendlies for the cards and forms the KataCR dataset lacks, then score the detector on them (`tools/vision_replay.py --labels`); fit the perception-noise profile used in training (`tools/fit_noise_profile.py`) | V11 (rest), E17 |
+| 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows and the measured delay D | E11, E14, E15, E18, the V06 upgrade |
 | 7. RL fine-tuning | the RL driver with gating and resume (`tools/rl/train_loop.py`); runs for days with MuMu closed | R01-R05 |
