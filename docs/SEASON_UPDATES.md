@@ -558,6 +558,98 @@ The other new relations wait for detector labels: the evolved Witch's interval s
 - **Spawns RoyaleSim's extractor drops:** the Dragon Egg's extra death spawns and `GoblinPartyHut` -> `GoblinBrawler`.
 - **The Lumberjack's bottle**, boxed as Rage. Check it on frames first.
 
+### 8.2 Spell plays (2026-10-30)
+
+On the PC, `tools/vision_replay.py` ran on the 2026-10-29 friendly (`capture_20261029_195831`) with the pinned detector (`7a1acec2c94c`, conf 0.35). It found 46 opponent plays and **0 spell plays**. The main account cast Zap and Freeze several times. Yodle2 cast the Log 5 times and Fireball once, as read from the hand. Lines are cited at 88ec08f.
+
+**The detector misses them. The event code does not drop them.**
+- In 2,467 battle frames there is no Zap or Freeze box on either side, and no enemy-side spell box of any class.
+- All 162 spell boxes are Yodle2's: Log 152, Fireball 10, every one at side_prob 0.10. They make 6 casts, and these match the hand's 6 spell plays.
+- No enemy spell was boxed as a unit instead:
+  - on our 747-px frame a Zap is about 175 px wide and a Freeze about 210 px. KataCR's boxes are 0.27 and 0.33 of its arena-wide images, so 4.9 and 6.0 tiles, the two spells' diameters; a tile is 35.3 px here;
+  - every box other than our Log (197 px) and Fireball (180 px), the towers and the UI text is 118 px or less (Hog Rider, Skeleton King);
+  - the enemy look-alikes are smaller still: Electro Spirit 61 px, Ice Spirit 63, Electro Wizard 84, Ice Wizard 93.
+- KataCR has almost nothing to learn from. Its enemy-side boxes (`annotation_v0.14.csv`; NEW_CARDS_PLAN 1.5):
+  - Zap: 6, one image for each of 6 casts;
+  - Freeze: 12, consecutive images of a single cast;
+  - Royal Delivery 9, Lightning 9, Rocket 20, Arrows 27.
+
+  Neither Zap nor Freeze has any ally-side box. Yodle2's deck has neither card, so the ally side is not needed: the tracker puts any label outside our deck on the enemy team (`scripts/vision/tracker.py:414`).
+- The event code handles an enemy spell track once there is one. The tracker may not make one (see the watch points below).
+  - the detector names a spell box by its card (`scripts/vision/detector.py:592-593`);
+  - the event tables map Zap and Freeze to their cards;
+  - the opponent-play guards of commit 522c70c skip spells (`scripts/vision/events.py:1233`, `:1245`, `:1325`, `:1466`).
+- A re-implementation of the deriver on the recorded tracks gives:
+  - with the guards off: 103 opponent plays, 0 spells;
+  - with the guards on: 46 opponent plays, 0 spells.
+
+  Both runs keep our 6 casts as our own plays. Nothing in `events.py` explains the 0. It has one spell weakness of its own, the 20-tick merge window (below).
+
+**How the capture plan covers it.**
+- **Who casts.** Rule 3 of NEW_CARDS_PLAN 4.2 casts every spell at least 4 times per friendly, on groups and on empty ground. The main account casts them, so they land on the enemy side, the side the live bot needs.
+- **Which friendlies count.**
+  - Tier 1 decks have 4 friendlies each and Tier 2 decks have 3.
+  - Friendly 2 of each deck is gold; deck A's friendly 4 is dev.
+  - Round 0 is gold and natural.
+
+| Spell | Decks | Training casts, at least | Gold |
+|---|---|---|---|
+| Zap | C, G (and J, optional: the Zap evo) | 20 (28 with J) | C2, G2 (8 casts; 12 with J2) and Round 0 |
+| Freeze | I | 8 | I2 (4 casts) and Round 0 |
+| Rocket | A, F | 16 (and 4 in A's dev friendly) | A2, F2 (8) |
+| Lightning | B | 12 | B2 (4) |
+| Royal Delivery | D | 8 | D2 (4) |
+| Arrows | D (and J, optional) | 8 (16 with J) | D2 (4; 8 with J2) |
+
+KataCR has 6 Zap casts and 1 Freeze cast.
+
+**Watch these points while labelling and gating:**
+- **A Zap or Freeze can be missing from the sheet, or hidden in a unit's track.**
+  - KataCR boxes each Zap on a single image, so the flash is brief. The sheet shows only harvest tracks of 4 recorded images or more (`FlagConfig.min_images`, `scripts/vision/unit_harvest.py:1908`). At `--image-every 3` (about 19 images a second) that is 0.21 s; on Round 0 (11.4 battle images a second) it is 0.35 s.
+  - The harvest tracker pairs by position only (`class_cost` 0, `team_cost` 0, `min_hits` 1; `unit_harvest.py:264-271`). A Zap or Freeze over a unit can join that unit's harvest track, so watch the S4 (label flicker) and S7 (split) flags.
+  - A Freeze covers about 28 square tiles, close to the blob cap of 32 (`blob_max_tiles`, `unit_harvest.py:303`). One with no detector box even at conf 0.05 may not be proposed at all.
+
+  The last two follow from the settings and were not run. If a Round 0 Zap or Freeze cast is not on the sheet, add the play by hand (`plays ... --add-play`). If the conf-0.05 check below prints `none`, the C, G and I friendlies may need their Zap and Freeze boxes drawn by hand.
+- **Spells do not gate.** The gate checks per-card play recall only for new cards (`tools/vision_gap_eval.py:1488`), and every spell named here already has a label. Read the spells' `per_card` rows in the gate report, on Round 0 (Yodle2 cast the Log 5 times and Fireball once) and on the first live spar. Check two points:
+  - recall on the gold casts;
+  - no phantom enemy Zap, Freeze, Rocket, Barbarian Barrel, Arrows or Lightning on our Ice Spirits, Ice Golem, Log or Fireball. KataCR has these spells on the enemy side only, or almost only (ally/enemy boxes: rocket 0/20, barbarian-barrel 0/76, arrows 3/27, lightning 0/9). The deck rule puts any of them on the enemy, and spells skip the guards, so one misread is a full-cost enemy play: our Fireball read as Rocket charges the opponent 6 elixir.
+
+  A list of thin or look-alike spells that do gate (a `GateConfig` field in `vision_gap_eval.py`) would be a follow-up.
+- **The tracker trades boxes between spell and unit tracks** (not changed here). The association pairs by position first: the Hungarian solver maximises the number of pairs (`tracker.py:146-148`), and a label mismatch costs only `class_cost` 0.5. So any track within its gate takes a spare box of the other kind.
+  - **Synthetic enemy spell boxes on this recording:**
+    - one-frame Zap: never becomes a track. It needs `min_hits` 2 sightings within 6 ticks (`tracker.py:231-232`), so 0 of 24 placements became a play;
+    - Zap seen on 2-4 frames over a detected unit: 18 of 24 became plays;
+    - Zap over an undetected unit within 1.5 tiles: 0 of 24;
+    - Freeze over a detected unit: 6 of 8;
+    - Freeze over an undetected unit: 0 of 8.
+  - **On the recording, with the pinned model and our own Log** (cast at tick 3569 in front of our left princess tower):
+    - **A spell track took a unit.** Our Log track (uid 385) took the boxes of the Cannon we put down next to it at tick 3599. It turned Cannon at 3626 and carried it to about tick 4100. That Cannon got no own play, guards on or off: the own Cannon plays are at 468, 1368, 2623, 2859, 3309 and 4250. With `--tap`, the bot's Cannon tap would go unmatched, and the board's Cannon would carry the Log's first sighting.
+    - **A unit track took a spell and changed team.** The enemy Hog Rider track (uid 383) took the rolling Log's boxes. It turned Log at 3589 and flipped to our team at 3597, so the Hog left the board. When the Hog was boxed again (tick 3668, uid 391), the legacy rules counted it as a second Hog Rider play; LIVE_GUARDS drops it as young.
+  - **Fix now, as a `tracker.py` task, not after the first spell fine-tune.** Yodle2 casts the Log about 5 times a battle, mostly in front of our own towers, where our Cannon also goes.
+    - **Forbid unit-spell pairs.** The Tracker has no notion of a label's kind today: it takes only `own_classes` and `similarity`, and `_class_sim` feeds a soft cost. Give it a `spell_classes` argument built from the ClassTable (the spell cards' names and their KataCR labels). Wire it at the three call sites (`scripts/vision_play.py:1875`, `tools/vision_replay.py:1237`, `scripts/vision/unit_harvest.py:4113`). `_cost` (`tracker.py:462`) then returns FORBIDDEN when exactly one of the track's label and the box's label is a spell. That covers both cases above.
+    - **Short spells.** Report a spell from its first sighting only above a confidence floor, and keep `min_hits` 2 below it. Spells skip the opponent-play guards, so a single false enemy spell box would otherwise be a full-cost play.
+    - **End-to-end tests through the real Tracker and deriver:** an enemy Zap over an undetected Skeleton becomes one enemy play, and our Log next to our new Cannon gives one Log play and one Cannon play.
+- **A spell seen in two flashes more than 20 ticks apart counts twice** (an `events.py` task, not changed here).
+  - Spells merge into a play only within `play_window_ticks` 20 of its last sighting (`events.py:1513`). Same-label re-ID allows 1200 mt plus 50 mt per tick gone (`events.py:725-727`).
+  - On this recording our first Log (tick 1781) was lost for 21 ticks, one over the window. Re-ID kept it one play because the Log had moved only about 1,500 mt, inside the 2,250 mt that re-ID allows after 21 ticks.
+  - A rolling Log moves 135-175 mt a tick on this recording, so a gap of 21-30 ticks mid-roll fails both rules. For the enemy that makes a second spell play. It skips every guard (`events.py:1233`, `:1245`) and the elixir counter charges it in full again (`tools/public_state.py:820-835`).
+  - Fix: give spells their own merge window from the last sighting (40-60 ticks; a card comes back only after four other plays), or a per-spell re-ID speed. Test it with an enemy Log seen in two flashes 25 ticks and about 3,500 mt apart, which must stay one play.
+  - No test runs an enemy spell through the real Tracker today: `test_with_the_real_tracker` in `tests/pipeline/test_events.py` uses units only.
+- **Checks on the PC** (GPU, each about the time of a replay). `$REC` is the Round 0 recording, as in SPARRING_RUNBOOK section 17 (line 599); use its copy under `reports\vision\gold\` if it has been moved.
+
+  ```powershell
+  $REC = 'C:\hcr\reports\vision\recordings\capture_20261029_195831'
+  & $BB tools\vision_replay.py $REC --out tmp\replay_pinned
+  & $RG -c "import json,sys,glob,collections; f=sorted(glob.glob(sys.argv[1]+'/*/frames.jsonl'))[-1]; S=set(sys.argv[2].split(',')); L=collections.defaultdict(set); [L[t['uid']].add(t['cls']) for l in open(f, encoding='utf-8') for t in (json.loads(l).get('frame') or {}).get('tracks') or []]; print(f, {u: sorted(v) for u, v in L.items() if v & S and v - S} or 'none')" tmp\replay_pinned 'Arrows,BarbLog,Fireball,Freeze,Lightning,Log,Rocket,RoyalDelivery,Zap'
+  & $BB tools\vision_replay.py $REC --conf 0.05 --max-det 300 --out tmp\replay_conf05
+  & $RG -c "import json,sys,glob,collections; f=sorted(glob.glob(sys.argv[1]+'/*/frames.jsonl'))[-1]; c=collections.Counter(); [c.update((d['cls'], 'enemy' if d['side_prob']>0.5 else 'ally') for d in (json.loads(l).get('frame') or {}).get('detections') or [] if d['cls'] in sys.argv[2].split(',')) for l in open(f, encoding='utf-8')]; print(f, dict(c) or 'none')" tmp\replay_conf05 'Zap,Freeze'
+  ```
+
+  - The first replay should print the same `events: 46 opponent plays` and `enemy tracks: 46 plays (0 spells)` as before.
+  - The line after it lists the tracks that carried both a spell label and another label. On the sandbox copy of the replay it prints two: `['Giant', 'HogRider', 'Log']` (uid 383) and `['Cannon', 'Log']` (uid 385).
+  - The last line counts low-confidence Zap and Freeze boxes. `none` means the pinned model has no signal for either spell. Keep the quotes around `'Zap,Freeze'`: a bare `Zap,Freeze` is a PowerShell array, which reaches Python as two arguments.
+  - `--max-det 300` keeps weak boxes that the 150-box cap would cut at conf 0.05. If the Round 0 harvest scan has run, its `scan_frames.jsonl` already keeps every box at conf 0.05 or more.
+
 ## 9. Fidelity
 
 **The grid** (`tools/rs_fidelity_grid.py`) re-drives IL_Replay val matches and scores winner and exact-crown agreement. Its target is `TARGET_WINNER = 0.626` (`:79`).
