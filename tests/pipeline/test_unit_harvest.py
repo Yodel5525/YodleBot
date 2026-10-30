@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -568,3 +569,273 @@ def test_scan_of_moving_squares_on_a_synthetic_arena(tmp_path):
     json.dumps(s)
     with pytest.raises(UH.ScanError, match="already holds a scan"):
         UH.scan_recording(session, None, live=live, low_pass=low, log=lines.append)
+
+
+# ---------------------------------------------------------------------------
+# N10: the flags, the look split, clustering, the sheet
+# ---------------------------------------------------------------------------
+
+E_TEAM, O_TEAM = 0, 1                               # RoyaleSim teams: ENEMY_TEAM, OWN_TEAM
+DECK10 = [("Knight", 0), ("Valkyrie", 0), ("BabyDragon", 1), ("HogRider", 0), ("Zap", 0), ("Goblinstein", 0),
+          ("Vines", 0), ("Arrows", 0)]
+
+
+def unit_box(x, y, half=7.0, height=14.0):
+    gx, gy = (float(v) for v in GEOM.world_to_px(x, y, SIZE))
+    return [round(gx - half, 1), round(gy - height, 1), round(gx + half, 1), round(gy, 1)]
+
+
+class Scene:
+    """Hand-made scan records (scan_frames.jsonl shape) and the scan's tracks.json, built with
+    the real HarvestTrack: harvest tracks as proposals, the live detections that joined them,
+    enemy stopwatches (harvest 'clock' boxes) and the live chain's tracks."""
+
+    def __init__(self, frames=40):
+        self.recs = [{"n": n, "i": n, "image": f"images/{n:08d}.npy", "t": round(n * 0.05, 4), "screen": "battle",
+                      "size": list(SIZE), "seg": 1, "battle": 1, "hk": 1, "epoch": None, "live": [], "raw": [],
+                      "plays": [], "props": [], "blobs": [], "tracks": []} for n in range(frames)]
+        self.live = {}
+
+    def track(self, h, frames, x, y, *, cands=(), live=None, src="det", dy=0.0, ys=None):
+        """live: {cls (or one class per image), team, how, card_name, conf, uid}."""
+        lk = None
+        if live is not None:
+            uid = live.get("uid", h)
+            lk = f"1:{uid}"
+            self.live[lk] = {"first_t": 0.0, "last_t": 1.0, "frames": len(frames), "cls": {}, "team": live["team"],
+                             "how": live.get("how"), "card": live.get("card", 1), "card_name": live.get("card_name"),
+                             "forms": {"0": len(frames)}}
+        for j, n in enumerate(frames):
+            yy = (y + dy * j) if ys is None else ys[j]
+            box = unit_box(x, yy)
+            p = {"box": box, "src": src, "type": "unit" if src != "blob" else "blob", "conf": 0.5,
+                 "cands": [list(c) for c in cands], "blob": None, "live": None, "live_cls": None,
+                 "x": int(x), "y": int(yy), "h": h}
+            if live is not None:
+                cls = live["cls"][j] if isinstance(live["cls"], list) else live["cls"]
+                p["live"], p["live_cls"] = [1, live.get("uid", h)], cls
+                self.recs[n]["live"].append([live.get("uid", h), cls, "unit", live.get("conf", 0.8), 0.9, 0, *box])
+                self.live[lk]["cls"][cls] = self.live[lk]["cls"].get(cls, 0) + 1
+            self.recs[n]["props"].append(p)
+
+    def clock(self, frames, x, y, conf=0.6):
+        gx, gy = (float(v) for v in GEOM.world_to_px(x, y, SIZE))
+        for n in frames:
+            self.recs[n]["raw"].append(["clock", "clock", 1, conf, gx - 5, gy - 26, gx + 5, gy - 16, "ui", 0, int(x), int(y)])
+
+    def harvest_tracks(self):
+        out = {}
+        for r in self.recs:
+            for k, p in enumerate(r["props"]):
+                ht = out.setdefault(p["h"], UH.HarvestTrack(p["h"], 1))
+                ht.add(r["n"], k, r["t"], UH.Proposal.from_dict(p))
+        return [out[h].to_dict() for h in sorted(out)]
+
+    def scan(self, out_dir, epochs=()):
+        return UH.ScanResult(Path(out_dir), {"session_dir": str(out_dir), "meta": {}, "epochs": list(epochs)},
+                             self.harvest_tracks(), self.live)
+
+
+def flag_scene():
+    s = Scene(40)
+    s.track(1, range(0, 30), 1500, 4000, cands=[("Knight", 1, 0.8)], dy=50,
+            live=dict(cls="Knight", team=E_TEAM, how="play", card_name="Knight"))          # clean: auto-accepted
+    s.track(2, range(0, 10), 4000, 24000, src="blob")                                      # a bare blob: S1
+    s.track(3, range(0, 12), 6500, 4000, cands=[("Valkyrie", 1, 0.5)],
+            live=dict(cls="Valkyrie", team=E_TEAM, how="unknown", card_name="Valkyrie"))   # S2
+    s.track(4, range(0, 12), 9000, 4000, cands=[("Giant", 1, 0.5)],
+            live=dict(cls="Giant", team=E_TEAM, how="play", card_name="Giant"))            # S3: not the deck
+    s.track(5, range(0, 20), 11500, 4000, cands=[("Knight", 1, 0.5)],
+            live=dict(cls=["Knight", "Valkyrie"] * 4 + ["Knight"] * 12, team=E_TEAM, how="play",
+                      card_name="Knight"))                                                 # S4: 16 / 4
+    s.track(6, range(0, 10), 9000, 16000, cands=[("Knight", 1, 0.5)],
+            live=dict(cls="Knight", team=E_TEAM, how="play", card_name="Knight"))          # S5: 10 on the water
+    s.track(7, range(0, 10), 6500, 16000, cands=[("HogRider", 1, 0.5)],
+            live=dict(cls="HogRider", team=E_TEAM, how="play", card_name="HogRider"))      # a river jumper
+    s.track(8, range(0, 10), 11500, 16000, cands=[("Knight", 1, 0.5)], ys=[16000] * 5 + [12000] * 5,
+            live=dict(cls="Knight", team=E_TEAM, how="play", card_name="Knight"))          # 5 on the water: no S5
+    s.track(9, range(0, 10), 1500, 9000, cands=[("Knight", 1, 0.5)],
+            live=dict(cls="Knight", team=E_TEAM, how="child", card_name="Knight"))
+    s.clock(range(0, 4), 1500, 9000)                                                      # S6: no play matches
+    s.track(10, range(0, 10), 6500, 9000, cands=[("Knight", 1, 0.5)],
+            live=dict(cls="Knight", team=E_TEAM, how="play", card_name="Knight"))
+    s.clock(range(0, 4), 6500, 9000)                                                      # matched: a play
+    s.clock(range(20, 24), 16000, 28000)                                                  # nothing under it
+    s.track(11, range(0, 12), 9000, 26000, cands=[("HogRider", 0, 0.9)],
+            live=dict(cls="HogRider", team=O_TEAM, how="landing", card_name="HogRider"))   # ours: left out
+    s.track(12, range(0, 3), 11500, 26000, src="blob")                                     # too short
+    s.track(13, range(0, 12), 14000, 9000, cands=[("Giant", 1, 0.9)])                      # enemy look, our live track
+    for n in range(6):
+        p = next(p for p in s.recs[n]["props"] if p["h"] == 13)
+        p["live"], p["live_cls"] = [1, 113], "HogRider"
+        s.recs[n]["live"].append([113, "HogRider", "unit", 0.6, 0.2, 0, *p["box"]])
+    s.live["1:113"] = {"first_t": 0.0, "last_t": 0.3, "frames": 6, "cls": {"HogRider": 6}, "team": O_TEAM,
+                       "how": "landing", "card": 1, "card_name": "HogRider", "forms": {"0": 6}}
+    return s
+
+
+def test_flags_on_hand_made_tracks(tmp_path):
+    s = flag_scene()
+    grey = np.full((SIZE[1], SIZE[0], 3), 100, np.uint8)
+    lines = []
+    an = UH.analyze_scan(s.scan(tmp_path), deck=DECK10, table=TABLE, geometry=GEOM, frames=s.recs,
+                         load=lambda p: grey, log=lines.append)
+    got = {p.key: (p.side, sorted(p.flags), None if p.auto is None else p.auto["cls"]) for p in an.parts}
+    assert got == {
+        "1": ("enemy", [], "Knight"), "2": ("unknown", ["S1"], None), "3": ("enemy", ["S2"], None),
+        "4": ("enemy", ["S3"], None), "5": ("enemy", ["S4"], None), "6": ("enemy", ["S5"], None),
+        "7": ("enemy", [], "HogRider"), "8": ("enemy", [], "Knight"), "9": ("enemy", ["S6"], None),
+        "10": ("enemy", [], "Knight"), "13": ("enemy", ["S1"], None)}
+    by = an.by_key()
+    assert by["2"].flags["S1"] == "no live track" and by["13"].flags["S1"] == "the live chain made it ours (HogRider)"
+    assert by["3"].flags["S2"] == "Valkyrie unknown" and by["4"].flags["S3"] == "card Giant"
+    assert by["5"].flags["S4"] == "Knight 16 / Valkyrie 4" and by["6"].flags["S5"] == "10 images on the water as Knight"
+    assert by["9"].flags["S6"].startswith("stopwatch at 0.0 s") and "no live play" in by["9"].flags["S6"]
+    assert by["1"].auto == {"cls": "Knight", "form": 0, "type": "unit"} and by["1"].read["cover"] == 1.0
+    assert (by["1"].read["live"], by["1"].read["how"], by["1"].read["card"], by["1"].read["conf"]) == (
+        "Knight", "play", "Knight", 0.8)
+    assert by["1"].cands == [("Knight", 0.8)] and by["5"].live_classes == [("Knight", 0, 16), ("Valkyrie", 0, 4)]
+    assert by["1"].crop_n == [0, 20, 14] and by["1"].birth == (1500, 4000) and by["2"].read["cover"] == 0.0
+    st = an.stats
+    assert (st["ally"], st["short"], st["side_enemy"], st["side_unknown"], st["parts"]) == (1, 1, 10, 1, 11)
+    assert (st["auto"], st["flagged"], st["markers"], st["markers_matched"], st["markers_orphan"]) == (4, 7, 3, 1, 1)
+    assert [(m["matched"], m["under"]) for m in an.markers] == [(False, [9]), (True, [10]), (False, [])]
+    assert an.markers[1]["why"] == "live track 1:10 is a play"
+    assert any(line.startswith("  analysis: 11 enemy or unknown-side tracks") for line in lines)
+    assert set(an.crops) == set(by) and all(len(c) == 3 and c[0].shape == (72, 72, 3) for c in an.crops.values())
+    # a play reported near the stopwatch also matches it; a deck with Giant clears S3
+    s.recs[2]["plays"].append({"card": 5, "tick": 40, "x_mt": 1500.0, "y_mt": 9000.0, "kind": "unit", "uids": [],
+                               "card_name": "Knight"})
+    an2 = UH.analyze_scan(s.scan(tmp_path), deck=DECK10[:-1] + [("Giant", 0)], table=TABLE, geometry=GEOM,
+                          frames=s.recs, load=lambda p: grey, log=lines.append)
+    assert "S6" not in an2.by_key()["9"].flags and an2.markers[0]["why"] == "play Knight at 0.1 s"
+    assert an2.by_key()["4"].flags == {} and an2.by_key()["4"].auto["cls"] == "Giant"
+
+
+def test_track_side_and_the_deck_context():
+    own = TABLE.deck_labels(UH.DEFAULT_OUR_DECK)
+    live = {"1:1": {"team": E_TEAM}, "1:2": {"team": O_TEAM}}
+    assert UH.track_side({"cands": {"Giant@ally": {"sum": 2.0}}, "live": {}}, live, own)[0] == "enemy"
+    assert UH.track_side({"cands": {"HogRider@ally": {"sum": 2.0}, "HogRider@enemy": {"sum": 1.0}}}, live, own) == (
+        "ally", 1.0, 2.0)
+    assert UH.track_side({"cands": {}, "live": {"1:1": 3, "1:2": 2}}, live, own) == ("enemy", 3.0, 2.0)
+    assert UH.track_side({"cands": {}, "live": {}}, live, own)[0] == "unknown"
+    ctx = UH.DeckContext.build(TABLE, DECK10)
+    assert ctx.problem("Knight", 0, "Knight") is None and ctx.problem("BabyDragon", 1, "BabyDragon") is None
+    assert ctx.problem("Knight", 1, "Knight") == "the evo form of Knight"            # a base slot
+    assert ctx.problem("Giant", 0, None) == "class Giant" and ctx.problem("Knight", 0, "Giant") == "card Giant"
+    assert ctx.problem("Zap", 0, "Zap") is None and ctx.problem("Fireball", 0, "Fireball") == "card Fireball"
+
+
+def test_link_markers_by_time_and_place():
+    tile = lambda size: (17.0, 13.8)                    # noqa: E731
+    C = UH.Clock
+    clocks = [C(0, 0.0, (10, 10, 20, 20), SIZE, 0.6), C(1, 0.05, (11, 10, 21, 20), SIZE, 0.6),
+              C(1, 0.05, (100, 10, 110, 20), SIZE, 0.6),           # another place: another event
+              C(2, 0.10, (12, 10, 22, 20), SIZE, 0.6), C(30, 1.5, (12, 10, 22, 20), SIZE, 0.6),   # after a gap
+              C(31, 1.55, (12, 11, 22, 21), SIZE, 0.6)]
+    evs = UH.link_markers(clocks, tile, gap_s=0.5, link_tiles=1.0, min_frames=2)
+    assert [[c.n for c in e.clocks] for e in evs] == [[0, 1, 2], [30, 31]]
+    assert len(UH.link_markers(clocks, tile, min_frames=1)) == 3
+
+
+def test_split_on_a_look_change_and_clusters(tmp_path):
+    grass, red, blue = (82, 152, 70), (220, 40, 40), (40, 40, 220)
+    s = Scene(40)
+    paint = {}
+    for h, x, colours in ((1, 3000, [red] * 15 + [blue] * 15), (2, 9000, [red] * 30), (3, 15000, [blue] * 30)):
+        s.track(h, range(0, 30), x, 6000, src="blob", dy=100)
+        for j in range(30):
+            paint.setdefault(j, []).append((unit_box(x, 6000 + 100 * j), colours[j]))
+    for r in s.recs:
+        r["epoch"] = "b1e0"
+    bg = np.zeros((SIZE[1], SIZE[0], 3), np.uint8)
+    bg[:] = grass
+
+    def load(path):
+        img = bg.copy()
+        for box, colour in paint.get(int(Path(path).stem), ()):
+            x0, y0, x1, y1 = (int(round(v)) for v in box)
+            img[y0:y1, x0:x1] = colour
+        return img
+
+    an = UH.analyze_scan(s.scan(tmp_path), deck=DECK10, table=TABLE, geometry=GEOM, frames=s.recs,
+                         backgrounds={"b1e0": bg}, load=load, log=lambda m: None)
+    assert [(p.key, p.n, p.first_n, p.last_n) for p in an.parts] == [("1.0", 15, 0, 14), ("1.1", 15, 15, 29),
+                                                                     ("2", 30, 0, 29), ("3", 30, 0, 29)]
+    by = an.by_key()
+    assert by["1.0"].flags == {"S1": "no live track", "S7": "part 1 of 2: images 0-14"}
+    assert by["1.1"].flags["S7"] == "part 2 of 2: images 15-29" and "S7" not in by["2"].flags
+    assert an.stats["split_tracks"] == 1
+    red_bin = (3 * 4 + 0) * 4 + 0                        # 220 // 64 = 3: the 64-bin histogram's red corner
+    assert by["1.0"].sig[red_bin] == pytest.approx(1.0) and by["1.1"].sig[3] == pytest.approx(1.0)
+    assert by["2"].sig[64] == pytest.approx(math.log(14 / 17.0), abs=1e-3)   # log width in tiles
+    clusters = UH.cluster_parts(an.parts)
+    assert [(c.id, c.keys, c.images) for c in clusters] == [(0, ["2", "1.0"], 45), (1, ["3", "1.1"], 45)]
+    # the crops show the square on grass, with the box outlined in yellow
+    crop = an.crops["1.1"][0]
+    assert (crop == np.array(red, np.uint8)).all(axis=2).sum() == 0 and (crop == np.array(blue, np.uint8)).all(axis=2).sum() > 100
+    assert (crop == np.array(UH.BOX_COLOUR, np.uint8)).all(axis=2).sum() > 20
+    # the analysis is saved and read back while the scan, deck and settings are the same
+    (tmp_path / "scan.json").write_text('{"created": "x"}', encoding="utf-8")
+    (tmp_path / "tracks.json").write_text("{}", encoding="utf-8")
+    an.identity = UH.analysis_identity(s.scan(tmp_path), deck=DECK10, table=TABLE)
+    UH.save_analysis(an, tmp_path / "sheet")
+    back = UH.load_analysis(tmp_path / "sheet", UH.analysis_identity(s.scan(tmp_path), deck=DECK10, table=TABLE))
+    assert [p.to_dict() for p in back.parts] == [json.loads(json.dumps(p.to_dict())) for p in an.parts]
+    assert all(np.array_equal(back.crops[k][i], an.crops[k][i]) for k in an.crops for i in range(3))
+    assert back.stats == an.stats and back.markers == an.markers
+    assert UH.load_analysis(tmp_path / "sheet", UH.analysis_identity(s.scan(tmp_path), deck=DECK10[:-1],
+                                                                       table=TABLE)) is None
+    (tmp_path / "tracks.json").write_text('{"scanned": "again"}', encoding="utf-8")       # another scan
+    assert UH.load_analysis(tmp_path / "sheet", UH.analysis_identity(s.scan(tmp_path), deck=DECK10,
+                                                                       table=TABLE)) is None
+
+
+def test_find_splits_and_cluster_parts_on_hand_made_signatures():
+    def sig(bin_, w=0.0):
+        v = np.zeros(66)
+        v[bin_], v[64], v[65] = 1.0, w, w
+        return v
+
+    a, b, c = sig(48), sig(3), sig(10)
+    assert UH.find_splits([a] * 10 + [b] * 10, min_part=3) == [10]
+    assert UH.find_splits([a] * 20, min_part=3) == [] and UH.find_splits([a] * 5 + [b], min_part=3) == []
+    assert UH.find_splits([a] * 8 + [b] * 8 + [c] * 8, min_part=3) == [8, 16]
+    assert UH.find_splits([a] * 8 + [b] * 8 + [c] * 8, min_part=3, max_parts=2) == [8]
+    mixed = [a, b] * 10                                  # a flicker, not a change: neither side is tight
+    assert UH.find_splits(mixed, min_part=3) == []
+    assert UH.sig_distance(a, b) == pytest.approx(1.0) and UH.sig_distance(a, sig(48, math.log(2))) == pytest.approx(
+        0.5 * math.log(2))
+
+    def part(h, n, s_):
+        return UH.PartInfo(h, 0, 1, 1, "enemy", n, 0, n - 1, 0.0, 1.0, sig=None if s_ is None else list(s_))
+
+    parts = [part(1, 10, a), part(2, 30, a * 0.9 + b * 0.1), part(3, 12, b), part(4, 8, b), part(5, 9, None),
+             part(6, 5, a)]
+    cl = UH.cluster_parts(parts, max_dist=0.3)
+    assert [(c_.id, c_.keys) for c_ in cl] == [(0, ["1", "6", "2"]), (1, ["3", "4"]), (2, ["5"])]
+    assert cl[0].dists[0] < cl[0].dists[2] and cl[2].centroid is None
+    drift = [part(1, 20, a), part(2, 19, a * 0.62 + b * 0.38), part(3, 18, a * 0.8 + b * 0.2)]
+    assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.3)] == [["3", "2", "1"]]    # joined by the merge pass
+    assert [c_.keys for c_ in UH.cluster_parts(drift, max_dist=0.25)] == [["2", "3"], ["1"]]
+    assert UH.spread_members(list("abcdefgh"), 4) == ["a", "c", "f", "h"] and UH.spread_members(["a"], 4) == ["a"]
+    assert UH.part_key(12) == "12" and UH.part_key(12, 1, 2) == "12.1"
+
+
+def test_the_contact_sheet_is_drawn(tmp_path):
+    img = np.zeros((100, 100, 3), np.uint8)
+    img[40:60, 40:60] = (200, 0, 0)
+    crop = UH.sheet_crop(img, (40, 40, 60, 60), cell=16, pad_frac=0.3)
+    assert crop.shape == (16, 16, 3) and (crop == np.array(UH.BOX_COLOUR, np.uint8)).all(axis=2).sum() > 10
+    assert UH.text_mask("AB").shape == (10, 16) and UH.text_mask("ab#", scale=1).shape == (5, 12)
+    assert np.array_equal(UH.text_mask("~"), UH.text_mask("?"))            # no such glyph: '?'
+    tile = UH.SheetTile("#0 n=2 S1", ["read -", "hv Giant 0.21"], [[crop] * 3] * 2)
+    sheet = UH.render_sheet([tile], cell=16, width=200, header=["x"], legend=["0 a", "1 b"])
+    # pad 4, line 13 px, tile 64 x (4 + 3 lines + 4 rows of 20): 3 tiles a row; header, legend, then the grid
+    assert sheet.shape == (165, 192, 3)
+    assert np.array_equal(sheet[81:97, 4:20], crop) and np.array_equal(sheet[101:117, 44:60], crop)
+    assert (sheet[121:137, 4:20] == 44).all()                               # a third row: nothing
+    assert UH.render_sheet([], cell=16, width=200, header=["x"]).shape == (25, 192, 3)
+    out = UH.write_sheet_image(tmp_path / "sheet_1", sheet)
+    assert out.exists() and out.suffix in (".png", ".npy") and out.stem == "sheet_1"
