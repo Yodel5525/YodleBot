@@ -34,6 +34,7 @@ $BB = 'C:\hcr\.venvs\buildabot\Scripts\python.exe'   # GPU venv: CUDA torch, roy
 | 10, 13 | not reported back. Section 16 covers what step 10 was for. |
 | 15-18: detector, calibration, dry run, first friendly with taps | to do |
 | 19: second model (decision-time rows) | to do |
+| 20: third model (v2 rows, the whole corpus) | to do, after 19 |
 
 ## 1. GPU driver
 
@@ -716,6 +717,129 @@ Send back the log, `reports\second_model_<time>.log`. If you cannot send all of 
 - the three `rs_eval` result lines (`...: N/300 wins (...)`);
 - with `-League`, the gate decision and the `report:` line.
 
+## 20. Third model: v2 rows from the whole corpus
+
+**Close MuMu and the browser first.** These jobs use most of the RAM. Do not run this while the live runner is running. The whole run takes most of a night.
+
+What is new compared with section 19's rows (decision time, the screen's view, trust v2, all kept):
+- **Schema v2** (E14). Each row also shows:
+  - the spells in flight;
+  - the opponent's elixir, counted from the plays it has shown;
+  - our own plays tapped and not yet landed;
+  - hand evolution;
+  - the ability buttons;
+  - each unit's form (evolution, hero) and whether it is burrowing.
+
+  Our deck has no evolutions or heroes, but the opponents' decks do.
+- **Ability presses** (E10, `--presses on`). Champion and hero ability presses are replayed and learnt by the model's ability head (E15). Our deck has no ability, so the bot never presses one live.
+- **Perception noise** (E17). Every row is seen through the noise profile: what our screen reader gets wrong (missed units, late plays, wrong cards). Until a profile is fitted from our own friendlies, this is the prior, `data\noise\default_prior.json`.
+- **The whole corpus** (E18): every usable IL_Replay match, instead of every Hog 2.6 match plus 20,000 others. That is about 7 times the matches.
+  - 25% of the wait rows are kept while the rows are built.
+  - The rows are then compacted into one file per column (`data\rs_cols_v2`), and the trainer reads them from disk (`--memmap`), so they need not fit in 16 GB of RAM.
+  - Each training row is flipped left-right with probability 0.5 (`--mirror 0.5`).
+- **A critic** (E15): the value the RL step (batch 6) starts from.
+
+The model keeps the size of `live_big` and `dt_big`: d256, 6 layers, 8 heads. That should take about 3-4 GB of the 12 GB of VRAM (estimated). With the same size, the comparison is about the rows, and the simulator's CPU workers (the league, later RL) run it as fast as the champion.
+
+Unit tokens stay `--live-compat`, as in sections 14 and 19, for two reasons:
+- The live runner reads either kind. But the simulator's evaluators (`rs_eval`, `rs_match`, `rs_league_eval`) and the RL workers build only `--live-compat` or unit-type rows: a `--units vision` model could not be evaluated or trained by RL.
+- What the vision classes would add, the unit's form, is in every v2 row anyway.
+
+It needs:
+- section 19's `runs\tokens\dt_big_hog\best.pt` (the champion);
+- section 14's `runs\tokens\live_big_hog\best.pt` (the anchor) and `runs\tokens\live_big\ep01.pt` (the reactive opponent of `rs_eval`);
+- about 90 GB free on `C:` (below).
+
+The script checks all three before it starts. Do not change `data\engine.json` or the card table between sections 19 and 20: the league refuses checkpoints made under another engine.
+
+After `git pull`, run the tests of section 12 first. None of this batch's code (v2 rows, compaction, `--memmap`, the v2 model) has run on the PC yet. Paste any failure back before you start the script.
+
+**One script runs everything unattended.** It stops at the first failure and writes everything to `reports\third_model_<time>.log`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\third_model.ps1
+```
+
+| Step | What it runs | Time (estimated) |
+|---|---|---|
+| rows | `tools\rs_rows.py --schema v2 --live-compat --obs-delay 24 --obs-delay-jitter 3 --opp-lag 1 --visibility public --trust v2 --presses on --noise data\noise\default_prior.json --all-matches --wait-keep-at-build 0.25 --workers 8 --out data\rs_rows_v2` | about 3.5 h |
+| compact | `tools\rs_rows_compact.py --rows data\rs_rows_v2 --out data\rs_cols_v2 --force` | about 30 min |
+| general | `sim.train_tokens --name v2_big --data data\rs_cols_v2 --epochs 2 --memmap --mirror 0.5 --trust v2 --wait-keep 0.25 --d 256 --layers 6 --heads 8 --val-max-rows 500000` | about 3 h |
+| hog | the same with `--name v2_hog --epochs 3 --finetune-hog --init runs\tokens\v2_big\best.pt` | about 15 min |
+| eval | `tools\rs_eval.py --ckpt runs\tokens\v2_hog\best.pt --opponent-ckpt runs\tokens\live_big\ep01.pt --matches 300 --workers 8 --delay 21` | about 10 min |
+| league | `tools\rs_league_eval.py run --candidate v2_hog=runs\tokens\v2_hog\best.pt --champion dt_big_hog=runs\tokens\dt_big_hog\best.pt --anchor live_big_hog=runs\tokens\live_big_hog\best.pt --delay 24 --noise data\noise\default_prior.json --champion-games 1000 --anchor-games 400 --full --workers 6 --log runs\league\third_model.jsonl` | about 1-1.5 h |
+
+That is about 9 hours in all, and anywhere from 7 to 12. Start it in the evening.
+
+None of these times is measured yet. They are the first model's measured times (section 14 and `docs/SPARRING_PLAN.md`, "Results so far"), scaled by the data:
+- **rows**: the first model's 33,659 matches took 20 min. Here there are about 7 times the matches, with about 1.5 times the work per match (the trust check, the presses, the noise, the v2 columns).
+- **compact**: it reads about 15-20 GB of shards and writes about 50 GB of columns.
+- **general**: the first model's 3 epochs took 33 min. Here:
+  - there are about 7 times the training rows: 7 times the matches, with the waits thinned to the same 25%;
+  - there are 2 epochs instead of 3;
+  - a v2 row has about 80 tokens instead of about 66.
+
+  In all, about 5.5 times the work.
+- **hog**: every Hog 2.6 match was already in the first model's rows, so this is about the first model's 9.4 min with the larger rows.
+- **eval**: one run of 300 matches. The first model's two runs took 13 min.
+- **league**: 1,800 games at most 6 at a time:
+  - 1,000 of v2_hog against dt_big_hog;
+  - 400 of v2_hog against live_big_hog;
+  - 400 of dt_big_hog against live_big_hog.
+
+  Each game takes about 10-13 s of one CPU core, as an `rs_eval` match does, with the noise on both seats. `rs_league_eval` runs fewer workers when free memory is short (it keeps 3 GB free, about 1.2 GB per worker).
+
+The training steps print their own time to go. Each prints `ep 0 step 500/S` every 500 steps, where S is the total number of steps. Take the time between two of these lines, multiply by S / 500, and that is how long the whole training takes.
+
+Options:
+- `-Workers 6` uses less RAM.
+- `-Others 60000` builds rows from every Hog 2.6 match plus 60,000 others drawn at random, instead of every match. That takes about a third of the rows, compact and general time and disk.
+- `-Epochs 1` (or 3) changes the general model's epochs. The Hog 2.6 fine-tune always runs 3.
+- `-MaxRows 15000000` trains on a sample of that many rows, which halves the general step if training runs long.
+- `-Noise <profile.json>` uses another noise profile, such as one fitted by `tools\fit_noise_profile.py`, for both the rows and the league.
+- `-From compact` (or `general`, `hog`, `eval`, `league`) restarts at a later step. The script refuses to start from `rows` while `data\rs_rows_v2` holds finished rows: use `-From compact`, or delete the folder to build them again.
+
+**Disk.** These sizes are estimated: about 40 million rows of about 1.27 KB each.
+
+| Folder | Size |
+|---|---|
+| `data\rs_rows_v2` (the shards, compressed) | about 15-20 GB |
+| `data\rs_cols_v2` (the compact store, uncompressed so that it can be memory-mapped) | about 50 GB |
+| `runs\tokens\v2_big`, `runs\tokens\v2_hog` | under 0.5 GB |
+
+The script stops before it starts if `C:` has less than 90 GB free (60 GB with `-From compact`); `-SkipDiskCheck` starts anyway.
+
+If space runs short:
+- After the compact step, `data\rs_rows_v2` is read only to rebuild the store (`-From compact`). Deleting it gives back 15-20 GB.
+- `data\rs_rows_live` and `data\rs_rows_dt` are needed only to retrain the first or second model. No evaluation reads them.
+
+**Reading the result.**
+- **eval** is section 19's instrument: the same reactive opponent, the same 300 held-out matches and the same 21-tick delay as its run B (`dt_big_hog`). Compare the two numbers. Each interval is about +-5.6 points, so a difference of less than about 8 points is not conclusive.
+- **league** is the real test. It plays at a 24-tick delay with perception noise on every seat, from both seats, on deck pairings and seeds that are the same for every player. Against the champion, each pairing is also played with the decks exchanged. Its `gate:` lines give the decision for `v2_hog`:
+  - **PASS**: v2_hog beats `dt_big_hog` (Wilson 95% lower bound above 52% over 1,000 games, i.e. at least 551 points), and it scores no more than 2 points below `dt_big_hog` against `live_big_hog`. Then v2_hog becomes the live model: add `--ckpt runs\tokens\v2_hog\best.pt` to the `vision_play.py` commands of sections 17 and 18. The runner reads the checkpoint's schema and builds v2 rows by itself.
+  - **FAIL**, **CYCLE** or **INCOMPLETE**: keep the live model you have.
+
+  The `paired` lines show v2_hog's score minus dt_big_hog's against the same opponent on the same positions, with an interval.
+- The report is also written to `runs\league\third_model.report.json`.
+
+If the league step fails, the trained models are kept. Send the log back, and after the fix restart with `-From league`. The league log resumes: games already played are not played again.
+
+Send back the log, `reports\third_model_<time>.log`. Each step's `==` line has its start time, which is how the times above get measured. If you cannot send all of it, send:
+- from the rows step:
+  - its header lines (`memory:`, `seen:`, `trust:`, `presses:`, `observed:`, `schema:`, `waits:`, `noise:`, and any `not bound:` lines);
+  - its `selected` and `pick` lines;
+  - its last two lines (`done: ... rows` and the line after it).
+- from the compact step: the `compact:` line, the `done:` line (rows and GB) and the `index:` line;
+- from both trainings:
+  - the `schema` line and both `rows:` lines;
+  - every `epoch N: val ...` line;
+  - the `done in` line;
+- the `rs_eval` result line (`...: N/300 wins (...)`);
+- from the league:
+  - its `workers:` line;
+  - everything from `league evaluation:` to `best:`;
+  - the `report:` line.
+
 ## If something breaks
 
 Paste these back to the cloud session:
@@ -731,7 +855,7 @@ These need code that is not on the branch yet. Each one gets exact commands here
 | Phase | What you will run | Waits for |
 |---|---|---|
 | 2. Engine re-baseline | spawn tables for both card tables; then a fidelity grid over 2,000 validation matches (`tools/rs_fidelity_grid.py`), which picks the RoyaleSim card table and writes `data/engine.json` | E01, E03, E06 |
-| 4. Decision-time models, v2 | the first decision-time model is section 19. Still to come: v2 rows on the vision class list, with perception noise in the rows; the ability head; memory-mapped training | E14-E18 |
+| 4. Decision-time models, v2 | the decision-time model is section 19 and the v2 model (perception noise in the rows, the ability head, memory-mapped training) section 20. Still to come: v2 rows on the vision class list (`--units vision`) | the simulator's evaluators and RL workers reading `--units vision` rows |
 | 5. Screen perception, second pass | label frames from our own friendlies for the cards and forms the KataCR dataset lacks, then score the detector on them (`tools/vision_replay.py --labels`); fit the perception-noise profile used in training (`tools/fit_noise_profile.py`) | V11 (rest), E17 |
-| 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows (section 19's, or the v2 model) and the measured delay D | section 19's results; E14, E15, E18, the V06 upgrade |
+| 6. Live friendlies with a stronger model | the same runner (sections 17-18) with a model trained on decision-time rows (section 19's, or section 20's v2 model) and the measured delay D | the results of sections 19 and 20 |
 | 7. RL fine-tuning | the RL driver with gating and resume (`tools/rl/train_loop.py`); runs for days with MuMu closed | R01-R05 |
