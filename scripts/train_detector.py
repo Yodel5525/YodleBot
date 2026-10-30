@@ -31,9 +31,24 @@ V09 additions:
   folder, and best.pt is pinned for scripts/vision/detector.py
   (<data root>/vision/detector_pin.json; `--no-pin` keeps the old pin).
 
+N06, fine-tunes (docs/NEW_CARDS_PLAN.md 2.3, 8 and risk 9): `--optimizer`,
+`--lr0`, `--cls-pw` and `--freeze` reach ultralytics' train() as optimizer,
+lr0, cls_pw and freeze; left out, they are not passed and ultralytics' own
+defaults apply, as before. With optimizer=auto ultralytics picks the optimizer
+and rate from the iteration count (AdamW at about 0.01 / (4 + classes) up to
+10,000 iterations, MuSGD at 0.01 above) and ignores lr0, so a short fine-tune
+needs both --optimizer and --lr0. Starting from trained weights (best.pt, not
+a stock yolo*.pt) with the default --name prints a WARNING: the run folder is
+reused (exist_ok), so its weights are replaced, and the pin moves to the new
+best.pt; fine-tunes pass a new --name and --no-pin.
+
     python scripts/prepare_yolo_dataset.py           class list x side (V09)
     python scripts/train_detector.py                 yolov8s, 640 px, batch 32, 150 epochs
     python scripts/train_detector.py --epochs 60     a quicker first model
+    python scripts/train_detector.py --model tmp/yolo/runs/cr_detector/weights/best.pt
+        --name ft_20261101 --optimizer AdamW --lr0 0.001 --epochs 40 --no-pin
+                                                     a fine-tune, on one line (0.001 is
+                                                     ultralytics' AdamW default, not a tuned rate)
 """
 
 from __future__ import annotations
@@ -44,13 +59,17 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))           # scripts.vision.detector, also when run as a file
 DATA = ROOT / "tmp" / "yolo" / "cr.yaml"
 RUNS = ROOT / "tmp" / "yolo" / "runs"
+
+DEFAULT_NAME = "cr_detector"
+#: ultralytics 8.4's optimizers (cfg/default.yaml `optimizer`); --optimizer matches them in any case.
+OPTIMIZERS = ("auto", "SGD", "MuSGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSprop")
 
 #: Batch per model size that fits a 12 GB GPU at 640 px with AMP (yolov8 / yolo11).
 BATCH_12GB_640 = {"n": 64, "s": 32, "m": 16, "l": 8, "x": 4}
@@ -73,6 +92,98 @@ def default_batch(model: str, imgsz: int = 640, vram_gb: Optional[float] = None)
     if scaled >= 8:
         return int(scaled // 8 * 8)
     return max(1, int(scaled))
+
+
+def optimizer_name(text: str) -> str:
+    """--optimizer: one of OPTIMIZERS in any case (adamw -> AdamW)."""
+    name = {o.lower(): o for o in OPTIMIZERS}.get(str(text).strip().lower())
+    if name is None:
+        raise argparse.ArgumentTypeError(f"unknown optimizer {text!r}; use one of {', '.join(OPTIMIZERS)}")
+    return name
+
+
+def _fraction(text: str, *, zero_ok: bool) -> float:
+    """A number in [0, 1] ((0, 1] unless zero_ok): ultralytics' range for lr0 and cls_pw."""
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not ((0.0 <= x if zero_ok else 0.0 < x) and x <= 1.0):
+        raise argparse.ArgumentTypeError(f"{text} is outside {'[0' if zero_ok else '(0'}, 1]")
+    return x
+
+
+def learning_rate(text: str) -> float:
+    """--lr0: in (0, 1]."""
+    return _fraction(text, zero_ok=False)
+
+
+def class_weight_power(text: str) -> float:
+    """--cls-pw: in [0, 1] (0 = no class weights, 1 = full inverse frequency)."""
+    return _fraction(text, zero_ok=True)
+
+
+def freeze_spec(text: str) -> int | list:
+    """--freeze: N (the first N layers, an int) or a comma list of layer indices and module
+    names (0,1,2 or 22.cv2) -> a list, as ultralytics' freeze takes them."""
+    raw = str(text).strip()
+    if raw.isdigit():
+        return int(raw)
+    parts = [p.strip() for p in raw.split(",")]
+    if not raw or any(not p or p.startswith("-") for p in parts):
+        raise argparse.ArgumentTypeError(f"takes N or a comma list of layer indices / names, not {text!r}")
+    return [int(p) if p.isdigit() else p for p in parts]
+
+
+def train_overrides(args: argparse.Namespace) -> dict:
+    """The fine-tune settings given on the command line, as train() keywords (none: {})."""
+    pairs = (("optimizer", args.optimizer), ("lr0", args.lr0), ("cls_pw", args.cls_pw), ("freeze", args.freeze))
+    return {k: v for k, v in pairs if v is not None}
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def pinned_weights(pin_file: Optional[Path] = None) -> Optional[Path]:
+    """The weights the pin file names, or None (no pin, or one that does not read)."""
+    from scripts.vision import detector as vision_detector
+    try:
+        doc = vision_detector.read_pin(pin_file)
+    except Exception:
+        return None
+    if not doc or not doc.get("weights"):
+        return None
+    p = Path(str(doc["weights"]))
+    return p if p.is_absolute() else ROOT / p          # stored relative to the repo (detector.write_pin)
+
+
+def fine_tune_warnings(args: argparse.Namespace,
+                       read_pin: Callable[[Optional[Path]], Optional[Path]] = pinned_weights) -> List[str]:
+    """WARNING lines for a fine-tune that keeps the default --name: ultralytics reuses the run
+    folder (exist_ok=True), so its weights are replaced, and the pin moves when training ends.
+    A fine-tune starts from weights that are not a stock yolo*.pt (best.pt, last.pt, ...);
+    --resume continues a run in its own folder on purpose and is never warned about. The pin
+    (read_pin(args.pin_file) -> its weights) is read only when there is something to warn about."""
+    if args.resume or args.name != DEFAULT_NAME or model_size(args.model) is not None:
+        return []
+    run_dir = Path(args.project) / args.name
+    lines = [f"WARNING: fine-tuning from {args.model} with the default --name {args.name}: ultralytics "
+             f"reuses {run_dir} (exist_ok), so the weights/best.pt and last.pt there are replaced."]
+    if _inside(Path(args.model), run_dir):
+        lines.append("  The starting weights are in that folder: they are overwritten while training.")
+    pinned = read_pin(args.pin_file)
+    if pinned is not None and _inside(Path(pinned), run_dir):
+        lines.append(f"  The pinned detector {pinned} is in that folder: once overwritten, its SHA-256 "
+                     "no longer matches the pin and the live detector refuses to load.")
+    if args.pin:
+        lines.append("  When training ends the pin moves to the new best.pt (pass --no-pin until it passes the gate).")
+    lines.append("  Pass a new --name (e.g. --name ft_YYYYMMDD) to keep the old run.")
+    return lines
 
 
 def _import_torch():
@@ -127,7 +238,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "-1 = ultralytics AutoBatch")
     parser.add_argument("--device", default="auto",
                         help="auto (first CUDA GPU; refuses to run without one), 0, cpu, ...")
-    parser.add_argument("--name", default="cr_detector")
+    parser.add_argument("--name", default=DEFAULT_NAME,
+                        help="the run folder under --project; ultralytics reuses it when it exists, so a "
+                             "fine-tune passes a new name")
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
@@ -135,7 +248,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="pin best.pt for scripts/vision/detector.py when training ends")
     parser.add_argument("--pin-file", type=Path, default=None,
                         help="the pin file (default <data root>/vision/detector_pin.json)")
+    parser.add_argument("--optimizer", type=optimizer_name, default=None,
+                        help="ultralytics optimizer: " + ", ".join(OPTIMIZERS) + " (default: not passed, "
+                             "ultralytics' auto, which ignores --lr0)")
+    parser.add_argument("--lr0", type=learning_rate, default=None,
+                        help="initial learning rate in (0, 1] (default: not passed, ultralytics' 0.01)")
+    parser.add_argument("--cls-pw", type=class_weight_power, default=None,
+                        help="class weight power in [0, 1]: 0 none, 1 full inverse frequency "
+                             "(default: not passed, ultralytics' 0.0)")
+    parser.add_argument("--freeze", type=freeze_spec, default=None,
+                        help="freeze the first N layers, or a comma list of layer indices / module names "
+                             "such as 22.cv2 (default: not passed, nothing frozen)")
     args = parser.parse_args(argv)
+    overrides = train_overrides(args)
 
     from scripts.vision import detector as vision_detector
 
@@ -154,6 +279,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     print(f"device {device_desc}; model {args.model}, imgsz {args.imgsz}, batch {batch}, "
           f"epochs {args.epochs}, workers {args.workers}; data {args.data}")
+    if overrides:
+        print("train settings: " + ", ".join(f"{k} {v}" for k, v in overrides.items()))
+    if args.lr0 is not None and overrides.get("optimizer", "auto") == "auto":
+        print("note: ultralytics ignores --lr0 with optimizer auto; pass --optimizer too (e.g. AdamW)")
+    for line in fine_tune_warnings(args):
+        print(line)
 
     YOLO = _import_yolo()
     model = YOLO(args.model)
@@ -184,6 +315,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cache=False,
         plots=True,
         val=True,
+        **overrides,
     )
     run_dir = Path(args.project) / args.name
     print(f"\nweights and curves under {run_dir}")
@@ -207,6 +339,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "device": device_desc, "versions": _versions(torch_module),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if overrides:
+        manifest["train_overrides"] = overrides
     (run_dir / "detector_manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     print(f"best weights {best}\n  sha256 {digest}")
     if args.pin:
