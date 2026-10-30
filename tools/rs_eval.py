@@ -58,6 +58,20 @@ battle, the ghost and the engine's own look-ahead copy are not filtered: they ar
 not a view of it. A run given --visibility says so in its name; reports/rs_ghost.jsonl then
 records "visibility".
 
+Schema v2 (E15; tools/rs_schema.py, sim/model_tokens.py): a checkpoint whose meta "schema" is
+rs_rows/v2 (trained on tools/rs_rows.py --schema v2 rows) gets v2 rows (RSAgent.v2_kw), with
+what its rows held at training time and the seat knows: own_pending, its own plays sent and not
+run yet (the battle's players[team]["pending"] play rows, card + 2 and ticks to land, soonest
+first; with --lead, those still to land after the look-ahead, ticks less the lead); opp_elixir,
+the opponent's bar as this seat counts it from the plays its memory view shows
+(rs_rows.SeenElixir with lag 0, fed each play of mem["last"] once, priced from the catalogue; a
+recorded ghost play the engine refused is counted too, as the memory lists it); and its ability
+buttons named from its dealt deck and forms (rs_presses.side_buttons; play() sets them). The
+v2 rows read the burrow bit, so play() checks royalesim.STATUS_BITS for a v2 seat. The v2 gate
+has the ability buttons after the four slots; rs_decide masks them (its button_mask) and the
+search agent reads the four slots only, so no seat presses yet. A legacy checkpoint (no schema
+in its meta, or rs_rows/legacy) is played exactly as before.
+
 The 95% interval is tools/league/stats.wilson (L01), the formula this file had.
 """
 from __future__ import annotations
@@ -83,6 +97,8 @@ import rs_decide  # noqa: E402
 import rs_engine  # noqa: E402
 import rs_memory  # noqa: E402
 import rs_orient  # noqa: E402
+import rs_presses  # noqa: E402
+import rs_schema  # noqa: E402
 from tools.league.stats import wilson  # noqa: E402  (rs_eval.wilson, as before L01)
 
 DECIDE = 10           # ticks between agent decisions (0.5 s)
@@ -113,6 +129,14 @@ class RSAgent:
     # What this seat's rows show (rs_rows.VISIBILITY_MODES): __init__ reads the checkpoint's
     # (rs_rows.visibility_of), play() sets --visibility over it; None: rs_rows.VISIBILITY.
     visibility = None
+    # E15: a v2 checkpoint (meta "schema" rs_rows/v2) reads v2 rows (module doc, "Schema v2");
+    # buttons: the seat's ability button cards (catalogue ids, button order) or None, which
+    # play() sets for a v2 seat. _seen / _seen_fed / _seen_team: the opponent elixir count.
+    v2 = False
+    buttons = None
+    _seen = None
+    _seen_fed = None
+    _seen_team = None
 
     _CAT = None
 
@@ -367,6 +391,8 @@ class RSAgent:
         self.visibility = RR.visibility_of(meta)
         # A live-compatible checkpoint was trained on card-id unit tokens.
         self.live = bool(meta.get("live_compat", False))
+        # E15: a v2 checkpoint reads v2 rows; a legacy one (no schema) the rows it always did.
+        self.v2 = checkpoint_v2(meta)
         self.rng = np.random.default_rng(seed)
         # Waits were subsampled to `wait_keep` in training, so the wait logit
         # is low by log(1 / wait_keep). Read the value the checkpoint was
@@ -376,6 +402,9 @@ class RSAgent:
         self.wait_bias = math.log(1 / wait_keep)
 
     def batch(self, row):
+        if self.v2:
+            from sim.model_tokens import row_batch
+            return row_batch(row, rs_schema.SCHEMA_V2, self.torch)
         t = self.torch
         keys = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "opp_seen",
                 "opp_last", "opp_last_age")
@@ -386,6 +415,62 @@ class RSAgent:
         b["opp_last_age"] = b["opp_last_age"].float()
         b["next"] = t.as_tensor([int(row["next"])]).long()
         return b
+
+    # ------------------------------------------------------------ E15: v2 rows
+    def v2_kw(self, state, team, mem, tick, royalesim=None) -> dict:
+        """The obs_row keywords of this seat's v2 row at `tick` (module doc, "Schema v2"): none
+        for a legacy checkpoint, so its obs_row calls are exactly what they were."""
+        if not self.v2:
+            return {}
+        kw = {"schema": rs_schema.SCHEMA_V2,
+              "opp_elixir": self.opp_elixir(team, mem, tick, royalesim),
+              "pending": self.own_pending(state, team)}
+        if self.buttons is not None:
+            kw["buttons"] = list(self.buttons)
+        return kw
+
+    def own_pending(self, state, team) -> list:
+        """(card token, ticks to land) of `team`'s plays sent and not run, soonest first: the
+        state's pending rows of kind 0 ([kind, what, x, y, ticks_left, cost]), those landing
+        after the look-ahead (`lead`), ticks less the lead. Presses are not pending tokens."""
+        lead = int(self.lead or 0)
+        out = []
+        for r in state["players"][team].get("pending") or ():
+            if len(r) > 4 and int(r[0]) == 0 and int(r[1]) >= 0 and int(r[4]) >= lead:
+                out.append((int(r[1]) + 2, int(r[4]) - lead))
+        out.sort(key=lambda p: p[1])
+        return out
+
+    def opp_elixir(self, team, mem, tick, royalesim=None) -> tuple:
+        """(milli, exact): the opponent's bar at `tick` as this seat counts it, from every play
+        of mem["last"][opponent] (card token, exec tick; rs_memory's view lists them all),
+        each fed once to an rs_rows.SeenElixir (lag 0: the view already holds only what the
+        seat has seen; a token outside the catalogue is not priced). Any tick may be asked (the
+        search agent's look-ahead rows ask later ones). A view that no longer holds a play
+        already fed, or another team, starts a new count: a new match."""
+        team, tick = int(team), int(tick)
+        opp = 1 - team
+        plays = [(int(c), int(t)) for c, t in (mem.get("last") or {}).get(opp, ())]
+        held = Counter(plays)
+        if (self._seen is None or self._seen_team != team
+                or any(held[k] < n for k, n in self._seen_fed.items())):
+            mod = royalesim if royalesim is not None else sys.modules.get("royalesim")
+            fields = list(getattr(mod, "CATALOGUE_FIELDS", ()) or ()) or None
+            self._seen = RR.SeenElixir(self._catalogue(), fields=fields,
+                                       law=RR.elixir_law(self.engine), lag=0)
+            self._seen_fed = Counter()
+            self._seen_team = team
+        n_cards = len(self._catalogue())
+        counts = Counter()
+        for key in plays:
+            counts[key] += 1
+            if counts[key] <= self._seen_fed[key]:
+                continue
+            self._seen_fed[key] += 1
+            cid = key[0] - 2
+            if 0 <= cid < n_cards and key[1] >= 0:
+                self._seen.record(opp, key[1], cid)
+        return self._seen.view(team, tick)
 
     @property
     def policy(self):
@@ -424,7 +509,8 @@ class RSAgent:
             return None
         view = self.ahead(battle, state)
         row = RR.obs_row(view, team, sub, mem, tick + self.lead, live=self.live,
-                         visibility=self.visibility)
+                         visibility=self.visibility,
+                         **self.v2_kw(state, team, mem, tick + self.lead, royalesim))
         aim = self._spell_aim(view, team, sub) if getattr(self, "spell_aim", False) else None
         # Masks, wait cadence, slot and tile: tools/rs_decide.decide, on the present state
         # (hand, elixir, our pending plays), legality from check_deploy on this battle.
@@ -432,6 +518,14 @@ class RSAgent:
                              self.decide_config(), rng=self.rng, tick=tick, sub=sub, aim=aim)
         self.last_decision = d
         return d.command
+
+
+def checkpoint_v2(meta) -> bool:
+    """Whether a checkpoint meta is a v2 model's (E15): its "schema" is rs_rows/v2. Absent (every
+    checkpoint before E14), rs_rows/legacy or any other name: legacy, as
+    sim/model_tokens.model_schema reads it."""
+    name = (meta or {}).get("schema")
+    return isinstance(name, str) and name.strip() in (rs_schema.SCHEMA_V2, "v2")
 
 
 _SPAWN = {}
@@ -483,11 +577,14 @@ class RSSearchAgent(RSAgent):
         self.rebuild = rebuild
 
     def act(self, battle, state, team, mem, tick, sub, royalesim):
-        row = RR.obs_row(state, team, sub, mem, tick, live=self.live, visibility=self.visibility)
+        row = RR.obs_row(state, team, sub, mem, tick, live=self.live, visibility=self.visibility,
+                         **self.v2_kw(state, team, mem, tick, royalesim))
         b = self.batch(row)
         with self.torch.no_grad():
             gate, _, _ = self.model(b, card_ids=b["hand"][:, 0].clamp(min=0))
         g = gate[0].float().numpy()
+        if self.v2:
+            g = g[:rs_decide.GATE_PLAYS]        # E15: the search plays cards, it never presses
         g[0] += self.wait_bias
         p = state["players"][team]
         for slot in range(4):
@@ -569,7 +666,9 @@ class RSSearchAgent(RSAgent):
                 after = RR.towers_vec(after_state, team)
                 swing = float((before[3:] - after[3:]).sum() - (before[:3] - after[:3]).sum())
                 arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live,
-                                  visibility=self.visibility)
+                                  visibility=self.visibility,
+                                  **self.v2_kw(after_state, team, mem, tick + self.horizon,
+                                               royalesim))
                 with self.torch.no_grad():
                     _, _, v = self.model(self.batch(arow), card_ids=self.batch(arow)["hand"][:, 0].clamp(min=0))
                 score = swing + float(v[0, 0]) + self.prior * logp
@@ -581,7 +680,9 @@ class RSSearchAgent(RSAgent):
             after = RR.towers_vec(after_state, team)
             swing = float((before[3:] - after[3:]).sum() - (before[:3] - after[:3]).sum())
             arow = RR.obs_row(after_state, team, sub, mem, tick + self.horizon, live=self.live,
-                              visibility=self.visibility)
+                              visibility=self.visibility,
+                              **self.v2_kw(after_state, team, mem, tick + self.horizon,
+                                           royalesim))
             with self.torch.no_grad():
                 _, _, v = self.model(self.batch(arow), card_ids=self.batch(arow)["hand"][:, 0].clamp(min=0))
             score = swing + float(v[0, 0]) + self.prior * logp
@@ -717,13 +818,22 @@ def play(args):
     if opponent is not None:
         opponent.engine = cfg
         opponent.decide_mode = decide_mode
+    champs = None
     for seat in (agent, opponent):
         if seat is None:
             continue
         if visibility is not None:
             seat.visibility = visibility
-        if seat_visibility(seat) == RR.VIS_PUBLIC:
-            RR.check_status_bits(royalesim)
+        if seat_visibility(seat) == RR.VIS_PUBLIC or getattr(seat, "v2", False):
+            RR.check_status_bits(royalesim)       # a v2 row reads the burrow bit too
+        if getattr(seat, "v2", False):
+            # E15: the seat's ability buttons, from the deck and forms reset() was given.
+            if champs is None:
+                champs = rs_presses.champion_ids(cat, getattr(royalesim, "CATALOGUE_FIELDS",
+                                                              None))
+            s = seat_of[hog_team if seat is agent else ghost_team]
+            seat.buttons = rs_presses.side_buttons([ids[c] for c in dealt[s]],
+                                                   [forms[s][i] for i in perm[s]], champs)
     scripted = [(t, rs[s], c, x, y) for s in (0, 1) for (t, c, x, y) in plays[s]
                 if (mode_ == "pro" or rs[s] == ghost_team) and not
                 (opponent is not None and rs[s] == ghost_team)]

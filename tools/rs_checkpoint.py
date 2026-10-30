@@ -311,15 +311,15 @@ def load_policy(ckpt: Any, engine: Any = None, allow_drift: bool | None = None, 
     """(TokenPolicy in eval mode, meta, allowed differences) from a checkpoint file (or an
     already loaded {"model", "meta"} blob), after check_meta against `engine`. The model is
     built exactly as RSAgent built it: TokenPolicy(n_cards, n_units, d, layers, heads) with
-    the meta's sizes (defaults 192 / 4 / 6)."""
+    the meta's sizes (defaults 192 / 4 / 6); a meta whose "schema" is rs_rows/v2 builds the v2
+    model (E15, sim/model_tokens.policy_from_meta). The state_dict load is strict."""
     blob = _load_blob(ckpt, map_location)
     meta = blob["meta"]
     drift = check_meta(meta, engine, allow_drift, rs=rs, source=_shown(ckpt))
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from sim.model_tokens import TokenPolicy
-    model = TokenPolicy(meta["n_cards"], meta["n_units"], d=meta.get("d", 192),
-                        layers=meta.get("layers", 4), heads=meta.get("heads", 6)).eval()
+    from sim.model_tokens import policy_from_meta
+    model = policy_from_meta(meta, blob["model"]).eval()
     model.load_state_dict(blob["model"])
     return LoadedPolicy(model, meta, drift)
 

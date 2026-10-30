@@ -27,6 +27,21 @@ without an act_press column are loaded exactly as before. args.json records
 are the legacy ones (trust legacy, no press column), so a legacy meta is still
 vocab.json plus the architecture.
 
+Schema v2 (E15; tools/rs_rows.py --schema v2, tools/rs_schema.py): the rows' vocab.json
+"schema" picks the model. rs_rows/v2 trains sim/model_tokens.TokenPolicy(schema="v2") on the
+v2 columns (cols_for: rs_schema.V2.train_columns, after a check that vocab.json's
+schema_spec is this code's v2, rs_schema.spec_problems); anything else (rs_rows/legacy, no key,
+another name) is legacy and trains exactly as before, on COLS (rs_schema.LEGACY.train_columns).
+Under v2 the press rows (act_press > 0) are not left out: they are never thinned like waits,
+and when the rows are press-labelled (vocab.json "presses" mode on, or any press row) they
+train the ability buttons (model_tokens.losses presses=True); otherwise the button logits stay
+out of the loss. The row record then says "press_rows": "trained" (or "none") with
+"press_rows_trained", and the validation lines add press_acc. Each checkpoint's critic (value2)
+is copied from value_head before it is saved (TokenPolicy.sync_critic). --init takes a
+checkpoint of the same schema (strict load); --init-partial takes the tensors whose names and
+shapes fit (model_tokens.load_matching: a legacy model's state_in / unit_in fill the first
+columns of the v2 ones), from a checkpoint with the same card and unit vocabulary.
+
 `--wait-keep` is the share of ALL wait rows that training sees. When vocab.json
 says the builder already thinned waits (`wait_keep_at_build`), training keeps
 each remaining wait with probability wait_keep / wait_keep_at_build, and the
@@ -60,11 +75,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .model_tokens import TokenPolicy, losses, target_slot
+from .model_tokens import (RS, TokenPolicy, gate_targets, load_matching, losses, model_schema,
+                           target_slot)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "rs_rows"
 RUNS = ROOT / "runs" / "tokens"
+#: The legacy columns (rs_schema.LEGACY.train_columns; a literal, which tests read with ast).
 COLS = ("unit_ids", "unit_feats", "towers", "scalars", "hand", "next", "opp_seen",
         "opp_last", "opp_last_age", "outcome", "won", "act_card", "act_x", "act_y")
 #: Columns stored as float16 whatever the shard holds (the largest one, ~84% of a row).
@@ -88,8 +105,45 @@ TRUST_MODES = tuple(TRUST_COLUMNS)
 #: out (E15's press head will train on them).
 PRESS_COLUMN = "act_press"
 PRESS_EXCLUDED, PRESS_NONE = "excluded", "none"
+#: E15 (schema v2): press rows train the ability buttons.
+PRESS_TRAINED = "trained"
 #: The checkpoint meta key of the row record (row_record) when it is not the legacy one.
 TRAIN_ROWS_KEY = "train_rows"
+#: The row record key a v2 record adds: the press rows the buttons train on.
+PRESS_TRAINED_KEY = "press_rows_trained"
+
+
+def cols_for(schema=None) -> tuple:
+    """The columns load() reads for rows of `schema` (None: legacy): COLS, or (v2) the
+    schema's train_columns, model inputs then labels."""
+    spec = _spec(schema)
+    return spec.train_columns if spec.v2 else COLS
+
+
+def _spec(schema):
+    """`schema` as an rs_schema.Schema (a name, short name, Schema, or None for legacy)."""
+    if schema is not None and not isinstance(schema, str) and hasattr(schema, "name"):
+        schema = schema.name
+    return RS.get(schema)
+
+
+def _vocab_of(root) -> dict:
+    """vocab.json of the rows in `root`, {} when there is none."""
+    path = Path(root) / "vocab.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def rows_schema(root) -> "RS.Schema":
+    """The schema of the rows in `root`: model_schema of their vocab.json (legacy without one)."""
+    return model_schema(_vocab_of(root))
+
+
+def presses_labelled(vocab: dict) -> bool:
+    """Whether rows were built with presses replayed (vocab.json "presses" mode "on")."""
+    entry = vocab.get("presses")
+    return isinstance(entry, dict) and entry.get("mode") == "on"
 
 
 # ---------------------------------------------------------------------------
@@ -122,31 +176,42 @@ def missing_trust(trust: str, missing: list, root, shards: int | None = None) ->
 
 
 def _keep_mask(z, split: str, wait_keep: float, trusted_only: bool, hog_only: bool, rng,
-               trust_col: str = "trusted"):
+               trust_col: str = "trusted", presses: str = PRESS_EXCLUDED):
     """The rows of one shard the loader keeps. One rng draw per row of the shard,
     whatever the other filters say, so the same seed keeps the same waits.
     `trust_col` is the trusted-rows column (trust_column). Press rows (act_press > 0,
-    when the shard has that column) are left out after the draw: they are not waits."""
+    when the shard has that column) are left out after the draw: they are not waits.
+    presses PRESS_TRAINED (schema v2, E15): press rows are kept, and not thinned as waits."""
     keep = z["split"] == split
     if trusted_only:
         keep &= z[trust_col]
     if hog_only:
         keep &= z["hog"]
     waits = z["act_card"] == 0
+    if presses == PRESS_TRAINED:
+        waits &= ~(z[PRESS_COLUMN] > 0)
+        keep &= ~waits | (rng.random(len(waits)) < wait_keep)
+        return keep
     keep &= ~waits | (rng.random(len(waits)) < wait_keep)
     if PRESS_COLUMN in _files(z):
         keep &= ~(z[PRESS_COLUMN] > 0)
     return keep
 
 
-def row_record(root: Path, trust: str = TRUST_LEGACY) -> dict:
+def row_record(root: Path, trust: str = TRUST_LEGACY, schema=None) -> dict:
     """What --trust and the press rows come to on the shards in `root`, read before any
     row is loaded: {"trust", "trust_column", "press_rows": "excluded" when a shard has an
     act_press column, else "none", "press_rows_excluded": rows with act_press > 0 over
     every split}. args.json gets it as it is, the checkpoint meta as "train_rows" when it
     is not the legacy record (legacy_rows). SystemExit when --trust is not legacy and a
     shard lacks its column (rows built without --trust v2). No shards: the legacy counts
-    (load then says there are none)."""
+    (load then says there are none).
+
+    Schema v2 (`schema`; None: the rows' own, rows_schema): nothing is excluded, so
+    "press_rows" is "trained" when the rows are press-labelled (presses_labelled, or any press
+    row) and "none" otherwise, "press_rows_excluded" 0, and "press_rows_trained" counts the
+    press rows."""
+    spec = rows_schema(root) if schema is None else _spec(schema)
     col = trust_column(trust)
     paths = sorted(Path(root).glob("shard-*.npz"))
     missing, press_shards, presses = [], 0, 0
@@ -160,9 +225,24 @@ def row_record(root: Path, trust: str = TRUST_LEGACY) -> dict:
                 presses += int((z[PRESS_COLUMN] > 0).sum())
     if missing:
         raise SystemExit(missing_trust(trust, missing, root, len(paths)))
+    if spec.v2:
+        labelled = bool(presses) or presses_labelled(_vocab_of(root))
+        return {"trust": trust, "trust_column": col,
+                "press_rows": PRESS_TRAINED if labelled else PRESS_NONE,
+                "press_rows_excluded": 0, PRESS_TRAINED_KEY: presses}
     return {"trust": trust, "trust_column": col,
             "press_rows": PRESS_EXCLUDED if press_shards else PRESS_NONE,
             "press_rows_excluded": presses}
+
+
+def _row_entry(rows: dict) -> dict:
+    """The row record as args.json and the meta store it: plain str / int values."""
+    out = {"trust": str(rows["trust"]), "trust_column": str(rows["trust_column"]),
+           "press_rows": str(rows["press_rows"]),
+           "press_rows_excluded": int(rows["press_rows_excluded"])}
+    if PRESS_TRAINED_KEY in rows:
+        out[PRESS_TRAINED_KEY] = int(rows[PRESS_TRAINED_KEY])
+    return out
 
 
 def legacy_rows(rows: dict | None) -> bool:
@@ -177,6 +257,9 @@ def describe_rows(rows: dict) -> str:
     if rows["press_rows"] == PRESS_EXCLUDED:
         text += (f"; press rows left out: {rows['press_rows_excluded']:,} rows with "
                  f"{PRESS_COLUMN} > 0 (not waits)")
+    elif rows["press_rows"] == PRESS_TRAINED:
+        text += (f"; press rows trained: {rows.get(PRESS_TRAINED_KEY, 0):,} rows with "
+                 f"{PRESS_COLUMN} > 0 (the ability buttons)")
     return text
 
 
@@ -194,7 +277,7 @@ def _cap(picks: list, max_rows: int, seed: int) -> list:
 
 
 def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed: int = 0,
-         root: Path = DATA, *, max_rows: int = 0, trust: str = TRUST_LEGACY):
+         root: Path = DATA, *, max_rows: int = 0, trust: str = TRUST_LEGACY, schema=None):
     """The rows of one split, every column in COLS, shards in name order.
 
     The same rows, order and dtypes as concatenating every shard's kept rows and
@@ -205,7 +288,13 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
     `max_rows` > 0 keeps a seeded uniform sample of at most that many rows.
     `trust` (--trust) names the column `trusted_only` reads (trust_column);
     ValueError when a shard lacks it. Press rows are left out (_keep_mask).
+
+    `schema` (None: the rows' own, rows_schema) v2: the columns are cols_for("v2"), press rows
+    are kept (and not thinned), and a shard without one of those columns is a ValueError.
     """
+    spec = rows_schema(root) if schema is None else _spec(schema)
+    cols = cols_for(spec)
+    presses = PRESS_TRAINED if spec.v2 else PRESS_EXCLUDED
     col = trust_column(trust)
     rng = np.random.default_rng(seed)
     paths = sorted(Path(root).glob("shard-*.npz"))
@@ -216,8 +305,13 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
         with np.load(path) as z:
             if trusted_only and col not in _files(z):
                 raise ValueError(missing_trust(trust, [path.name], root))
+            if spec.v2:
+                lacking = [c for c in cols if c not in _files(z)]
+                if lacking:
+                    raise ValueError(f"{path.name} in {root} has no {lacking}: not rows of "
+                                     f"{spec.name} (tools/rs_rows.py --schema v2)")
             picks.append(np.flatnonzero(_keep_mask(z, split, wait_keep, trusted_only,
-                                                   hog_only, rng, col)))
+                                                   hog_only, rng, col, presses)))
     found = sum(len(p) for p in picks)
     picks = _cap(picks, max_rows, seed)
     total = sum(len(p) for p in picks)
@@ -228,7 +322,7 @@ def load(split: str, wait_keep: float, trusted_only: bool, hog_only: bool, seed:
     pos = 0
     for path, idx in zip(paths, picks):
         with np.load(path) as z:
-            for c in COLS:
+            for c in cols:
                 part = z[c][idx]
                 if c in HALF_COLS:
                     part = part.astype(np.float16, copy=False)
@@ -339,31 +433,42 @@ def batches(data, size: int, shuffle: bool, device, order=None):
 #: The rows each statistic of model_tokens.losses() is a mean over: "gate" rows
 #: whose played card is in the recorded hand (waits included), "card" such rows
 #: that are plays, "play" every play. Other statistics are means over all rows.
-STAT_ROWS = {"gate_acc": "gate", "card_acc": "card", "tile_acc": "play", "tile_near": "play"}
+STAT_ROWS = {"gate_acc": "gate", "card_acc": "card", "tile_acc": "play", "tile_near": "play",
+             "press_acc": "press"}
 STATS = ("gate_acc", "card_acc", "tile_acc", "tile_near", "mean_w")
 
 
-def eligible_counts(b) -> dict[str, int]:
-    """How many rows of batch `b` each kind of statistic is a mean over."""
+def eligible_counts(b, presses: bool | None = None) -> dict[str, int]:
+    """How many rows of batch `b` each kind of statistic is a mean over. `presses` (a v2
+    model's losses(presses=)): the gate rows are model_tokens.gate_targets', and "press"
+    counts the press rows with a gate target (press_acc); None: the legacy counts."""
     card = b["act_card"].long()
-    ok = target_slot(b["hand"].long(), card) >= 0
+    if presses is None:
+        ok = target_slot(b["hand"].long(), card) >= 0
+        plays = card > 0
+        return {"rows": int(card.numel()), "gate": int(ok.sum()),
+                "card": int((ok & plays).sum()), "play": int(plays.sum())}
+    ok = gate_targets(b, presses) >= 0
     plays = card > 0
+    pressed = (b["act_press"].long() > 0) if "act_press" in b else torch.zeros_like(plays)
     return {"rows": int(card.numel()), "gate": int(ok.sum()), "card": int((ok & plays).sum()),
-            "play": int(plays.sum())}
+            "play": int(plays.sum()), "press": int((ok & pressed).sum())}
 
 
 @torch.no_grad()
-def evaluate(model, data, device, beta, batch_size: int = 2048):
+def evaluate(model, data, device, beta, batch_size: int = 2048, presses: bool | None = None):
     """Validation metrics over all of `data`: correct / eligible rows per statistic,
     summed over batches (so a batch with few plays weighs little in card_acc),
-    plus the row and play counts."""
+    plus the row and play counts. `presses` (v2 models; None: legacy) goes to losses and
+    eligible_counts, and adds press_acc."""
     model.eval()
     hits = {k: 0.0 for k in STATS}
     den = {k: 0 for k in STATS}
     rows = plays = 0
+    kw = {} if presses is None else {"presses": bool(presses)}
     for b in batches(data, batch_size, False, device):
-        _, s = losses(model, b, beta=beta)
-        n = eligible_counts(b)
+        _, s = losses(model, b, beta=beta, **kw)
+        n = eligible_counts(b, **kw)
         rows += n["rows"]
         plays += n["play"]
         for key, v in s.items():
@@ -426,9 +531,7 @@ def run_record(args, device: str, wait_keep: float, wait_keep_train: float,
     rec = {k: str(v) for k, v in vars(args).items()}
     rec["wait_keep"] = str(wait_keep)
     if rows is not None:
-        rec.update({"trust": str(rows["trust"]), "trust_column": str(rows["trust_column"]),
-                    "press_rows": str(rows["press_rows"]),
-                    "press_rows_excluded": int(rows["press_rows_excluded"])})
+        rec.update(_row_entry(rows))
     commit, dirty = git_commit()
     cuda = torch.version.cuda
     rec.update({
@@ -455,10 +558,7 @@ def checkpoint_meta(vocab: dict, d: int, layers: int, heads: int,
     the meta is exactly what it was before E09 / E10 reached training."""
     meta = dict(vocab, d=d, layers=layers, heads=heads)
     if not legacy_rows(rows):
-        meta[TRAIN_ROWS_KEY] = {"trust": str(rows["trust"]),
-                                "trust_column": str(rows["trust_column"]),
-                                "press_rows": str(rows["press_rows"]),
-                                "press_rows_excluded": int(rows["press_rows_excluded"])}
+        meta[TRAIN_ROWS_KEY] = _row_entry(rows)
     return meta
 
 
@@ -481,6 +581,35 @@ def _nbytes(data: dict) -> int:
     return sum(v.nbytes for v in data.values())
 
 
+def init_from(model, blob: dict, vocab: dict, schema, source, partial: bool = False) -> dict:
+    """--init: load checkpoint `blob` into `model`. A strict load of a checkpoint of the rows'
+    schema (legacy: exactly the load this script always did); another schema is refused
+    (SystemExit) unless `partial` (--init-partial), which takes model_tokens.load_matching's
+    tensors from a checkpoint with the rows' card and unit vocabulary (and unit token kind).
+    Returns load_matching's report ({} for a strict load)."""
+    meta = blob.get("meta") if isinstance(blob, dict) else None
+    if not partial:
+        have = model_schema(meta)
+        if have != _spec(schema):
+            raise SystemExit(f"--init {source}: a {have.name} checkpoint, and these rows are "
+                             f"{_spec(schema).name}; pass --init-partial to take the weights "
+                             "that fit")
+        model.load_state_dict(blob["model"])
+        return {}
+    meta = meta or {}
+    # absent means what tools/rs_rows.py wrote before the key: not live-compatible, unit types
+    defaults = {"live_compat": False, "units_mode": "types"}
+    for key in ("cards", "units", "live_compat", "units_mode"):
+        if meta.get(key, defaults.get(key)) != vocab.get(key, defaults.get(key)):
+            raise SystemExit(f"--init-partial {source}: its {key!r} is not the rows' (the token "
+                             "ids would mean other cards or units)")
+    report = load_matching(model, blob["model"])
+    print(f"--init-partial {source}: {len(report['loaded'])} tensors loaded, "
+          f"{len(report['widened'])} widened ({', '.join(report['widened']) or '-'}), "
+          f"{len(report['skipped'])} skipped, {len(report['missing'])} new", flush=True)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
@@ -500,6 +629,10 @@ def main(argv: list[str] | None = None) -> int:
                          "(refused when the rows have none)")
     ap.add_argument("--finetune-hog", action="store_true")
     ap.add_argument("--init", type=Path)
+    ap.add_argument("--init-partial", action="store_true",
+                    help="with --init: take the checkpoint's tensors whose names and shapes fit "
+                         "(a legacy model into a v2 one: its state_in / unit_in fill the first "
+                         "columns); the card and unit vocabulary must be the rows'")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--data", type=Path, default=DATA)
     ap.add_argument("--d", type=int, default=192)
@@ -520,6 +653,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--max-rows must be 0 (all rows) or more")
     if args.epochs < 1:
         ap.error("--epochs must be 1 or more")
+    if args.init_partial and not args.init:
+        ap.error("--init-partial needs --init")
 
     device = resolve_device(args.device)        # before anything slow
     torch.manual_seed(args.seed)
@@ -533,16 +668,29 @@ def main(argv: list[str] | None = None) -> int:
           flush=True)
     print(f"wait_keep {wait_keep} (rows built with {at_build}; kept at load with p {keep_p:g})",
           flush=True)
-    rows_rec = row_record(args.data, args.trust)      # SystemExit: --trust v2 without the column
+    schema = model_schema(vocab)              # E15: rs_rows/v2 rows train the v2 model
+    if schema.v2:
+        problems = RS.spec_problems(vocab)
+        if problems:
+            raise SystemExit(f"{args.data / 'vocab.json'}: its schema_spec is not this code's "
+                             f"{schema.name}: " + "; ".join(problems[:5])
+                             + ". Rebuild the rows with this code's tools/rs_rows.py.")
+        print(f"schema {schema.name}: {len(cols_for(schema))} columns, state token "
+              f"{schema.state_features}, unit features {schema.unit_features}, "
+              f"{RS.buttons_of(vocab)} ability buttons", flush=True)
+    rows_rec = row_record(args.data, args.trust, schema)   # SystemExit: --trust v2, no column
     if not legacy_rows(rows_rec):
         print(f"rows: {describe_rows(rows_rec)}", flush=True)
+    # v2: whether the press head learns (the rows carry press labels); None: the legacy losses.
+    presses = rows_rec["press_rows"] == PRESS_TRAINED if schema.v2 else None
+    lkw = {} if presses is None else {"presses": presses}
     t0 = time.time()
     train = load("train", keep_p, not args.all_rows, args.finetune_hog, args.seed, args.data,
-                 max_rows=args.max_rows, trust=args.trust)
+                 max_rows=args.max_rows, trust=args.trust, schema=schema)
     val = load("val", keep_p, True, args.finetune_hog, 1, args.data, max_rows=args.max_rows,
-               trust=args.trust)
+               trust=args.trust, schema=schema)
     val_hog = load("val", keep_p, True, True, 1, args.data, max_rows=args.max_rows,
-                   trust=args.trust)
+                   trust=args.trust, schema=schema)
     mb = (_nbytes(train) + _nbytes(val) + _nbytes(val_hog)) / 2 ** 20
     print(f"rows: train {len(train['act_card']):,}  val {len(val['act_card']):,}  "
           f"val(hog) {len(val_hog['act_card']):,}  ({mb:,.0f} MB, {time.time() - t0:.0f}s)",
@@ -551,10 +699,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no training rows in {args.data} (split 'train' after the filters)")
 
     meta = checkpoint_meta(vocab, args.d, args.layers, args.heads, rows=rows_rec)
+    mkw = {"schema": schema.name} if schema.v2 else {}
     model = TokenPolicy(meta["n_cards"], meta["n_units"], d=args.d, layers=args.layers,
-                        heads=args.heads).to(device)
+                        heads=args.heads, **mkw).to(device)
     if args.init:
-        model.load_state_dict(torch.load(args.init, map_location=device)["model"])
+        init_from(model, torch.load(args.init, map_location=device), vocab, schema,
+                  args.init, partial=args.init_partial)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     steps = args.epochs * ((len(train["act_card"]) + args.batch - 1) // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps,
@@ -575,7 +725,7 @@ def main(argv: list[str] | None = None) -> int:
             order = balanced_order(train, args.phase_balance, rng) if args.phase_balance > 0 else None
             for b in batches(train, args.batch, True, device, order=order):
                 with torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda"):
-                    loss, s = losses(model, b, beta=args.beta)
+                    loss, s = losses(model, b, beta=args.beta, **lkw)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -585,10 +735,11 @@ def main(argv: list[str] | None = None) -> int:
                 if step % 500 == 0:
                     print(f"  ep {epoch} step {step}/{steps} loss {loss.item():.3f} "
                           f"gate {s['gate_acc']:.3f} card {s['card_acc']:.3f} "
-                          f"tile {s['tile_acc']:.3f} near {s['tile_near']:.3f} w {s['mean_w']:.2f}",
+                          f"tile {s['tile_acc']:.3f} near {s['tile_near']:.3f} w {s['mean_w']:.2f}"
+                          + (f" press {s['press_acc']:.3f}" if "press_acc" in s else ""),
                           flush=True)
-            v = evaluate(model, val, device, 0.0)
-            vh = evaluate(model, val_hog, device, 0.0)
+            v = evaluate(model, val, device, 0.0, presses=presses)
+            vh = evaluate(model, val_hog, device, 0.0, presses=presses)
             # Per phase, so a weak phase is not hidden in the average.
             ph = phase_of(val_hog)
             per_phase = {}
@@ -596,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                 m = ph == i
                 if m.sum() >= 200:
                     sub = {c: arr[m] for c, arr in val_hog.items()}
-                    e = evaluate(model, sub, device, 0.0)
+                    e = evaluate(model, sub, device, 0.0, presses=presses)
                     per_phase[PHASE_NAMES[i]] = {"rows": int(m.sum()), "card": round(e["card_acc"], 3),
                                                  "near": round(e["tile_near"], 3)}
             print("  hog per phase: " + "; ".join(f"{k} ({v_['rows']}) card {v_['card']} near {v_['near']}"
@@ -608,7 +759,10 @@ def main(argv: list[str] | None = None) -> int:
             log.flush()
             print(f"epoch {epoch}: val card {v['card_acc']:.3f} tile {v['tile_acc']:.3f} "
                   f"near {v['tile_near']:.3f} gate {v['gate_acc']:.3f} | hog card {vh['card_acc']:.3f} "
-                  f"near {vh['tile_near']:.3f}", flush=True)
+                  f"near {vh['tile_near']:.3f}"
+                  + (f" | press {v['press_acc']:.3f} (hog {vh['press_acc']:.3f})"
+                     if "press_acc" in v else ""), flush=True)
+            model.sync_critic()          # E15: the critic starts as value_head (no-op legacy)
             blob = {"model": model.state_dict(), "meta": meta, "epoch": epoch,
                     "train_tokens": record}
             torch.save(blob, out / f"ep{epoch + 1:02d}.pt")
