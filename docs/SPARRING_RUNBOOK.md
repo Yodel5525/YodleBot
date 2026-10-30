@@ -824,6 +824,8 @@ If space runs short:
 
 If the league step fails, the trained models are kept. Send the log back, and after the fix restart with `-From league`. The league log resumes: games already played are not played again.
 
+At the start the script also checks that the league can play a v2 checkpoint (`tools\rs_match.py` must build v2 rows). If it cannot, a yellow `warning:` line says so. The other steps still run, and the script stops before the league step instead of failing in it. Run `git pull`, then `-From league`.
+
 Send back the log, `reports\third_model_<time>.log`. Each step's `==` line has its start time, which is how the times above get measured. If you cannot send all of it, send:
 - from the rows step:
   - its header lines (`memory:`, `seen:`, `trust:`, `presses:`, `observed:`, `schema:`, `waits:`, `noise:`, and any `not bound:` lines);

@@ -119,6 +119,19 @@ function Invoke-Step([string]$Name, [string]$Python, [string[]]$ArgList) {
     }
 }
 
+# Whether tools\rs_match.py (which rs_league_eval plays every game through) builds v2 rows: its
+# ROW_SCHEMAS must hold rs_rows/v2, else every game of v2_hog is refused at its start. Exit 3
+# means it does not; any other failure of the probe (an import error) is left to the league
+# step itself to report. No double quotes in the probe: PowerShell 5.1 passes them to python
+# unescaped.
+function Test-LeagueV2 {
+    $probe = "import sys; sys.path[:0] = ['tools']; import rs_match; " +
+             "sys.exit(0 if 'rs_rows/v2' in getattr(rs_match, 'ROW_SCHEMAS', ['rs_rows/v2']) else 3)"
+    $null = & $RG -c $probe 2>&1
+    return ($LASTEXITCODE -ne 3)
+}
+$leagueV2Text = "tools\rs_match.py on this branch builds no v2 rows (ROW_SCHEMAS lacks rs_rows/v2), so the league cannot play v2_hog"
+
 $order = @('rows', 'compact', 'general', 'hog', 'eval', 'league')
 # ValidateSet accepts any case (-From Hog), but IndexOf compares exactly: without the
 # lower-casing, -From Hog would give -1 and run every step from the rows again.
@@ -162,6 +175,12 @@ if (@('default', 'prior', 'default_prior', 'none', 'off', 'zero', '0') -notconta
     if (-not (Test-Path $noisePath)) {
         Stop-Run ("ERROR: the noise profile {0} is missing (-Noise)." -f $noisePath)
     }
+}
+if (-not (Test-LeagueV2)) {
+    if ($start -ge 5) {
+        Stop-Run ("ERROR: {0}. Update the branch (git pull), then run -From league again." -f $leagueV2Text)
+    }
+    Write-Both ("warning: {0}. The steps before it run; the script then stops before the league. Update the branch (git pull) and run -From league." -f $leagueV2Text) 'Yellow'
 }
 if ($start -le 0) {
     # Finished rows are hours of work: rebuilding them must be asked for by deleting them.
@@ -232,6 +251,9 @@ if ($start -le 5) {
     # The gate: 1,000 paired games against the champion (both seats, both decks), 400 against
     # the anchor for each of the candidate and the champion. --full: the anchor games are
     # played even when the candidate does not beat the champion, so their numbers come back.
+    if (-not (Test-LeagueV2)) {
+        Stop-Run ("ERROR: {0}. v2_big and v2_hog are trained and kept: update the branch (git pull), then run -From league. Send this log back: {1}" -f $leagueV2Text, $log)
+    }
     $leagueWorkers = [Math]::Min($Workers, 6)
     Invoke-Step 'league: v2_hog vs dt_big_hog, anchor live_big_hog' $RG (@('tools\rs_league_eval.py', 'run',
         '--candidate', "v2_hog=$candidate", '--champion', "dt_big_hog=$champion",
