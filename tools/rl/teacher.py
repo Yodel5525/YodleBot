@@ -54,9 +54,13 @@ THE SEARCH (annotate), for one decision of rs_decide's sampling preset (a Decisi
               (potential) Phi of the after-state: tools/rl/ppo.py trains V on the SHAPED return,
               whose expectation is the result less Phi (the shaping telescopes), so V + Phi is
               the critic's estimate of the result. The discount over the horizon is ignored.
-  target      softmax(score / temperature). The GATE target: per entry the log-sum-exp of its
-              candidates (the drawn slot's extra drawn tile left out, so every slot is judged on
-              the same k_tiles), normalised over the searched entries A. keep_unsearched (the
+  target      softmax(score / temperature). The GATE target: per entry the BEST score of its
+              candidates (RSSearchAgent's argmax over cards x tiles; the drawn slot's extra
+              drawn tile left out, so every slot is judged on the same k_tiles), normalised over
+              the searched entries A. The best, not a log-sum-exp: that would add up to
+              log(k_tiles) to an entry with more trials, so a slot of k equal tiles would
+              outvote the single-trial wait (or a button) k : 1 and the target would push the
+              play rate up for nothing the search found. keep_unsearched (the
               default): the search only re-ranks what it looked at, so A keeps the student's mass
               q(A) and redistributes it, and every entry it did not search keeps its gate_q
               (a card outside the top k is unknown, not bad); off, A gets all the mass. The TILE
@@ -673,7 +677,9 @@ class Teacher:
         gate = q.copy()
         gate_ok = len(entries) >= 2
         if gate_ok:
-            share = _softmax([_lse(by_entry[e]) for e in entries])
+            # The entry's best trial (module doc, target): count-invariant, so the wait's one
+            # trial competes with a slot's k_tiles on equal terms.
+            share = _softmax([max(by_entry[e]) for e in entries])
             if cfg.keep_unsearched:
                 gate[entries] = float(q[entries].sum()) * share
             else:

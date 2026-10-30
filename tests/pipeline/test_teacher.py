@@ -281,6 +281,28 @@ def test_the_target_by_hand():
     assert alone.tile.tolist() == pytest.approx(target.tile.tolist())
 
 
+def test_an_entry_is_judged_by_its_best_trial_not_by_how_many_it_has():
+    """The drawn IceGolemite (slot 3, no damage on the Board) at three tiles against the wait:
+    every trial swings 0, so the wait and slot 3 split their gate_q mass 0.7 evenly (a
+    log-sum-exp would give slot 3 three votes to the wait's one: 0.525 : 0.175), and the tile
+    target is uniform. Slot 2's two tiles score 1 and 2 (over the temperature): the slot reads
+    its best, e^0 : e^2 against the wait."""
+    e = math.e
+    q = (0.4, 0.1, 0.1, 0.1, 0.3)
+    d = drawn(q=q, tiles=(306, 307, 308), tile_a=0, slot=3)
+    target = T.Teacher(HAND.replace(k_tiles=3)).annotate(Board(delay=8), 0, d, Policy(), ROW)
+    assert [(t.entry, t.cand, t.in_gate, t.ran) for t in target.trials] == [
+        (0, -1, True, True), (4, 0, True, True), (4, 1, True, True), (4, 2, True, True)]
+    assert [t.score for t in target.trials] == pytest.approx([0.0] * 4)
+    assert target.gate.tolist() == pytest.approx([0.35, 0.1, 0.1, 0.1, 0.35])
+    assert target.tile.tolist() == pytest.approx([1 / 3] * 3)
+    two = T.Teacher(HAND.replace(k_tiles=2)).annotate(Board(delay=8), 0, drawn(), Policy(), ROW)
+    assert [(t.entry, t.in_gate) for t in two.trials] == [(0, True), (3, True), (3, True)]
+    assert two.gate.tolist() == pytest.approx(
+        [0.75 / (1 + e ** 2), 0.1, 0.1, 0.75 * e ** 2 / (1 + e ** 2), 0.05])
+    assert two.tile.tolist() == pytest.approx([1 / (1 + e), e / (1 + e)])
+
+
 def test_our_plays_in_flight_land_first_and_the_prior():
     """A blue Cannon in flight, landing at 504 in column 3 (50 x 4 = 200 damage): it lands in
     every trial, each swing is 0.2 more and the target is the same. prior 1: the student's

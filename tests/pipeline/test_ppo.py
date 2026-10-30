@@ -543,18 +543,20 @@ def test_the_rollouts_distributions_and_the_ratio_at_lr_0(tmp_path):
     assert stats["rows_choice"] == int((m.choice & valid).sum())
     assert stats["rows_fallback"] == int((m.fallback & valid).sum())
     assert stats["epochs"] == 2 and state.updates == 1 and stats["updates"] == 1
+    # 15 of the 18 rows have elixir to spend (obs_rng seed 100, five of them 9000: every slot
+    # open, the HogRider and Musketeer legal anywhere): draws, and drawn waits and plays that
+    # ran train, so none of the checks below can pass vacuously
+    assert stats["rows_choice"] > 0 and stats["rows_pg"] > 0
     assert stats["ratio_dev_max"] < 1e-4                # every ratio 1
-    if stats["rows_pg"]:
-        assert stats["logp_drift_max"] < 1e-5
+    assert stats["logp_drift_max"] < 1e-5
     assert stats["value_drift_max"] < 1e-5
     for k, v in model.state_dict().items():
         assert torch.equal(v, before[k]), k
-    if stats["rows_choice"]:
-        assert abs(stats["kl"]) < 1e-5 and abs(stats["kl_wait"]) < 1e-5
-        # nothing drifted from the reference: both coefficients come down
-        assert state.kl.value == pytest.approx(1 / 1.5)
-        assert state.wait.value == pytest.approx(1 / 1.5)
-        assert stats["q_play"] == pytest.approx(stats["q_play_ref"], abs=1e-5)
+    assert abs(stats["kl"]) < 1e-5 and abs(stats["kl_wait"]) < 1e-5
+    # nothing drifted from the reference: both coefficients come down
+    assert state.kl.value == pytest.approx(1 / 1.5)
+    assert state.wait.value == pytest.approx(1 / 1.5)
+    assert stats["q_play"] == pytest.approx(stats["q_play_ref"], abs=1e-5)
     again = P.update(model, ref, rollout, cfg.replace(values="rollout"), P.PPOState.new(cfg))
     assert again["return_mean"] == pytest.approx(stats["return_mean"], abs=1e-5)
 

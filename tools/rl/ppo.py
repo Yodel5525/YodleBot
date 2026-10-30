@@ -1567,7 +1567,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     optimizer = make_optimizer(model, cfg)
     opt_path = Path(args.opt_state) if args.opt_state else None
     if opt_path is not None and opt_path.exists():
-        optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+        try:
+            optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+        except Exception as exc:              # another model's moments, a truncated file
+            return _err(f"--opt-state {opt_path}: {type(exc).__name__}: {exc} (delete the file "
+                        "to start the Adam moments over)")
         for group, lr in zip(optimizer.param_groups, (cfg.lr, cfg.critic_lr)):
             group["lr"] = lr                      # this call's rates, not the saved ones
 
