@@ -158,11 +158,17 @@ M0_FILE = "m0.json"                              # <gate root>/m0.json: tonight'
 M0_SCHEMA = "hastycr.vision.gap_gate_m0/1"
 MANIFEST_FILE, MIX_FILE, SUMMARY_FILE = "detector_manifest.json", "mix.json", "summary.json"
 #: The live chain's source files: a replay is redone when one of them changed (the cache key).
+#: Every scripts/vision module the replay imports belongs here (tests/pipeline/
+#: test_vision_gap_eval.py checks it): the tower labels (placement, presence), the refused-tap
+#: guard, the control panel's modes, the towers' label calibration and the deploy-overlay test
+#: run in the replayed chain too.
 CHAIN_FILES = ("tools/vision_replay.py", "scripts/vision_play.py", "scripts/vision/events.py",
                "scripts/vision/tracker.py", "scripts/vision/detector.py", "scripts/vision/hud.py",
                "scripts/vision/hpbars.py", "scripts/vision/geometry.py", "scripts/vision/types.py",
                "scripts/vision/labels.py", "tools/vision_classes.py", "scripts/vision/capture.py",
-               "scripts/vision/record.py", "scripts/vision/templates.py")
+               "scripts/vision/record.py", "scripts/vision/templates.py", "scripts/vision/tower_labels.py",
+               "scripts/vision/tap_refusal.py", "scripts/vision/control.py", "scripts/vision/tower_calib.py",
+               "scripts/vision/overlay.py", "scripts/vision/tap_gate.py", "scripts/vision/mode.py")
 #: The data the live chain reads (the cache key, data_digest): the class table (its sorted cards are
 #: the replay-only card ids), the event tables, the card maps, the default geometry, the HUD regions
 #: (the PC's first) and the HUD templates; data_digest adds the spawn table vision_replay resolves

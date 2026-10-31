@@ -192,6 +192,10 @@ class Hud:
     the next card, or EMPTY_CARD. elixir_milli: 0..10000, None when unread.
     clock_tick: the tick the clock reading implies, None when unread. phase:
     one of PHASES. towers: TOWER_KEYS -> TowerHp. crowns: (own, enemy).
+    towers_destroyed: the towers confirmed destroyed (sorted keys: hud.HudReader's label
+    evidence, skin audit P0-2), the only zeros legality and the event pockets act on; a tower
+    reading 0 outside it is unconfirmed and stands for them. None: not reported (another
+    reader, an older recording): every 0 counts, as before.
     """
     hand: list[int] = field(default_factory=_empty_hand)
     next: int = EMPTY_CARD
@@ -200,22 +204,35 @@ class Hud:
     phase: str = PHASE_UNKNOWN
     towers: dict[str, TowerHp] = field(default_factory=dict)
     crowns: tuple[int, int] = (0, 0)
+    towers_destroyed: tuple[str, ...] | None = None
+
+    def destroyed(self, key: str) -> bool:
+        """Whether tower `key` counts as destroyed: HP 0, and confirmed when the HUD reports a
+        confirmed set (towers_destroyed)."""
+        th = self.towers.get(key)
+        hp = getattr(th, "hp", None)
+        if hp is None or hp > 0:
+            return False
+        return self.towers_destroyed is None or key in self.towers_destroyed
 
     def to_dict(self) -> dict[str, Any]:
         return {"hand": list(self.hand), "next": self.next, "elixir_milli": self.elixir_milli,
                 "clock_tick": self.clock_tick, "phase": self.phase,
                 "towers": {k: v.to_dict() for k, v in self.towers.items()},
-                "crowns": list(self.crowns)}
+                "crowns": list(self.crowns),
+                **({} if self.towers_destroyed is None else {"towers_destroyed": list(self.towers_destroyed)})}
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> "Hud":
         d = d or {}
         crowns = d.get("crowns") or (0, 0)
+        destroyed = d.get("towers_destroyed")
         return cls([int(c) for c in d.get("hand", _empty_hand())], int(d.get("next", EMPTY_CARD)),
                    _opt_int(d.get("elixir_milli")), _opt_int(d.get("clock_tick")),
                    str(d.get("phase", PHASE_UNKNOWN)),
                    {str(k): TowerHp.from_dict(v) for k, v in (d.get("towers") or {}).items()},
-                   (int(crowns[0]), int(crowns[1])))
+                   (int(crowns[0]), int(crowns[1])),
+                   None if destroyed is None else tuple(sorted(str(k) for k in destroyed)))
 
 
 @dataclass(slots=True)

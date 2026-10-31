@@ -522,6 +522,9 @@ class ReplayPerception:
 
     def note_own_tap(self, card: int, tick: int, *, slot: int, aim_mt: Sequence[float] | None,
                      t: float | None) -> None:
+        note_tap = getattr(self.hud_reader, "note_tap", None)       # the overlay window, as live
+        if t is not None and callable(note_tap):
+            note_tap(float(t))
         aim = (None, None) if aim_mt is None else (float(aim_mt[0]), float(aim_mt[1]))
         self.deriver.note_own_tap(int(card), int(tick), slot=int(slot), aim_x_mt=aim[0], aim_y_mt=aim[1],
                                   t=t, tracker=self.tracker)
@@ -614,7 +617,8 @@ class ReplayPerception:
         hpbars.annotate_observations(obs[:len(units)], reads)
         vf.tracks = self.tracker.update(obs, tick)
         vf.events = self.deriver.update(vf.tracks, tick, t=t, tracker=self.tracker,
-                                        towers=getattr(vf.hud, "towers", None))
+                                        towers=getattr(vf.hud, "towers", None),
+                                        **VP.confirmed_towers(vf.hud))
         return step
 
 

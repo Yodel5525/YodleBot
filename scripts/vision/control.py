@@ -890,6 +890,7 @@ class ControlSnapshot:
     last_human: dict[str, Any] | None
     counts: dict[str, int]
     would: Suggestion | None = None
+    notice: str | None = None          # the runner's word for the window (set_notice), e.g. the tap gate
 
 
 COLORS = {"auto": "#2e7d32", "dry": "#1565c0", "manual": "#e65100", "stopped": "#616161"}
@@ -943,6 +944,8 @@ def window_lines(snap: ControlSnapshot, hotkey: str | None = DEFAULT_HOTKEY) -> 
         mode, color = "AUTO (dry run: no --tap)", COLORS["dry"]
     else:
         mode, color = "MANUAL: you play", COLORS["manual"]
+    if snap.notice and not snap.stopped:
+        mode += f"  |  {snap.notice}"
     key = f"  [{hotkey}]" if hotkey else ""
     button = ("Take over" if snap.mode == AUTO else "Hand back to the bot") + key
     s = snap.suggestion
@@ -1174,6 +1177,8 @@ class ControlState:
         self._last_decision: dict[str, Any] | None = None
         self._last_logged: tuple[tuple, int | None] | None = None
         self._last_human: dict[str, Any] | None = None
+        self._last_switch: dict[str, Any] | None = None
+        self._notice: str | None = None
         self._stop_reason: str | None = None
         self.counts = {"switches": 0, "suggestions": 0, "taps": 0, "dropped": 0, "bot_plays": 0,
                        "human_plays": 0, "bot_unseen": 0}
@@ -1230,9 +1235,25 @@ class ControlState:
             prev, self._mode = self._mode, mode
             self._gen += 1
             self.counts["switches"] += 1
-            self._push("mode", {"mode": mode, "prev": prev, "source": str(source), "gen": self._gen,
-                                "tick": self._tick, "t": self._clock()})
+            rec = {"mode": mode, "prev": prev, "source": str(source), "gen": self._gen,
+                   "tick": self._tick, "t": self._clock()}
+            self._last_switch = dict(rec)
+            self._push("mode", rec)
             return True
+
+    def set_notice(self, text: str | None) -> None:
+        """A line the control window shows after the mode (None: none), e.g. "tap gate OFF this
+        battle (...)": the runner's tap gate (scripts/vision_play.py)."""
+        with self._lock:
+            self._notice = None if not text else str(text)
+
+    @property
+    def last_switch(self) -> dict[str, Any] | None:
+        """The last mode switch ({mode, prev, source, gen, tick, t}, as its "mode" record), None
+        before the first. Sources: "hotkey", "button", "control file", "api", and the runner's own
+        switches to MANUAL ("refused taps", and the tap gate's "towers" / "game mode")."""
+        with self._lock:
+            return None if self._last_switch is None else dict(self._last_switch)
 
     def toggle(self, source: str = "api") -> str:
         """AUTO <-> MANUAL; returns the new mode."""
@@ -1559,7 +1580,8 @@ class ControlState:
                                    self._history[-1] if self._history else None,
                                    None if self._last_decision is None else dict(self._last_decision),
                                    None if self._last_human is None else dict(self._last_human),
-                                   dict(self.counts), self._would[-1] if self._would else None)
+                                   dict(self.counts), self._would[-1] if self._would else None,
+                                   self._notice)
 
     # -- inputs ---------------------------------------------------------------
     def _on_control_file(self, present: bool) -> None:

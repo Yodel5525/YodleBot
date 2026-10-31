@@ -574,15 +574,18 @@ class SeenTowers(StubTowers):
 
 def test_hud_reader_the_badge_holds_a_tower_without_a_detector():
     """(n) No detector: the crown badge at the placed label refuses the occlusion zero; a tower
-    reader without label_seen (or label_hold=False) keeps today's rule."""
+    reader without label_seen (or label_hold=False) keeps the old rule. The tower reader's own
+    label_seen is the hold of calibrate=False (the calibration holds by its badge template).
+    All of it is calibrate=False: with calibration (the default) "nothing read" never destroys a
+    princess tower, only its label's absence does (skin audit P0-2; test_tower_destroy.py)."""
     reads = [2101] * 8 + [None] * 30
-    r = reader_with(None, [])
+    r = reader_with(None, [], calibrate=False)
     r.tower_reader = SeenTowers(reads)
     huds = [r.read(FRAME, i * DT) for i in range(len(reads))]
     assert all(h.towers[K] == VT.TowerHp(2101, 3052) for h in huds[6:]) and huds[-1].crowns == (0, 0)
     assert r.report.tower_present[K] is True and r.report.towers_held == [K]
-    plain = reader_with(None, reads)                         # StubTowers: no label_seen
-    off = reader_with(None, [], label_hold=False)
+    plain = reader_with(None, reads, calibrate=False)        # StubTowers: no label_seen
+    off = reader_with(None, [], label_hold=False, calibrate=False)
     off.tower_reader = SeenTowers(reads)
     for rd in (plain, off):
         huds = [rd.read(FRAME, i * DT) for i in range(len(reads))]

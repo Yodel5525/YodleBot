@@ -607,13 +607,15 @@ Test-Path "$REC\frames.jsonl"                                          # must pr
 - `taps       off (the source is a recording)`;
 - `decide     live; wait_keep 0.25 (wait bias 1.386); would-play every 10 ticks`. A `WARNING: no args.json` there means the trained share of waits is unknown: copy `args.json` next to `best.pt` (`--tap` refuses without it). A `_wk100` copy shows `wait_keep 1 (wait bias 0.000)`;
 - `detector   NONE (...)` until the detector is pinned. Once it is pinned: `... on cuda:0, half True, side joint, 310 classes, 0 unresolved, classes dc897910, imgsz 640`. A `WARNING` line under it means the sides are not joint or some detector names are not in the class list: send it back;
-- `hud        clock templates ok`, then `towers     HP read where each princess tower's label is ...`. A `towers     note: the HUD regions ... have no label_* boxes` line means your `hud_regions_pc.json` predates the label boxes: nothing to do, the runner places them from its tower and bar boxes. Never copy boxes from `hud_regions_1080x1920.json` into it (the two files are at different pixel sizes). A `WARNING    the HUD regions ...: label_... px ... from where its tower_* and bar_* boxes put them` line means label boxes in it are wrong: delete the `label_*` entries it names from `hud_regions_pc.json`;
+- `hud        clock templates ok`, then `towers     each princess tower's HP label found at battle start (tower skins) and read only where it is; ...`. A `towers     note: the HUD regions ... have no label_* boxes` line means your `hud_regions_pc.json` predates the label boxes: nothing to do, the runner places them from its tower and bar boxes. Never copy boxes from `hud_regions_1080x1920.json` into it (the two files are at different pixel sizes). A `WARNING    the HUD regions ...: label_... px ... from where its tower_* and bar_* boxes put them` line means label boxes in it are wrong: delete the `label_*` entries it names from `hud_regions_pc.json`;
 - for a v2 model only: `v2 rows    opponent elixir counted from the plays seen; our taps in flight until they land (--obs-delay 24 ticks); spells in flight`. `--obs-delay 0 ticks` means the checkpoint lost its rows' delay: send it back;
 - `opp plays  guards on: an enemy unit is a play once seen for 10 ticks; a lost one may come back under another label; no play from a unit first seen over 1000 mt past the river centre where a reported one could have walked`;
+- `tap gate   no AUTO tap until the towers are calibrated (and boxed by the detector) and the mode is classic; else MANUAL (dry run: a line only)`. The gate is explained in section 18, step 2;
 - `frame 747x1328` on the first frame. A `WARNING` after it means another frame size than the HUD was calibrated on.
 
 Then, on this recording:
 - `battle 1 started (tick 110, mode MANUAL)`, about 8 s into the recording;
+- a few seconds later `battle 1: mode classic (first clock 2:56, elixir every 2.7 s)` (the elixir figure can differ by 0.1-0.2 s). There must be no line that starts with `dry run: the tower gate would keep tapping off`;
 - status lines with `| would <card> -> (x, y) @<tick>`: what the bot would play now. In MANUAL it decides on nearly every tick and almost every decision is a wait, so on a wait it works this out at most every 10 ticks;
 - `battle 1 over (end screen) at tick 44..` (overtime), then `battle 1: WIN 1-0 (end screen); record 1-0-0 (W-L-D)`;
 - `stopped: the frame source ended; 4414 frames, 0 taps, results {'win': 1}, errors -`.
@@ -673,6 +675,61 @@ Commit 0f3a56e regenerated `data\vision\spawn_children.json` in the cloud. Check
 
 The first prints `tmp\spawn_children_pc.json: 145 cards, 114 spawning units, 8 spawning spells, 1 with forms (from cards-160402017-20261019.1, cards-15535.1)`, the second `same`. `DIFFERENT: source` alone is harmless (it says only where the tables were read from). Anything else: send the line, and do not copy the file over the committed one. Send back everything from the `vision_replay` line to `summary -> ...` and both lines of the table check.
 
+**The towers on four recordings: tower skins, arenas and the tap gate.** No MuMu needed. Do this once now, and again before the first `--tap` friendly against a tower skin or an arena the bot has not seen. You pick a random tower skin every battle, your clanmates use many, and the arena changes with the season and the mode. So at the start of every battle the runner looks for each princess tower's HP label (the gold crown badge and the outlined bar next to it), wherever the skin puts it, and from then on reads that tower only where its label is. A tower counts as destroyed only after its label has been gone for 2.5 s; a unit in front of the label, or the pink tint over the enemy half while a card is selected, does not count. A king tower is never counted as destroyed during a battle: its crowns come from the end screen.
+
+Each replay below runs the pinned detector, so close MuMu and the browser first and run one replay at a time. Type or paste the commands one line at a time:
+
+```powershell
+$R0 = 'C:\hcr\reports\vision\recordings\capture_20261029_195831'
+$DRY = (Get-ChildItem C:\hcr\reports\vision_play -Directory -Filter 'vision_play_20261031_*' | Sort-Object Name | Select-Object -First 1).FullName
+$A1 = 'C:\hcr\reports\vision\autolabel\20261031_A_1\recording'
+$A2 = 'C:\hcr\reports\vision\autolabel\20261031_A_2\recording'
+Test-Path "$R0\frames.jsonl"
+Test-Path "$DRY\frames.jsonl"
+Test-Path "$A1\frames.jsonl"
+Test-Path "$A2\frames.jsonl"
+```
+
+`$R0` is Round 0 (forest arena, default towers, end screen 1-0), `$DRY` the 10-31 dry run (the chicken tower skin on the enemy side, sand arena, end screen 1-0; it kept an image of every 20th frame), `$A1` and `$A2` the two 10-31 deck A friendlies. All four `Test-Path` lines must print `True`. If the `$DRY` one prints `False`, list the sessions with `Get-ChildItem C:\hcr\reports\vision_play -Directory`, then set `$DRY` to the full path of the one started at 11:21 on 10-31, for example `$DRY = 'C:\hcr\reports\vision_play\vision_play_20261031_112148'`.
+
+Replay the four recordings through the perception, then audit the towers:
+
+```powershell
+& $BB tools\vision_replay.py $R0 --out reports\vision\replays\skin
+& $BB tools\vision_replay.py $DRY --out reports\vision\replays\skin
+& $BB tools\vision_replay.py $A1 --out reports\vision\replays\skin
+& $BB tools\vision_replay.py $A2 --out reports\vision\replays\skin
+& $BB tools\tower_audit.py reports\vision\replays\skin --all --sheet reports\vision\replays\skin\sheets
+& $BB tools\tower_audit.py reports\vision\replays\skin --all --check calib,destroy,king,crowns
+$LASTEXITCODE
+```
+
+What to look for:
+- The audit prints one block per session and battle. Under `calib`, all four princess towers must be calibrated in every battle, within about 3 s of the battle clock starting (longer on `$DRY`, which kept an image of every 20th frame, about 0.8 s apart). On `$R0` every label shift is under 3 px. On `$DRY` the enemy labels sit about 36 px up (`dv` about -36; the shifts are in 1080x1920 pixels) and ours near 0, and the enemy towers never read below 0.95 before their first real hit (`damage`).
+- Under `zero`, every destroyed tower has evidence `label`. On `$R0` and `$DRY` no tower falls during the battle, so `zero` shows `-` for all six: both were won by an enemy tower that fell in overtime as the battle ended, with its label still showing on the last battle frame, and the HUD never counts the tower that ends a battle (it would need its label gone for 2.5 s). No king reads 0 before the end screen.
+- `crowns`: the HUD's crowns against the end screen's. On `$R0` and `$DRY`: `crowns: HUD 0-0, end screen 1-0 (... frames): explained (own crowns: the battle ended as enemy_left or enemy_right fell)`. The end screen may be ahead of the HUD only by the tower that ended the battle (3 crowns for a king). `DIFFER` means the HUD missed or invented a fall: send it back. On `$A1` and `$A2`, `agree` or `explained`.
+- The last command ends with `check calib: PASS`, `check destroy: PASS`, `check king: PASS` and `check crowns: PASS`, and `$LASTEXITCODE` prints `0`. `1` means a check failed: send back the whole audit output.
+- The sheets are PNG files in `reports\vision\replays\skin\sheets`. Open a few: the boxes must sit on the towers' HP labels (green while the tower stands). Send any sheet where they do not.
+
+Then rehearse the whole runner on the same four recordings. It never taps on a recording; this shows what the tap gate would do:
+
+```powershell
+& $BB scripts\vision_play.py --source $R0 --replay-fast --no-window --hotkey none --seed 1 --ckpt runs\tokens\v2_hog_20k\best.pt
+& $BB scripts\vision_play.py --source $DRY --replay-fast --no-window --hotkey none --seed 1 --ckpt runs\tokens\v2_hog_20k\best.pt
+& $BB scripts\vision_play.py --source $A1 --replay-fast --no-window --hotkey none --seed 1 --ckpt runs\tokens\v2_hog_20k\best.pt
+& $BB scripts\vision_play.py --source $A2 --replay-fast --no-window --hotkey none --seed 1 --ckpt runs\tokens\v2_hog_20k\best.pt
+```
+
+In each run:
+- after every `battle N started ...` line, a `battle N: mode classic (first clock 2:5x, elixir every 2.x s)` line;
+- no line that starts with `dry run: the tower gate would keep tapping off`;
+- the status lines' `would` plays as in your last rehearsal of that recording: the tap gate changes no decision in a dry run (the tower fixes can move a few plays after a tower falls);
+- on `$R0` and `$DRY`: `battle 1: WIN 1-0 (end screen); ...`, with no `HUD read` in it.
+
+A recording that only started after 2:50 on the battle clock gives `mode unknown (first clock 2:3x ...)` and the dry-run gate line: the check is working, the recording started too late. Say so when you send the lines back.
+
+Send back the audit output, the four `stopped:` lines and every `mode ...` and `tower gate` line.
+
 **3. The dry-run friendly.** Start the runner in the lobby, then start a friendly yourself and play it with the mouse as usual:
 
 ```powershell
@@ -705,12 +762,14 @@ Then it prints a status line every second, for example:
 | `elixir 2.3` | our elixir |
 | `hand ... next ...` | the hand, left to right, and the next card. `?` is a slot it cannot read, or an empty slot right after a play. |
 | `MANUAL` | who plays: `MANUAL` (you), `AUTO(dry)` (the bot, without `--tap`), `AUTO(tap)` (the bot taps), `STOPPED` |
+| `gate wait`, `gate OFF`, `gate overridden` | shown only when the tap gate (section 18, step 2) is not open: still checking this battle's towers and mode (`gate wait`, the first few seconds), a check failed and the bot will not tap this battle (`gate OFF`), or you pressed F8 after that (`gate overridden`) |
 | `last ...` | the bot's last play: card, screen tile, what happened, and the tick. The tile is x 0-17 from the left and y 0-31 from the top; our half is y 17-31. `manual` is a suggestion only, `dry` would have played, `tap` tapped, `dropped` means the mode switched first. |
 | `would ...` | while the bot does not tap: what it would play now (its best card at its best tile), worked out on a wait at most every 10 ticks. It is never tapped. |
 | `31 fps, 0 taps` | frames processed per second, taps sent, and the error count if there are errors |
 
 During the battle:
 - Check that the hand, the elixir and the clock match the screen. After you play two cards quickly, both slots must show the right new cards within about a second.
+- About 3 s after `battle 1 started`, the runner prints `battle 1: mode classic (first clock 3:00, elixir every 2.8 s)`: it measured how fast your elixir fills (a card you play then only makes it take a little longer). If it prints a line starting `dry run: the tower gate would keep tapping off this battle (...)` instead, a `--tap` run would not have let the bot tap in this battle (section 18, step 2, says what each reason means): note your tower skin, the opponent's and the arena, and send the line back.
 - Press F8 once. The status shows `AUTO(dry)` and the decisions become `[dry]`. Nothing is tapped. Press F8 again to go back to `MANUAL`.
 - The control window shows the bot's suggestion while you play, and `would play ...` while it waits. Each of your plays is logged (`human_play`) next to the bot's suggestion at that moment and the newest play it would have made with your card still in its hand (`would`, `would_same_card`, `would_tile_dist`). The card's slot empties as soon as you start dragging, so a would-play made during the drag could not have chosen your card and is passed over.
 - A `battle 1 over (clock reset)` line in the middle of the battle means a misread clock. Note when it happened. About a second later the runner follows the same battle again (`battle 2 started ...; joined in the middle`), with the towers it had read.
@@ -745,7 +804,9 @@ Only while you sit at the PC and watch MuMu for the whole battle. Tell your clan
 You need:
 - a clean dry run (section 17) with the same `--ckpt`: clock, hand and elixir read right, sensible suggestions, no errors. Since 2026-10-30 the checkpoint is the champion `runs\tokens\v2_hog_20k\best.pt`. Without `--ckpt` the runner would tap with `live_big_hog`, the first model;
 - MuMu at 1080x1920 with no override size (step 7). The runner checks `wm size` and refuses another size;
-- no `C:\hcr\STOP` file. The runner will not start while it exists.
+- no `C:\hcr\STOP` file. The runner will not start while it exists;
+- the tower checks of section 17, step 2 ("The towers on four recordings"), passed: `$LASTEXITCODE` `0`, and no tower gate line in the four rehearsals;
+- against a clanmate whose tower skin the bot has not met yet: first one friendly without `--tap` (section 17, step 3) against that skin, with no `tower gate` line. Only then a `--tap` friendly against it.
 
 **1. Start it in MANUAL.** In the lobby:
 
@@ -769,6 +830,24 @@ It starts in **MANUAL**: it watches and suggests, but does not tap.
 - The `MANUAL` file does the same from a console: `New-Item -ItemType File -Force C:\hcr\MANUAL` switches to MANUAL, and `Remove-Item C:\hcr\MANUAL` back to AUTO.
 - While the runner runs, F8 belongs to it: other programs do not get the key.
 
+**The tap gate.** At the start of every battle the bot does not tap, even in AUTO, until three checks pass:
+- it has found the HP labels of all four princess towers (tower skins move them);
+- the detector boxes all six towers where the arena puts them;
+- the battle is a classic 1v1: the clock started at 3:00 (its first reading shows 2:50-3:00) and your elixir fills at one every 2.8 s.
+
+This takes about 3 s. Until then the status line shows `| gate wait` and a play the bot decides is not sent (`[skipped]`). Normally the gate then opens without a line, and the bot plays. If a check fails, the runner prints one line and switches to MANUAL:
+
+| Line | What it means |
+|---|---|
+| `towers not calibrated (enemy_left, enemy_right): tapping off this battle; play yourself (switched to MANUAL; F8 hands back to the bot anyway, for this battle only)` | the bot could not find those towers' HP labels (a skin it cannot read), so it would not know when they fall |
+| `towers not boxed by the detector (enemy_king 20% of 31 frames): ...` | the detector did not see that tower in its place often enough: a skin it does not know, or another arena layout |
+| `mode unknown (regen 1.4 s): ...` | your elixir filled faster than classic (double elixir 1.4 s, triple 0.9 s): another game mode |
+| `mode unknown (first clock 2:00 (tick 1210), not 2:5x-3:00): ...` | the clock did not start at 3:00: another mode, or the runner was started in the middle of the battle |
+
+When you see one: play the battle yourself and send the line back, with your tower skin, the opponent's and the arena. The control window shows it too, after the mode: `MANUAL: you play  |  tap gate OFF this battle (...)`. F8 hands back to the bot anyway, for the rest of that battle only. It prints `tower gate overridden (hotkey): AUTO taps for the rest of battle 1` and logs `tap_gate_override`. Do that only if the status line looks right (the hand, the elixir, `towers them 3052 3052 us 3052 3052`). The next battle is checked again.
+
+If you were still in MANUAL when the line came (as in step 2, before your first F8), the line says `MANUAL already; your next F8 keeps it MANUAL, the one after hands back to the bot anyway`. So your usual F8 to hand over does not lift the gate: the runner switches straight back to MANUAL and prints the line again, ending `(switched back to MANUAL; F8 again hands back to the bot anyway, for this battle only)`. Only a second F8 after that overrides the gate. When the runner follows the same battle again after losing it for a moment (`battle 2 started ...; joined in the middle`), it keeps that battle's gate: no new check, no new line.
+
 **3. Stop.** Any of these works, in any mode:
 - Ctrl+C in the runner's window;
 - the STOP file, from a second PowerShell window:
@@ -785,8 +864,8 @@ With `--battles 1` it also stops by itself after the result of the first battle.
 - The first taps: the card and tile the status line names must be what lands. Taps go to device pixels (1080x1920) through one adb shell.
 - The end: the runner only taps while the battle screen is up, and it never presses OK. You press OK yourself. If a tap lands after the clock has stopped, press F8 and send it back.
 - A `battle 1 over (clock reset)` line in the middle of a battle is a misread clock: send it back.
-- Tower skins move a tower's HP label, so the runner reads each princess tower where the detector (or a search for the crown badge) finds its label, and never counts a tower destroyed while the detector still sees it; a line such as `enemy labels 36 px above calibration (tower skin; ...)` is that working. A `towers misread` line, or a result line ending in `HUD read 2-0` (the result itself comes from the end screen), means the HUD read a tower wrong: send it back.
-- A tap the game did not take (the card still in its slot 1.5 s later) prints `tap did nothing: <card> -> (x, y) at tick N ...`. The bot then keeps that card off that spot: the enemy half of that lane for the rest of the battle, or 2 tiles around it for 30 s on our side. Once such a refusal is final the status line shows `| refused 1/3`. After 3 in a battle the runner prints `REFUSED TAPS: 3 taps this battle did nothing in the game (...). Switched to MANUAL ...` and stops tapping (if you pressed F8 yourself before that, it prints `... Already MANUAL ...` instead). Play yourself, and press F8 to hand back only once the status line looks right: the hand, the elixir, and `towers them 3052 3052 us 3052 3052 crowns 0-0` (the princess towers' HP as the bot reads them, theirs then ours, left to right, and the crowns ours-theirs). A `0` there for a tower that is still standing is the misread that sends troops to the enemy side: keep playing yourself and send it back. After you hand back, the count starts again from 0. A `landed after all` line is only a slow tap. Send all of these lines back. In a dry run nothing is tapped, so these lines are not shown; instead, an AUTO dry run prints `dry run: the refused-tap guard would switch to MANUAL now ...` once per battle, which is expected.
+- Tower skins move a tower's HP label. At the start of every battle the runner finds each princess tower's label (section 17, step 2, "The towers on four recordings") and then reads that tower only where its label is. A tower counts as destroyed only after its label has been gone for 2.5 s (a unit in front of the label, or a card you hold, pauses that count), and a king never during the battle (its crowns come from the end screen). A tower that comes back into view whole for a second after that stands again: `towers misread: its label is back; revived enemy_left -> 0-0`, which means a unit the detector missed had hidden it. A line such as `enemy labels 36 px above calibration (tower skin; from the search)` is that working. Any other `towers misread` line, or a result line ending in `HUD read 2-0` (the result itself comes from the end screen), means the HUD read a tower wrong: send it back.
+- A tap the game did not take (the card still in its slot 1.5 s later) prints `tap did nothing: <card> -> (x, y) at tick N ...`. The bot then keeps that card off that spot: the enemy half of that lane for the rest of the battle, or 2 tiles around it for 30 s on our side. Once such a refusal is final the status line shows `| refused 1/3`. After 3 in a battle the runner prints `REFUSED TAPS: 3 taps this battle did nothing in the game (...). Switched to MANUAL ...` and stops tapping (if you pressed F8 yourself before that, it prints `... Already MANUAL ...` instead). Play yourself, and press F8 to hand back only once the status line looks right: the hand, the elixir, and `towers them 3052 3052 us 3052 3052 crowns 0-0` (the princess towers' HP as the bot reads them, theirs then ours, left to right, and the crowns ours-theirs). A `0` there for a tower that is still standing is the misread that sends troops to the enemy side: keep playing yourself and send it back. A `0` the HUD could not confirm (its label was never found, or it fell by the old rules) is followed by `; enemy_left 0 (unconfirmed)`: the bot keeps that tower's pocket shut and plays as if it stands, so it is no reason to take over; send the line back. After you hand back, the count starts again from 0. A `landed after all` line is only a slow tap. Send all of these lines back. In a dry run nothing is tapped, so these lines are not shown; instead, an AUTO dry run prints `dry run: the refused-tap guard would switch to MANUAL now ...` once per battle, which is expected.
 - Do not watch replays or spectate clan battles while the runner runs with `--tap`. Stop it first.
 
 **5. The real delay.** After the battle:
@@ -807,7 +886,7 @@ Send back:
 Later, once you trust it:
 - `--start-mode auto` starts with the bot in control;
 - leaving out `--battles` keeps it running across several friendlies. STOP or Ctrl+C ends it.
-- The mode carries over from one battle to the next. If it is AUTO when a friendly starts, the bot plays it. Press F8 between battles if you want to start the next one yourself.
+- The mode carries over from one battle to the next. If it is AUTO when a friendly starts, the bot plays it (after the tap gate's first seconds). Press F8 between battles if you want to start the next one yourself. An F8 that overrode the tap gate counts for its own battle only: the next battle is checked again.
 
 Do not commit `reports\vision_play\`, `reports\vision\`, `STOP` or `MANUAL`. They are not gitignored, and the recordings show account names.
 

@@ -1209,11 +1209,14 @@ def skin_battle_frames():
 def test_a_skinned_tower_reads_its_label_end_to_end():
     """A real TowerReader on the drawn chicken-skin frames with the detector's tower-bar boxes:
     3052 on every frame. With placement and the search off (the old fixed boxes, pinned): the
-    feathers' 0.22, then destroyed 2.5 s after they are gone, as the friendly logged."""
+    feathers' 0.22, then destroyed 2.5 s after they are gone, as the friendly logged. Both pin
+    the placement before the label calibration (calibrate=False: the plain drawn label has no
+    UI outline; test_tower_calib.py covers the calibrated default)."""
     TTL, feathers, base = skin_battle_frames()
     frames = [feathers] * 8 + [base] * 32
     dets = TTL.skin_dets()
-    r = H.HudReader(digit_store(("tower",)), {}, regions=TTL.REGIONS, towers_wait_for_clock=False)
+    r = H.HudReader(digit_store(("tower",)), {}, regions=TTL.REGIONS, towers_wait_for_clock=False,
+                    calibrate=False)
     for i, f in enumerate(frames):
         hud = r.read(f, i * 0.125, towers=False)
         hud = r.read_towers(f, i * 0.125, hud, r.tower_evidence(dets, (TTL.W, TTL.HT)))
@@ -1223,7 +1226,7 @@ def test_a_skinned_tower_reads_its_label_end_to_end():
     assert r.report.tower_digits["enemy_left"].hp == 3052 and r.report.tower_bars["enemy_right"] == 1.0
     assert r.towers_info()["source"]["enemy_left"] == "detector"
     old = H.HudReader(digit_store(("tower",)), {}, regions=TTL.REGIONS, towers_wait_for_clock=False,
-                      place_labels=False, search_labels=False)
+                      place_labels=False, search_labels=False, calibrate=False)
     huds = [old.read(f, i * 0.125) for i, f in enumerate(frames)]
     assert huds[7].towers["enemy_left"] == VT.TowerHp(678, 3052) and huds[27].towers["enemy_left"].hp == 678
     assert huds[28].towers["enemy_left"] == VT.TowerHp(0, 3052) and huds[28].crowns == (2, 0)
@@ -1279,9 +1282,12 @@ class BarTowers:
         return {"enemy_left": v, "enemy_right": v}
 
 
-def overtime_run(evidence):
-    """48 frames from tick 3500 (overtime from the 41st); evidence(i) -> the detector's."""
-    r = H.HudReader(digit_store(("clock",)), {}, regions=regions())
+def overtime_run(evidence, calibrate=False):
+    """48 frames from tick 3500 (overtime from the 41st); evidence(i) -> the detector's.
+    calibrate=False: the old rules, under which bars of 0.22 then 0.0 destroy both enemy towers
+    (the 2026-10-31 failure the overtime check was written for); with calibration (the default
+    reader) a princess tower falls only on its label's absence, so this input destroys nothing."""
+    r = H.HudReader(digit_store(("clock",)), {}, regions=regions(), calibrate=calibrate)
     r.clock_reader, r.tower_reader = TickClock(3500), BarTowers()
     out = []
     for i in range(48):
@@ -1308,6 +1314,15 @@ def test_the_overtime_check_revives_towers_misread_as_destroyed():
                                          "crowns_after": [0, 0]}
     assert all(h.crowns == (0, 0) and not rv for h, _, rv in out[first_ot + 1:])     # once; zero-locked
     assert r.towers_info()["revived"] == ["enemy_left", "enemy_right"]
+
+
+def test_calibrated_towers_are_not_destroyed_by_zero_bars_alone():
+    """The overtime run's input with label calibration on (the default): the bars' 0.22 is a
+    fall, their 0.0 never a destruction (no label evidence: skin audit P0-2), so there is
+    nothing for the overtime check to revive."""
+    r, out = overtime_run(lambda i: None, calibrate=True)
+    assert all(h.crowns == (0, 0) and h.towers_destroyed == () and not rv for h, _, rv in out)
+    assert out[-1][0].towers["enemy_left"] == VT.TowerHp(671, 3052) and r.towers.destroyed_by == {}
 
 
 def test_the_overtime_check_keeps_a_tower_the_detector_saw_go():

@@ -649,6 +649,79 @@ def test_replay_argv_and_command_line_input(tmp_path, capsys):
     assert not (tmp_path / "g").exists()
 
 
+# ---------------------------------------------------------------------------
+# the cache key's source files (CHAIN_FILES)
+# ---------------------------------------------------------------------------
+#: scripts/vision modules the replay's code imports that do not run in a replay: the template
+#: harvester behind templates.py's command line.
+NOT_REPLAYED = {"scripts/vision/harvest.py"}
+
+
+def _imports(path: Path) -> set[str]:
+    """The modules `path` imports anywhere in it (functions too; relative imports resolved), dotted."""
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    pkg = path.parent.relative_to(ROOT).as_posix().split("/")
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = pkg[:len(pkg) - node.level + 1] if node.level else []
+            mod = ".".join(base + ([node.module] if node.module else []))
+            out.add(mod)
+            out.update(f"{mod}.{a.name}" for a in node.names)
+    return out
+
+
+def _module_file(name: str) -> Path | None:
+    parts = name.split(".")
+    for cand in (ROOT.joinpath(*parts).with_suffix(".py"), ROOT / "tools" / f"{name}.py"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def test_chain_files_hold_every_vision_module_the_replay_imports():
+    """A replay is cached under the digest of CHAIN_FILES: a scripts/vision module the replay runs
+    but the list lacks (tower_labels.py was, with the refused-tap guard and the control panel)
+    would let a cached replay survive a change to it. A new module the replay imports fails here
+    until it is added (tower_calib.py and overlay.py came with the label calibration)."""
+    seen: set[Path] = set()
+    todo = [ROOT / "tools" / "vision_replay.py"]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo += [f for f in map(_module_file, _imports(p)) if f is not None and f not in seen]
+    vision = {p.relative_to(ROOT).as_posix() for p in seen if p.parent == ROOT / "scripts" / "vision"}
+    assert {"scripts/vision/hud.py", "scripts/vision/tower_labels.py", "scripts/vision/tap_refusal.py",
+            "scripts/vision/control.py", "scripts/vision/tower_calib.py", "scripts/vision/overlay.py",
+            "scripts/vision/tap_gate.py", "scripts/vision/mode.py"} <= vision
+    missing = sorted(vision - set(GE.CHAIN_FILES) - NOT_REPLAYED)
+    assert not missing, f"add to vision_gap_eval.CHAIN_FILES: {missing}"
+    assert all((ROOT / rel).is_file() for rel in GE.CHAIN_FILES)
+    assert len(set(GE.CHAIN_FILES)) == len(GE.CHAIN_FILES)
+
+
+def test_the_chain_digest_changes_with_tower_labels_and_the_tap_guards(tmp_path):
+    for rel in GE.CHAIN_FILES:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"# {rel}\n", encoding="utf-8")
+    base = GE.chain_digest(tmp_path)
+    assert GE.chain_digest(tmp_path) == base
+    for rel in ("scripts/vision/tower_labels.py", "scripts/vision/tap_refusal.py", "scripts/vision/control.py",
+                "scripts/vision/tower_calib.py", "scripts/vision/overlay.py", "scripts/vision/tap_gate.py",
+                "scripts/vision/mode.py"):
+        p = tmp_path / rel
+        old = p.read_text(encoding="utf-8")
+        p.write_text(old + "SHIFT_PX = 1\n", encoding="utf-8")
+        assert GE.chain_digest(tmp_path) != base, rel
+        p.write_text(old, encoding="utf-8")
+        assert GE.chain_digest(tmp_path) == base, rel
+
+
 def test_katacr_regression_arithmetic(tmp_path):
     data = tmp_path / "cr.yaml"
     data.write_text("path: x\ntrain: images/train\nval: images/val\nnames:\n  0: HogRider@ally\n", encoding="utf-8")

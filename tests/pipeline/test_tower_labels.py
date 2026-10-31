@@ -2,10 +2,15 @@
 
 The owner's 2026-10-31 friendly: the opponent's chicken tower skin drew the enemy HP labels
 about 36 px (at 1080x1920) above the boxes the HUD reads, which then read the chicken's head
-and feathers. Synthetic frames only, drawn with numpy at the owner's 747x1328: a tan floor
-(neither bar colour nor gold), a crown badge in gold, the bar's fill in the side's colour with
-its dim track, at the reference label position or moved. The detector's boxes are plain
-SimpleNamespace objects like FakeDetector's.
+and feathers. Synthetic frames only, drawn with numpy at the owner's 747x1328 by
+tests/pipeline/skin_synth.py's plain label: a tan floor (neither bar colour nor gold), a crown
+badge in gold, the bar's fill in the side's colour with its dim track, at the reference label
+position or moved. The detector's boxes are plain SimpleNamespace objects like FakeDetector's.
+
+These tests pin the placement that came before the per-battle label calibration (HudReader
+calibrate=False: LabelPlacer, the fixed boxes, reads on every frame), kept so old sessions replay
+as they did. The plain label has no UI outline, so the calibration would refuse it; the
+calibrated default is tested in tests/pipeline/test_tower_calib.py.
 """
 from __future__ import annotations
 
@@ -19,99 +24,17 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.vision import geometry as G  # noqa: E402
 from scripts.vision import hud as H  # noqa: E402
 from scripts.vision import templates as TP  # noqa: E402
 from scripts.vision import tower_labels as TL  # noqa: E402
 from scripts.vision import types as VT  # noqa: E402
-
-W, HT = 747, 1328                          # the owner's frame size
-SX, SY = W / 1080.0, HT / 1920.0
-FLOOR = (214, 196, 160)                    # tan: no bar colour, not gold
-GOLD = (230, 190, 40)                      # the crown badge
-FILL = {"enemy": (225, 36, 100), "own": (113, 208, 253)}
-TRACK = {"enemy": (96, 45, 60), "own": (69, 77, 113)}
-#: the bar's fill rows from the label box centre, px at 1080 (the owner's 10-31 frames:
-#: enemy fill rows 169-180 under a label centred at 170.5 there, ours 822-834 under 830.6)
-FILL_ROWS = {"enemy": (-3.0, 14.0), "own": (-12.0, 5.0)}
-BADGE_TALL = 30.0                          # px at 1080 (rows 164-184 there)
-SKIN_DV = -36.0                            # the chicken skin's label, px at 1080
-CENTRES = [(x / 1080, y / 1920) for x, y in G.DEFAULT_CARD_SLOTS_PX]
-REGIONS = H.HudRegions.builtin(hand_centres=CENTRES)
-ENEMY = ("enemy_left", "enemy_right")
-OWN = ("own_left", "own_right")
-
-
-def floor() -> np.ndarray:
-    img = np.empty((HT, W, 3), dtype=np.uint8)
-    img[:] = FLOOR
-    return img
-
-
-def bar_geometry(key: str) -> tuple[int, int]:
-    """(anchor x, full px) of `key`'s bar on the 747 frame, as TowerReader.read_bars sees it."""
-    x0, _, x1, _ = REGIONS.px(f"bar_{key}", (W, HT))
-    margin = max(1, int(round(8 * SX)))
-    return x0 + margin, (x1 - x0) - 2 * margin
-
-
-def label_centre_v(key: str, dv: float = 0.0) -> float:
-    """The label box's centre row, px at 1080."""
-    x0, y0, x1, y1 = TL.LABEL_REF_PX[key]
-    return (y0 + y1) / 2.0 + dv
-
-
-def rows(v0: float, v1: float) -> slice:
-    return slice(int(round(v0 * SY)), int(round(v1 * SY)))
-
-
-def draw_label(img: np.ndarray, key: str, dv: float = 0.0, *, frac: float = 1.0, badge: bool = True,
-               bar: bool = True, badge_tall: float = BADGE_TALL) -> np.ndarray:
-    """A princess tower's HP label (crown badge + bar) with its box centre `dv` px (at 1080)
-    from the reference; the bar `frac` full."""
-    side = TL.side_of(key)
-    cv = label_centre_v(key, dv)
-    ax, full = bar_geometry(key)
-    if badge:
-        bc = cv + TL.BADGE_DV_PX[side]
-        img[rows(bc - badge_tall / 2, bc + badge_tall / 2), ax - 21:ax - 3] = GOLD
-    if bar:
-        r = rows(cv + FILL_ROWS[side][0], cv + FILL_ROWS[side][1])
-        end = ax + int(round(frac * full))
-        img[r, ax:end] = FILL[side]
-        img[r, end:ax + full] = TRACK[side]
-    return img
-
-
-def skin_frame() -> np.ndarray:
-    """Both enemy labels raised by SKIN_DV, our labels where calibrated."""
-    img = floor()
-    for k in ENEMY:
-        draw_label(img, k, SKIN_DV)
-    for k in OWN:
-        draw_label(img, k)
-    return img
-
-
-def det(cls: str, box_1080, conf: float = 0.9) -> SimpleNamespace:
-    x0, y0, x1, y1 = box_1080
-    return SimpleNamespace(cls=cls, box=(x0 * SX, y0 * SY, x1 * SX, y1 * SY), conf=conf, side_prob=0.5)
-
-
-def label_det(key: str, dv: float = 0.0, du: float = 0.0, *, tall: float = 1.0, wide: float = 1.0,
-              cls: str = "tower-bar"):
-    x0, y0, x1, y1 = TL.LABEL_REF_PX[key]
-    cx, cy = (x0 + x1) / 2.0 + du, (y0 + y1) / 2.0 + dv
-    hw, hh = (x1 - x0) / 2.0 * wide, (y1 - y0) / 2.0 * tall
-    return det(cls, (cx - hw, cy - hh, cx + hw, cy + hh))
+from tests.pipeline.skin_synth import (  # noqa: E402  (the frame helpers, moved there)
+    CENTRES, ENEMY, FILL, GOLD, HT, OWN, REGIONS, SKIN_DV, SY, W, bar_geometry, body_det, draw_label,
+    floor, label_centre_v, label_det, rows, skin_frame)
 
 
 def close(a, b, tol: float = 1e-6) -> bool:
     return len(a) == len(b) and all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
-
-
-def body_det(key: str, cls: str = "PrincessTower"):
-    return det(cls, TL.TOWER_BODY_REF_PX[key])
 
 
 def skin_dets(own_dv=(1.0, -1.0)) -> list:
@@ -120,7 +43,9 @@ def skin_dets(own_dv=(1.0, -1.0)) -> list:
 
 
 def reader(**kw) -> H.HudReader:
-    return H.HudReader(TP.TemplateStore.memory(), {}, regions=REGIONS, towers_wait_for_clock=False, **kw)
+    """The pre-calibration HudReader (module doc)."""
+    return H.HudReader(TP.TemplateStore.memory(), {}, regions=REGIONS, towers_wait_for_clock=False,
+                       calibrate=False, **kw)
 
 
 def read(r: H.HudReader, img: np.ndarray, t: float, dets=None) -> VT.Hud:

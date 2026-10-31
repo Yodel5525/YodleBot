@@ -36,7 +36,12 @@ slot 2 as team 1's own left because its frame mirrors x). They are not entities:
 leaves crown towers out of the unit tokens and, with no king entity, sorts the units by
 distance from where the king stands, (9000, 29000) mt for team 1, the king entity's centre.
 An unread princess counts as full (the HUD's level-11 maximum, LEVEL11_TOWER_MAX_HP); a
-king's number shows only once it is damaged and the HUD reports it full until then.
+king's number shows only once it is damaged and the HUD reports it full until then. A tower
+the HUD reads 0 counts as destroyed only when the HUD confirms it (Hud.towers_destroyed: its
+calibrated label went, skin audit P0-2) or reports no confirmed set (another reader, an older
+recording); an unconfirmed 0 counts as full like an unread tower, so legality
+(rs_decide.destroyed_towers, every frame) keeps its no-deploy rectangle closed and the king
+inactive.
 
 ENTITIES, one per unit track, built BY NAME from the engine's ENTITY_FIELDS
 (rs_engine.field_index; rsim-07), every other field at the engine's "nothing" value:
@@ -576,11 +581,15 @@ class PublicStateBuilder:
 
     def _towers(self, hud: Any, side: str, notes: list[str]) -> tuple[list[int], list[int]]:
         hp, mx = [], []
+        confirmed = getattr(hud, "towers_destroyed", None)
         for pos in ("king", "left", "right"):
             key = f"{side}_{pos}"
             th = hud.towers.get(key)
             m = th.max if th is not None and th.max else self.tower_max_hp.get(key)
             h = th.hp if th is not None else None
+            if h is not None and h <= 0 and confirmed is not None and key not in confirmed:
+                h = None                    # a 0 without label evidence stands (module doc: TOWERS)
+                notes.append(f"{key} 0 unconfirmed: full")
             if h is None:
                 h = m
                 notes.append(f"{key} unread: full")

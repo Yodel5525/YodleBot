@@ -11,8 +11,10 @@ tower troops, so nothing here depends on one layout:
   princess tower's reference label (LABEL_REF_PX) is that tower's label; a body box (BODY_CLASSES,
   any class: the detector calls a tower body "Cannoneer" now and then) inside a tower's grown
   reference body box (TOWER_BODY_REF_PX) is evidence that the tower stands. Presence is decided
-  by position, never by class. A label of the reference size close to the reference also gives
-  the shift to read that tower's HP at (placement).
+  by position, never by class (ruins are boxed as towers too: HudReader counts a body alone as
+  present only BODY_BRIDGE_S after the tower's label was last seen, skin audit P1-1). A label of
+  the reference size close to the reference also gives the shift to read that tower's HP at
+  (placement).
 * LabelPlacer: the shift per princess tower, the per-axis median of the last 15 placement votes
   once there are 5 (a 3 px dead band keeps a default-skin tower on its calibrated boxes), else
   the pixel search's result once 3 searches agree within 3 px, else no shift.
@@ -21,6 +23,9 @@ tower troops, so nothing here depends on one layout:
   the group closest to the reference badge row, None when two are about as close.
 * badge_seen: the badge alone at a given row (HudReader's pixel hold: works at any HP; rubble has
   no badge).
+LabelPlacer, find_label_dv and badge_seen serve HudReader(calibrate=False). By default HudReader
+calibrates each label per battle instead (tower_calib.py): there a gold group only proposes a
+badge, and the badge is then known by its template.
 
 All pixel constants are at the 1080x1920 reference frame (REF_SIZE) and scale to any 9:16 frame.
 Measured on the owner's frames: the reference label and body boxes are the median detector boxes
@@ -45,6 +50,8 @@ KING_KEYS = ("own_king", "enemy_king")
 LABEL_CLASSES = ("tower-bar", "dagger-duchess-tower-bar")
 #: Tower body classes. Any of them at a tower's position counts for that tower.
 BODY_CLASSES = ("PrincessTower", "Cannoneer", "DaggerDuchess", "ChefTower", "KingTower")
+#: Boxes that are neither a unit nor a spell (TowerEvidence.others leaves them out).
+OTHER_SKIP = ("king-tower-bar",)
 #: key -> the label box (x0, y0, x1, y1) at 1080x1920 for which the HUD's fixed tower regions are
 #: right: the median detector tower-bar box of the 2026-10-29 friendly (default skin). The HUD
 #: regions table carries them as label_<key> (hud.BUILTIN_REGIONS_PX); this is the fallback.
@@ -73,6 +80,7 @@ PLACE_DU_PX = 24.0                     # a label gives a placement vote within t
 PLACE_DV_PX = (-90.0, 40.0)            # ... this dy ...
 PLACE_SIZE_TOL = 0.25                  # ... and with its width and height within +-25% of the reference
 BODY_GROW = 0.25                       # a body box's centre in the reference body grown 25% a side
+BODY_BRIDGE_S = 3.0                    # a body box alone keeps a tower present this long after its label (P1-1)
 
 SEARCH_UP_PX, SEARCH_DOWN_PX = 60.0, 25.0     # the search window around the reference badge row
 GOLD_LEFT_PX, GOLD_RIGHT_PX = 34.0, 2.0       # badge columns: [anchor - 34, anchor + 2)
@@ -114,10 +122,12 @@ class TowerEvidence:
     labels: key -> the label box (presence; any label class at the label's position).
     placement: key -> (du, dv) px, the label box centre minus the reference centre, for labels
     of the reference size near the reference (a dagger-duchess label or a half-hidden one is
-    presence only). bodies: the keys a body box stands on."""
+    presence only). bodies: the keys a body box stands on. others: (class, box) of every other
+    box (units, spells, unit bars: tower_calib tells a covered label from a missing one)."""
     labels: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
     placement: dict[str, tuple[float, float]] = field(default_factory=dict)
     bodies: set[str] = field(default_factory=set)
+    others: list[tuple[str, tuple[float, float, float, float]]] = field(default_factory=list)
 
     def seen(self, key: str) -> bool:
         return key in self.labels or key in self.bodies
@@ -137,6 +147,8 @@ class TowerEvidence:
         for d in detections:
             name = str(getattr(d, "cls", ""))
             if name not in LABEL_CLASSES and name not in BODY_CLASSES:
+                if name not in OTHER_SKIP:
+                    ev.others.append((name, _to_ref(getattr(d, "box"), frame_size)))
                 continue
             box = _to_ref(getattr(d, "box"), frame_size)
             cx, cy = _centre(box)
@@ -341,7 +353,7 @@ def badge_seen(rgb: np.ndarray, anchor_u: float, row_px: float, *, tol_px: float
 
 
 __all__ = [
-    "BADGE_DV_PX", "BODY_CLASSES", "KING_KEYS", "LABEL_CLASSES", "LABEL_REF_PX", "LabelPlacer",
+    "BADGE_DV_PX", "BODY_BRIDGE_S", "BODY_CLASSES", "KING_KEYS", "LABEL_CLASSES", "LABEL_REF_PX", "LabelPlacer",
     "PRINCESS_KEYS", "SOURCE_DETECTOR", "SOURCE_FIXED", "SOURCE_SEARCH", "TOWER_BODY_REF_PX",
     "TowerEvidence", "badge_seen", "find_label_dv", "gold_mask", "ref_badge_row",
 ]

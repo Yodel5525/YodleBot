@@ -1056,12 +1056,14 @@ class EventDeriver:
         return tap
 
     def update(self, tracks: Iterable[Track], tick: int, *, t: float | None = None,
-               tracker: Any = None, towers: Mapping[str, Any] | None = None) -> Events:
+               tracker: Any = None, towers: Mapping[str, Any] | None = None,
+               destroyed: Iterable[str] | None = None) -> Events:
         """Feed one frame's tracks (Tracker.update's output) at battle tick `tick`.
         t: the frame's capture time (types.now clock), for latencies in seconds.
         tracker: the Tracker, for birth positions of new tracks (and, with
         own_reid_cross_team, Tracker.inherit_team). towers: the HUD's tower reads
-        (Hud.towers), for the pockets deploy_zone_mt allows (note_towers). Returns the
+        (Hud.towers), for the pockets deploy_zone_mt allows (note_towers); destroyed: the
+        HUD's confirmed set (Hud.towers_destroyed), when it reports one. Returns the
         events derived on this frame (not cumulative)."""
         tick = int(tick)
         if self._tick is not None and tick < self._tick:
@@ -1069,8 +1071,8 @@ class EventDeriver:
             tick = self._tick
         self._tick = tick
         self._out_opp, self._out_own = [], []
-        if towers:
-            self.note_towers(towers)
+        if towers or destroyed is not None:
+            self.note_towers(towers or {}, destroyed)
 
         for tr in tracks:
             rec = self._recs.get(tr.uid)
@@ -1120,12 +1122,17 @@ class EventDeriver:
         self._forget(tick)
         return Events([_copy_opp(p) for p in self._out_opp], [replace(x) for x in self._out_own])
 
-    def note_towers(self, towers: Mapping[str, Any]) -> set[str]:
+    def note_towers(self, towers: Mapping[str, Any], destroyed: Iterable[str] | None = None) -> set[str]:
         """Note the princess towers read destroyed (hp 0) in `towers` (Hud.towers: TOWER_KEYS ->
         TowerHp; a dict with "hp" or a plain number works too). A fallen tower opens a pocket in
         its lane (x below or above MID_X_MT), where deploy_zone_mt then lets the other side play:
         own_left / own_right for the opponent's units, enemy_left / enemy_right for ours. A tower
-        stays fallen until reset(). Returns the fallen towers."""
+        stays fallen until reset() (or revive_towers). `destroyed`: the HUD's confirmed set
+        (Hud.towers_destroyed, label evidence: skin audit P0-2); when given only those towers
+        fall, and a 0 outside it (unconfirmed) opens nothing. Returns the fallen towers."""
+        if destroyed is not None:
+            self.fallen_towers.update(k for k in destroyed if k in _POCKET_TOWERS)
+            return set(self.fallen_towers)
         for key in _POCKET_TOWERS:
             v = towers.get(key) if isinstance(towers, Mapping) else None
             hp = v.get("hp") if isinstance(v, Mapping) else getattr(v, "hp", v)
