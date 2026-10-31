@@ -136,6 +136,39 @@ def test_log_and_its_roller_are_one_play():
     assert [(p.card, p.tick) for p in ev.opp_plays] == [(LOG, 400)]
 
 
+def test_a_spell_seen_in_two_flashes_25_ticks_apart_is_one_play():
+    """An enemy Log lost mid-roll for 25 ticks and found 3,500 mt further on (a rolling Log moves
+    135-175 mt a tick on the owner's 2026-10-29 friendly): rule 1 reaches 1,200 + 50 x 25 = 2,450 mt,
+    so it is the spell window from the last sighting (spell_window_ticks, SPELL_WINDOW = 50) that
+    keeps it one play: 3,500 mt is within spell_reach_mt 3,000 + the Log's own 100 mt a tick x 25.
+    A 20-tick window made it two, and each one is charged in full."""
+    assert EV.SPELL_WINDOW == 50
+    assert EV.EventConfig().spell_window_ticks == EV.EventConfig.live().spell_window_ticks == 50
+
+    def run(config):
+        d = deriver(config=config)
+        d.update([tk(31, "LogProjectileRolling", E, 3500, 20000, 300, 301)], 301)
+        d.update([tk(31, "LogProjectileRolling", E, 3500, 20300, 300, 303)], 303)
+        d.update([], 320)
+        d.update([tk(32, "LogProjectileRolling", E, 3500, 23800, 328, 329)], 329)
+        return d
+
+    for config in (None, EV.EventConfig.live()):
+        d = run(config)
+        assert [(p.card, p.tick, p.uids) for p in d.opp_plays()] == [(LOG, 300, [31, 32])]
+        assert (d.how_of(32), d.opp_stats.spells, d.opp_stats.reacquired) == ("merged", 1, 0)
+    d = run(EV.EventConfig(spell_window_ticks=20))
+    assert [(p.card, p.tick) for p in d.opp_plays()] == [(LOG, 300), (LOG, 328)]
+    with pytest.raises(ValueError):
+        EV.EventConfig(spell_window_ticks=-1)
+    # units keep PLAY_WINDOW from the play's first sighting: a Knight 25 ticks on, 4,000 mt away
+    # (past rule 1's reach, inside merge_radius_mt), is a new play
+    d = deriver()
+    d.update([tk(41, "Knight", E, 9000, 8000, 100, 101)], 101)
+    d.update([tk(42, "Knight", E, 9000, 12000, 126, 127)], 127)
+    assert [(p.card, p.tick) for p in d.opp_plays()] == [(KNIGHT, 100), (KNIGHT, 126)]
+
+
 # ---------------------------------------------------------------------------
 # own taps and landings
 # ---------------------------------------------------------------------------
@@ -404,6 +437,172 @@ def test_with_the_real_tracker():
     # the Witch, its two skeletons (children), then a Skeletons card at the other bridge
     assert [(p.card, p.tick) for p in plays] == [(WITCH, 100), (SKELETONS, 110)]
     assert [d.card_of(u) for u in (2, 3)] == [WITCH, WITCH]
+
+
+# spells through the real Tracker (docs/SEASON_UPDATES.md 8.2): the tables' spell classes are the
+# tracker's spell_classes; the live chain passes ClassTable.spell_labels()
+SPELL_CLASSES = {"FireballSpell", "LogProjectile", "LogProjectileRolling", "Zap"}
+OWN_CLASSES = {"Cannon", "FireballSpell", "HogRider", "IceGolemite", "IceSpirits", "Musketeer", "Skeleton",
+               "LogProjectile", "LogProjectileRolling"}
+
+
+def tob(cls, x, y, side, conf=0.9):
+    return T.Observation(cls, float(x), float(y), conf, side)
+
+
+def run_tracked(frames, spell_classes, **kw):
+    """frames {tick: [Observation]} through a Tracker and a deriver; (tracker, deriver, opp plays)."""
+    assert SPELL_CLASSES == set().union(*tables().spells.values())
+    tracker = T.Tracker(own_classes=OWN_CLASSES, spell_classes=spell_classes, solver="greedy")
+    d = deriver(**kw)
+    plays = []
+    for tick in sorted(frames):
+        plays += d.update(tracker.update(frames[tick], tick), tick, tracker=tracker).opp_plays
+    return tracker, d, plays
+
+
+def test_an_enemy_zap_over_our_unseen_skeleton_is_one_enemy_play():
+    """A Zap flash over our Skeleton while the Skeleton's box is missing: it is the one box in the
+    Skeleton's gate, so without spell_classes it joined the Skeleton's track and was no play; with
+    them it is a track of its own, reported on its first sighting (conf 0.7 >= spell_confirm_conf)."""
+    skeleton = [tob("Skeleton", 5000, 24000, 0.1)]
+    frames = {tick: skeleton for tick in range(100, 112, 2)}
+    frames[112] = [tob("Zap", 5000, 23700, 0.9, conf=0.7)]
+    frames.update({tick: skeleton for tick in (116, 118)})
+    tracker, d, plays = run_tracked(frames, SPELL_CLASSES, own_deck=HOG26)
+    assert [(p.card, p.kind, p.tick, p.uids) for p in plays] == [(ZAP, "spell", 112, [2])]
+    skel = tracker.state(1)
+    assert (skel.label, tracker.team_of(skel), skel.hits) == ("Skeleton", O, 8)
+    assert [(x.card, x.land_tick) for x in d.own_landings()] == [(SKELETONS, 100)]
+    tracker, d, plays = run_tracked(frames, None, own_deck=HOG26)     # as before: no Zap play
+    assert plays == [] and tracker.state(1).hits == 9 and len(tracker.states()) == 1
+
+
+def test_our_log_next_to_our_new_cannon_is_a_log_play_and_a_cannon_play():
+    """Our Log rolls out of sight and our Cannon lands within its track's gate (the owner's
+    2026-10-29 friendly, tick 3599): without spell_classes the Log's track took the Cannon's boxes
+    and the Cannon was never our play."""
+    frames = {tick: [tob("LogProjectileRolling", 3500, 24000 - 150 * (tick - 200), 0.1, conf=0.8)]
+              for tick in (200, 202, 204, 206)}
+    frames.update({tick: [tob("Cannon", 4000, 23300, 0.1)] for tick in range(208, 222, 2)})
+    tracker, d, plays = run_tracked(frames, SPELL_CLASSES, own_deck=HOG26)
+    assert plays == [] and sorted((x.card, x.land_tick, x.slot) for x in d.own_landings()) == [
+        (CANNON, 208, -1), (LOG, 200, -1)]
+    assert [(s.uid, s.label) for s in tracker.states()] == [(1, "LogProjectileRolling"), (2, "Cannon")]
+    tracker, d, plays = run_tracked(frames, None, own_deck=HOG26)
+    assert [(x.card, x.land_tick) for x in d.own_landings()] == [(LOG, 200)]
+    assert [(s.uid, s.label) for s in tracker.states()] == [(1, "Cannon")]
+
+
+def test_an_enemy_log_in_two_flashes_is_one_play_with_the_real_tracker():
+    """The two flashes 25 ticks and 3,750 mt apart are two tracks (the first expired, and it is far
+    past the gate); the spell window keeps them one play, a 20-tick window made them two."""
+    frames = {tick: [tob("LogProjectileRolling", 3500, 20000 + 150 * (tick - 300), 0.9, conf=0.8)]
+              for tick in (300, 302, 304, 329, 331)}
+    tracker, d, plays = run_tracked(frames, SPELL_CLASSES)
+    assert [(p.card, p.tick, p.kind) for p in d.opp_plays()] == [(LOG, 300, "spell")]
+    assert d.opp_plays()[0].uids == [1, 2] and d.how_of(2) == "merged"
+    tracker, d, plays = run_tracked(frames, SPELL_CLASSES, config=EV.EventConfig(spell_window_ticks=20))
+    assert [(p.card, p.tick) for p in d.opp_plays()] == [(LOG, 300), (LOG, 329)]
+
+
+def test_one_stray_box_of_our_own_log_is_no_enemy_play():
+    """One box of our Log at the river (side 0.1, no tap pending, dry run): its team is undecided at
+    birth, so the tracker waits for a second sighting, as for a unit, and it dies. Reported at once,
+    the deriver's fallback (an undecided spell is the enemy's) made it a 2-elixir enemy Log."""
+    frames = {100: [tob("LogProjectileRolling", 9000, 16300, 0.1, conf=0.8)]}
+    frames.update({tick: [] for tick in range(102, 140, 2)})
+    for config in (None, EV.EventConfig.live()):
+        tracker, d, plays = run_tracked(frames, SPELL_CLASSES, own_deck=HOG26, config=config)
+        assert plays == [] and d.opp_plays() == [] and d.own_landings() == [] and tracker.states() == []
+    frames[100] = [tob("Zap", 9000, 16300, 0.9, conf=0.8)]     # a label only the enemy casts: at once
+    tracker, d, plays = run_tracked(frames, SPELL_CLASSES, own_deck=HOG26)
+    assert [(p.card, p.tick) for p in plays] == [(ZAP, 100)]
+
+
+def test_our_skeletons_box_read_as_zap_is_no_enemy_play():
+    """Our Skeleton's box read as Zap for two frames, at the Skeleton's size, joins the Skeleton's
+    track (scripts/vision/tracker.py, SPELLS: flickers): no enemy play. A Zap-sized box there, or one
+    without a box size, is the enemy's Zap."""
+    def frames(zap_size):
+        out = {}
+        for tick in range(100, 130, 2):
+            if 112 <= tick < 116:
+                w, h = zap_size or (None, None)
+                out[tick] = [T.Observation("Zap", 5000.0, 24000.0, 0.7, 0.1, box_w=w, box_h=h)]
+            else:
+                out[tick] = [T.Observation("Skeleton", 5000.0, 24000.0, 0.9, 0.1, box_w=36.0, box_h=40.0)]
+        return out
+
+    for config in (None, EV.EventConfig.live()):
+        tracker, d, plays = run_tracked(frames((38.0, 44.0)), SPELL_CLASSES, own_deck=HOG26, config=config)
+        assert d.opp_plays() == [] and len(tracker.states()) == 1
+        skel = tracker.state(1)
+        assert (skel.label, tracker.team_of(skel), skel.hits) == ("Skeleton", O, 15)
+        assert [(x.card, x.land_tick) for x in d.own_landings()] == [(SKELETONS, 100)]
+    for size in ((175.0, 140.0), None):
+        tracker, d, plays = run_tracked(frames(size), SPELL_CLASSES, own_deck=HOG26)
+        assert [(p.card, p.tick) for p in d.opp_plays()] == [(ZAP, 112)], size
+
+
+def test_a_second_cast_elsewhere_is_a_play_of_its_own():
+    """Rule 2 for a spell past PLAY_WINDOW: a Zap seen again 30 ticks after the last sighting is the
+    same cast only within spell_reach_mt (+ the play's own speed x the gap). An area does not move,
+    so a Zap on the other lane (or a Mirrored one) is a second play; 1,500 mt away it is the same
+    area. Within PLAY_WINDOW any distance merges, as before."""
+    def run(x2, gap, config=None):
+        d = deriver(config=config)
+        d.update([tk(1, "Zap", E, 4000, 22000, 100, 101)], 101)
+        d.update([tk(1, "Zap", E, 4000, 22000, 100, 104)], 104)
+        first = 104 + gap
+        d.update([tk(2, "Zap", E, x2, 22000, first, first + 1)], first + 1)
+        return [(p.card, p.tick) for p in d.opp_plays()]
+
+    for config in (None, EV.EventConfig.live()):
+        assert run(14000, 30, config) == [(ZAP, 100), (ZAP, 134)]
+        assert run(5500, 30, config) == [(ZAP, 100)]
+        assert run(14000, 15, config) == [(ZAP, 100)]
+    assert run(14000, 30, EV.EventConfig(spell_reach_mt=None)) == [(ZAP, 100)]
+    with pytest.raises(ValueError):
+        EV.EventConfig(spell_reach_mt=-1.0)
+
+
+BARB_LOG, BARBARIANS = 30, 31
+
+
+def test_a_barbarian_barrel_boxed_as_the_log_is_one_play():
+    """A spell that puts a unit down, boxed under a look-alike's label: the enemy's Barbarian Barrel
+    boxed as the Log rolls out its Barbarian, which the tracker's kind rule keeps a track of its own.
+    The Log's classes explain it (SPELL_LOOKALIKES), so it is the Log's child, not a 5-elixir
+    Barbarians play; and a spell track whose label the tracker fixes to BarbLog explains it too."""
+    table = {"kinds": {"Log": "spell", "BarbLog": "spell", "Barbarians": "troop"},
+             "compositions": {"Barbarians": {"Barbarian": 5}},
+             "spell_objects": {"Log": ["LogProjectile", "LogProjectileRolling"], "BarbLog": ["BarbLogProjectile"]},
+             "spell_children": {"BarbLog": ["Barbarian"]}, "children": {}}
+    ids = {"Log": LOG, "BarbLog": BARB_LOG, "Barbarians": BARBARIANS}
+    tb = EV.EventTables.from_names(table, ids)
+    assert tb.explains("Log", "Barbarian") and tb.explains("the-log", "Barbarian")
+    assert tb.explains("BarbLog", "Barbarian") and tb.unit_cards("Barbarian") == (BARBARIANS,)
+    plain = EV.EventTables(compositions={BARBARIANS: {"Barbarian": 5}},
+                           spells={LOG: {"Log"}, BARB_LOG: {"BarbLog"}}, children={"BarbLog": {"Barbarian"}})
+
+    def run(tables, labels, config=None):
+        d = EV.EventDeriver(tables, config)
+        d.update([], 0)
+        for k, tick in enumerate(range(100, 130, 2)):
+            d.update([tk(1, labels(k), E, 4000, 6000 + 330 * k, 100, tick)], tick)
+        for tick in range(130, 170, 2):
+            d.update([tk(2, "Barbarian", E, 4000, 11300, 130, tick)], tick)
+        return d
+
+    for config in (None, EV.EventConfig.live()):
+        d = run(tb, lambda k: "Log", config)
+        assert [(p.card, p.tick, p.uids) for p in d.opp_plays()] == [(LOG, 100, [1, 2])]
+        assert d.how_of(2) == "child"
+        d = run(plain, lambda k: "Log" if k < 3 else "BarbLog", config)     # the label follows the track
+        assert [(p.card, p.tick) for p in d.opp_plays()] == [(LOG, 100)] and d.how_of(2) == "child"
+    d = run(plain, lambda k: "Log")                 # neither: the Barbarian is a play of its own
+    assert [(p.card, p.tick) for p in d.opp_plays()] == [(LOG, 100), (BARBARIANS, 130)]
 
 
 def test_state_tracks_run_the_deriver_on_engine_states():

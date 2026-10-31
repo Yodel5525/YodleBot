@@ -1197,6 +1197,27 @@ class ClassTable:
                 out.add(card)
         return frozenset(out)
 
+    def spell_labels(self) -> frozenset[str]:
+        """Every label a spell box can carry: the spell cards' names (what
+        scripts/vision/detector.py puts in Detection.cls for a spell: "Zap") and their KataCR
+        names ("zap", "zap-evolution"), from the cards' "kind" and the KataCR crosswalk. This is
+        the tracker's spell_classes: a box of one of these never joins a unit's track, nor a
+        unit's box a spell's (scripts/vision/tracker.py, SPELLS). The units a spell puts down
+        (a Goblin Barrel's goblins, a Heal Spirit) keep their own class labels and are not in
+        it. "RoyalDelivery" is in it although a cardless building class shares the name: a
+        detector reads royal-delivery as that card."""
+        out: set[str] = set()
+        for card, info in self.cards.items():
+            if info.get("kind") == "spell":
+                out.add(card)
+                out.update(info.get("katacr") or ())
+        for name, entry in self.katacr.items():
+            if entry.get("type") == "spell":
+                out.add(name)
+                if entry.get("card"):
+                    out.add(str(entry["card"]))
+        return frozenset(out)
+
     # ------------------------------------------------------------ detector crosswalk
     def _label(self, entry: Mapping[str, Any], name: str) -> Label:
         typ = str(entry.get("type", "unknown"))

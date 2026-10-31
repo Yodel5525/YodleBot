@@ -560,10 +560,10 @@ The other new relations wait for detector labels: the evolved Witch's interval s
 
 ### 8.2 Spell plays (2026-10-30)
 
-On the PC, `tools/vision_replay.py` ran on the 2026-10-29 friendly (`capture_20261029_195831`) with the pinned detector (`7a1acec2c94c`, conf 0.35). It found 46 opponent plays and **0 spell plays**. The main account cast Zap and Freeze several times. Yodle2 cast the Log 5 times and Fireball once, as read from the hand. Lines are cited at 88ec08f.
+On the PC, `tools/vision_replay.py` ran on the 2026-10-29 friendly (`capture_20261029_195831`) with the pinned detector (`7a1acec2c94c`, conf 0.35). It found 46 opponent plays and **0 spell plays**. The main account's deck held Zap and Freeze (the API battle log), and he cast Zap several times. The first version of this note said Freeze too; the owner corrected that on 2026-10-30 ("I don't think I used freeze in that match"). So this recording tests Zap only: **Freeze is untested on it**. The Zap casts were not counted. Yodle2 cast the Log 5 times and Fireball once, as read from the hand. Lines are cited at 88ec08f; the fixes of 2026-10-30 (below) are cited by name.
 
-**The detector misses them. The event code does not drop them.**
-- In 2,467 battle frames there is no Zap or Freeze box on either side, and no enemy-side spell box of any class.
+**No Zap box. The event code does not drop spells.**
+- In 2,467 battle frames there is no Zap or Freeze box on either side, and no enemy-side spell box of any class. The missing Freeze boxes say nothing: no Freeze was cast.
 - All 162 spell boxes are Yodle2's: Log 152, Fireball 10, every one at side_prob 0.10. They make 6 casts, and these match the hand's 6 spell plays.
 - No enemy spell was boxed as a unit instead:
   - on our 747-px frame a Zap is about 175 px wide and a Freeze about 210 px. KataCR's boxes are 0.27 and 0.33 of its arena-wide images, so 4.9 and 6.0 tiles, the two spells' diameters; a tile is 35.3 px here;
@@ -579,11 +579,11 @@ On the PC, `tools/vision_replay.py` ran on the 2026-10-29 friendly (`capture_202
   - the detector names a spell box by its card (`scripts/vision/detector.py:592-593`);
   - the event tables map Zap and Freeze to their cards;
   - the opponent-play guards of commit 522c70c skip spells (`scripts/vision/events.py:1233`, `:1245`, `:1325`, `:1466`).
-- A re-implementation of the deriver on the recorded tracks gives:
+- A re-implementation of the deriver on the recorded tracks gives (and the real `events.py`, run in the sandbox on them, the same):
   - with the guards off: 103 opponent plays, 0 spells;
   - with the guards on: 46 opponent plays, 0 spells.
 
-  Both runs keep our 6 casts as our own plays. Nothing in `events.py` explains the 0. It has one spell weakness of its own, the 20-tick merge window (below).
+  Both runs keep our 6 casts as our own plays. Nothing in `events.py` explains the 0. It had one spell weakness of its own, the 20-tick merge window (below, now 50).
 
 **How the capture plan covers it.**
 - **Who casts.** Rule 3 of NEW_CARDS_PLAN 4.2 casts every spell at least 4 times per friendly, on groups and on empty ground. The main account casts them, so they land on the enemy side, the side the live bot needs.
@@ -594,8 +594,8 @@ On the PC, `tools/vision_replay.py` ran on the 2026-10-29 friendly (`capture_202
 
 | Spell | Decks | Training casts, at least | Gold |
 |---|---|---|---|
-| Zap | C, G (and J, optional: the Zap evo) | 20 (28 with J) | C2, G2 (8 casts; 12 with J2) and Round 0 |
-| Freeze | I | 8 | I2 (4 casts) and Round 0 |
+| Zap | C, G (and J, optional: the Zap evo) | 20 (28 with J) | C2, G2 (8 casts; 12 with J2), and Round 0's Zap casts (not counted yet) |
+| Freeze | I | 8 | I2 (4 casts) only: Round 0 has no Freeze cast |
 | Rocket | A, F | 16 (and 4 in A's dev friendly) | A2, F2 (8) |
 | Lightning | B | 12 | B2 (4) |
 | Royal Delivery | D | 8 | D2 (4) |
@@ -609,32 +609,70 @@ KataCR has 6 Zap casts and 1 Freeze cast.
   - The harvest tracker pairs by position only (`class_cost` 0, `team_cost` 0, `min_hits` 1; `unit_harvest.py:264-271`). A Zap or Freeze over a unit can join that unit's harvest track, so watch the S4 (label flicker) and S7 (split) flags.
   - A Freeze covers about 28 square tiles, close to the blob cap of 32 (`blob_max_tiles`, `unit_harvest.py:303`). One with no detector box even at conf 0.05 may not be proposed at all.
 
-  The last two follow from the settings and were not run. If a Round 0 Zap or Freeze cast is not on the sheet, add the play by hand (`plays ... --add-play`). If the conf-0.05 check below prints `none`, the C, G and I friendlies may need their Zap and Freeze boxes drawn by hand.
+  The last two follow from the settings and were not run. If a Round 0 Zap cast is not on the sheet, add the play by hand (`plays ... --add-play`); Round 0 has no Freeze cast to look for. If the conf-0.05 check below prints `none`, the C, G and I friendlies may need their Zap and Freeze boxes drawn by hand.
 - **Spells do not gate.** The gate checks per-card play recall only for new cards (`tools/vision_gap_eval.py:1488`), and every spell named here already has a label. Read the spells' `per_card` rows in the gate report, on Round 0 (Yodle2 cast the Log 5 times and Fireball once) and on the first live spar. Check two points:
   - recall on the gold casts;
   - no phantom enemy Zap, Freeze, Rocket, Barbarian Barrel, Arrows or Lightning on our Ice Spirits, Ice Golem, Log or Fireball. KataCR has these spells on the enemy side only, or almost only (ally/enemy boxes: rocket 0/20, barbarian-barrel 0/76, arrows 3/27, lightning 0/9). The deck rule puts any of them on the enemy, and spells skip the guards, so one misread is a full-cost enemy play: our Fireball read as Rocket charges the opponent 6 elixir.
 
   A list of thin or look-alike spells that do gate (a `GateConfig` field in `vision_gap_eval.py`) would be a follow-up.
-- **The tracker trades boxes between spell and unit tracks** (not changed here). The association pairs by position first: the Hungarian solver maximises the number of pairs (`tracker.py:146-148`), and a label mismatch costs only `class_cost` 0.5. So any track within its gate takes a spare box of the other kind.
-  - **Synthetic enemy spell boxes on this recording:**
-    - one-frame Zap: never becomes a track. It needs `min_hits` 2 sightings within 6 ticks (`tracker.py:231-232`), so 0 of 24 placements became a play;
-    - Zap seen on 2-4 frames over a detected unit: 18 of 24 became plays;
-    - Zap over an undetected unit within 1.5 tiles: 0 of 24;
-    - Freeze over a detected unit: 6 of 8;
-    - Freeze over an undetected unit: 0 of 8.
+- **The tracker traded boxes between spell and unit tracks** (fixed on 2026-10-30). The association pairs by position first: the Hungarian solver maximises the number of pairs (`tracker.py:146-148`), and a label mismatch cost only `class_cost` 0.5. So any track within its gate took a spare box of the other kind.
   - **On the recording, with the pinned model and our own Log** (cast at tick 3569 in front of our left princess tower):
     - **A spell track took a unit.** Our Log track (uid 385) took the boxes of the Cannon we put down next to it at tick 3599. It turned Cannon at 3626 and carried it to about tick 4100. That Cannon got no own play, guards on or off: the own Cannon plays are at 468, 1368, 2623, 2859, 3309 and 4250. With `--tap`, the bot's Cannon tap would go unmatched, and the board's Cannon would carry the Log's first sighting.
-    - **A unit track took a spell and changed team.** The enemy Hog Rider track (uid 383) took the rolling Log's boxes. It turned Log at 3589 and flipped to our team at 3597, so the Hog left the board. When the Hog was boxed again (tick 3668, uid 391), the legacy rules counted it as a second Hog Rider play; LIVE_GUARDS drops it as young.
-  - **Fix now, as a `tracker.py` task, not after the first spell fine-tune.** Yodle2 casts the Log about 5 times a battle, mostly in front of our own towers, where our Cannon also goes.
-    - **Forbid unit-spell pairs.** The Tracker has no notion of a label's kind today: it takes only `own_classes` and `similarity`, and `_class_sim` feeds a soft cost. Give it a `spell_classes` argument built from the ClassTable (the spell cards' names and their KataCR labels). Wire it at the three call sites (`scripts/vision_play.py:1875`, `tools/vision_replay.py:1237`, `scripts/vision/unit_harvest.py:4113`). `_cost` (`tracker.py:462`) then returns FORBIDDEN when exactly one of the track's label and the box's label is a spell. That covers both cases above.
-    - **Short spells.** Report a spell from its first sighting only above a confidence floor, and keep `min_hits` 2 below it. Spells skip the opponent-play guards, so a single false enemy spell box would otherwise be a full-cost play.
-    - **End-to-end tests through the real Tracker and deriver:** an enemy Zap over an undetected Skeleton becomes one enemy play, and our Log next to our new Cannon gives one Log play and one Cannon play.
-- **A spell seen in two flashes more than 20 ticks apart counts twice** (an `events.py` task, not changed here).
-  - Spells merge into a play only within `play_window_ticks` 20 of its last sighting (`events.py:1513`). Same-label re-ID allows 1200 mt plus 50 mt per tick gone (`events.py:725-727`).
+    - **A unit track took a spell and changed team.** The enemy Hog Rider track (uid 383) took the rolling Log's boxes. It turned Log at 3587 and flipped to our team at 3597, so from 3587 the board showed the Hog as a Log, and from 3597 as our Log.
+    - **Correction: the legacy double Hog has another cause.** The legacy rules count the Hog at 3553 (uid 382) and again at 3668 (uid 391), with a Giant play (uid 383, 3557) and Royal Recruits (uids 388 and 389, 3601) between them: four fragments of one Hog. Uid 383 was a Giant play from its second sighting (3559), before it took the Log's boxes, and the deriver does not revisit a classified track. Without the swap the legacy plays from 3540 to 3720 are the same. LIVE_GUARDS reports none of the four, before and after.
+    - In all, a box joined a track whose reported label was of the other kind 20 times, in 5 tracks. The count is taken when the box joins: once a track has turned (uid 385 to Cannon), the boxes of its new kind are not counted again. Counting every box of a kind other than the track's first box gives 288 instead, 258 of them the Cannon's boxes in uid 385. The 20 are: the two above (uid 383: 4 Log boxes; uid 385: 4 Cannon, 1 Skeleton and 1 Recruit), our Log at 2930 (2 Barbarian boxes) and our Skeleton next to it (2 Log boxes), and our Fireball at 4358-4386 (3 SkeletonWarrior, 2 Recruit and 1 Valkyrie boxes).
+  - **The fix** (`scripts/vision/tracker.py`, SPELLS in its module doc; wired where the live chain builds its tracker, `scripts/vision_play.py` and `tools/vision_replay.py`):
+    - **Kinds.** `Tracker(spell_classes=...)`, built from `ClassTable.spell_labels()` (`tools/vision_classes.py`: the spell cards' names, which the detector writes in `Detection.cls`, and their KataCR names). `_cost` returns FORBIDDEN when exactly one of the track's label and the box's label is a spell, and the label vote never changes a track's kind. Spell-spell and unit-unit pairs keep the soft label cost.
+    - **Flickers.** A unit's box misread as a spell for a few frames must not become a spell track (spells skip the guards). After the assignment, a spell box that is left over joins a unit track that has no box on this frame when the track's prediction is within `max_gate_mt` (2,000) of it and the box's width and height are each within `flicker_size_ratio` 1.4 of the track's last box. Observations carry the box size for this (`Observation.box_w`, `box_h`, from `observations_from_detections`). On this recording 97% of a unit track's consecutive boxes are within 1.4 of each other. The one spell box born next to a unit track missing its box, our Log by the Hog Rider at 3581, is 1.7 times as wide and half as tall. Only 7 of the 5,664 unit boxes have a side within 1.4 of a Zap box's 175 px (a Skeleton's box is 36 px wide, a Hog Rider's 74 x 86).
+    - **Short spells.** A spell box is reported at its first sighting only when all three hold: its confidence is at least `spell_confirm_conf` 0.5, its label is one the deck rule gives the enemy (not our Log or Fireball), and it is at least `spell_confirm_min_mt` 4,000 wide on the ground (`Observation.box_w_mt`). On this recording unit boxes are at most 3,355 mt wide (p99 2,789); KataCR's Zap box is about 4,900, its Freeze 6,000. Every other spell box waits for `min_hits` 2 like a unit. A box of our own Log has no team at birth near the river, and the deriver gives an undecided spell to the enemy, so reported at once it was a full-cost enemy play (`EventDeriver._fallback_team`).
+    - **Fast spells.** A spell track pairs with a box of its own label within `spell_gate_mt` 2,500 (growing to 4,000), and its speed clamp is `spell_max_speed_mt_per_tick` 1,000 instead of a unit's 150. A Goblin Barrel flies about 600 mt a tick: with the unit gate every box of its flight was a track of its own, 17 copies of one cast on the board (one play).
+    - Without `spell_classes` the tracker is unchanged: re-run on this recording it gives the same tracks as before, frame for frame, and the same plays.
+    - **Not changed: `scripts/vision/unit_harvest.py`.** The owner's Round 0 scan and labels of 2026-10-30 depend on its trackers as they are. Follow-up: its pass 1 replays the live chain (`RecordingTracker` at `unit_harvest.py:4113`), so its live uids now differ from the live runner's around spells until it passes `spell_classes` too; its harvest tracker (position only, `min_hits` 1) still lets a Zap join a unit's harvest track (the S4 and S7 watch points above).
+  - **Measured** in the sandbox with the real `tracker.py` and `events.py`, re-run on the replay's observations (with their box sizes) with a pure-Python Hungarian solver in place of scipy. Without the fix this reproduces 2,448 of the 2,467 recorded battle frames exactly (the same uids, labels and teams), and the same 103 legacy and 46 LIVE opponent plays, 84 and 76 own plays, and 47 own plays the HUD hand confirms.
+    - Boxes put into a track of the other kind: 20 -> 0. The check below that lists tracks with both a spell label and another one prints `none`. The flicker rule never fires on this recording.
+    - Own plays: 84 legacy and 76 LIVE, 47 of them confirmed by the hand, all unchanged. Our Log at 1778 is now dated at its first box, not 1781: that lone box is 2,000 mt from the roll, inside the spell gate. It is still one play.
+    - **The Cannon at 3599 is still not our play.** Its boxes now go to the coasting track of one of our Skeletons, which had been standing by the tower (uid 368 in the re-run). That track turns Cannon at 3675. This is a unit-unit capture, which the kind rule does not cover. Follow-up, measured separately because it changes unit-only scenes: a coasting track takes any box of another label within its gate.
+    - Opponent plays, LIVE: 46 -> 47 (18 -> 19 cards, 155 -> 160 elixir). The new play is a Barbarians at 2930. It is a real enemy unit, boxed `Barbarian` in front of our right tower from 2872 to 2995, most likely the opponent's Elite Barbarians (Barbarians is not in his deck), so it is also the wrong card: 5 elixir where Elite Barbarians cost 6. The old tracker hid its boxes in our Log's track. Now the play is dated 2930, at its own track's first box, about 58 ticks late: its boxes from 2872 to 2896 still go into the tracks of our Musketeer and two of our Skeletons (unit-unit captures, the coasting follow-up above). No reported play's track could have walked there, so the deploy-zone guard lets it be a play.
+    - Opponent plays, legacy: 103 -> 105 (375 -> 387 elixir): the same Barbarians, and Royal Recruits at 4358. These are the opponent's Guards, boxed `Recruit` first, whose boxes the old tracker hid in our Fireball's track. LIVE calls them late: no play.
+    - **Synthetic enemy spell boxes** (conf 0.6, injected into the recording; 12 Zap placements on our units and 4 Freeze, each with side_prob 0.9 and 0.1; plays under both configs, which agree; no box size, so neither size rule applies):
+
+      | Case | Before | After |
+      |---|---|---|
+      | Zap on 1-2 frames, unit seen or not | 0 of 24 (2 frames, seen: 18) | 22 of 24 |
+      | Zap on 3-4 frames over a seen unit | 18 of 24 | 24 of 24 |
+      | Zap on 3-4 frames over an unseen unit (1.5 tiles) | 0 of 24 | 24 of 24 |
+      | Freeze on 2-40 frames over a seen unit | 6 of 8 | 8 of 8 |
+      | Freeze over an unseen unit | 0 of 8 | 8 of 8 |
+
+      The one-frame row is the confidence floor's: at conf 0.4 a one-frame Zap still gives 0 of 24. No placement gave two plays. The two Zaps of 1-2 frames still missed are one placement (tick 1821) where the Zap lands on our rolling Log: a spell-spell pair, which stays allowed.
+    - **Misreads and real Zaps with box sizes.** These were injected into the recording's observations, which carry their box sizes. A real Zap is a box 175 x 140 px and 4,950 mt wide. Each case has 24 runs (the first 32), and a cell counts the runs that gain an enemy spell play. "First fix" is the kind rule with the one-frame floor alone, as it stood before these checks:
+
+      | Case | Before | First fix | Now |
+      |---|---|---|---|
+      | one box of our Log or Fireball at the river or on the enemy half, no tap | 0 of 32 | 32 of 32 | 0 of 32 |
+      | our unit's box read as Zap or Rocket, 1 frame; Zap, 2 frames | 0; 0 | 24; 24 | 0; 0 |
+      | our unit's box read as Log or Fireball, 1 frame | 0 | 3 (and 18-20 extra own plays) | 0 |
+      | an enemy unit's box read as Log, Zap or Fireball, 1 frame | 0 | 24 | 0 |
+      | our unit's box replaced by a Zap of its size, 1 / 2 / 3 frames | 1 / 3 / 5 | 24 / 24 / 24 | 0 / 1 / 2 |
+      | an enemy unit's box replaced by a Zap of its size, 1 / 2 / 3 frames | 0 / 3 / 7 | 24 / 24 / 24 | 0 / 5 / 8 |
+      | a Zap-sized box by our unit, its box kept, 1 / 2 / 3 frames | 0 / 18 / 18 | 24 / 24 / 24 | 24 / 24 / 24 |
+      | the same with our unit's box removed | 0 / 2 / 2 | 24 / 24 / 24 | 24 / 24 / 24 |
+
+      What is left is a misread that lasts two frames or more and continues no unit track: the first boxes of a new unit, or boxes past the gate of a track that broke up (the enemy's tracks break up more than ours). Before the fix such a box started a unit track that turned spell after 3 frames; now it is a spell track at its second box.
+  - **The other side of the rule.** A spell box that is not a misread unit box can no longer hide in a unit's track, and spells skip the guards. A misread separate object, such as the Lumberjack's bottle boxed as Rage, is a spell track of its own. Watch the spells' `per_card` rows above on the first spar, and the fine-tuned detector's spell flickers: 3 frames or more of a unit read as Zap or Rocket where its track broke up is a full-cost enemy play.
+  - **Look-alikes that put a unit down.** With the kind rule, a spell's unit is a track of its own, and the deriver explains it by the spell's label (`_parent`). An enemy Barbarian Barrel boxed as the Log rolled out a Barbarian that became a Barbarians play: 7 elixir for a 2-elixir card. Now `events.SPELL_LOOKALIKES` lets the Log's classes explain the Barbarian Barrel's children, and a spell's label follows the tracker's vote after it is classified (`EventDeriver.update`). The play is named Log, at the Barbarian Barrel's cost. A real Barbarians play within 4,500 mt of the end of an enemy Log, within 30 ticks, is taken for its child.
+  - Tests:
+    - `tests/pipeline/test_tracker.py`: a spell's track never takes a unit's box and the reverse, on both solvers; a unit's box read as Zap or Rocket stays the unit's, and a Zap-sized one is a Zap; the confidence, deck and width rules for the first sighting; one track for a fast spell; the two call sites; `box_w`, `box_h` and `box_w_mt`.
+    - `tests/pipeline/test_events.py`, through the real Tracker and deriver: an enemy Zap over our unseen Skeleton is one enemy play; our Skeleton's box read as Zap is none; one stray box of our Log is none; our Log next to our new Cannon is a Log play and a Cannon play; an enemy Log in two flashes is one play; a Barbarian Barrel boxed as the Log is one play.
+    - `tests/pipeline/test_vision_classes.py`: `spell_labels`.
+- **A spell seen in two flashes more than 20 ticks apart counted twice** (fixed on 2026-10-30).
+  - Spells merged into a play only within `play_window_ticks` 20 of its last sighting (`events.py:1513`). Same-label re-ID allows 1200 mt plus 50 mt per tick gone (`events.py:725-727`).
   - On this recording our first Log (tick 1781) was lost for 21 ticks, one over the window. Re-ID kept it one play because the Log had moved only about 1,500 mt, inside the 2,250 mt that re-ID allows after 21 ticks.
-  - A rolling Log moves 135-175 mt a tick on this recording, so a gap of 21-30 ticks mid-roll fails both rules. For the enemy that makes a second spell play. It skips every guard (`events.py:1233`, `:1245`) and the elixir counter charges it in full again (`tools/public_state.py:820-835`).
-  - Fix: give spells their own merge window from the last sighting (40-60 ticks; a card comes back only after four other plays), or a per-spell re-ID speed. Test it with an enemy Log seen in two flashes 25 ticks and about 3,500 mt apart, which must stay one play.
-  - No test runs an enemy spell through the real Tracker today: `test_with_the_real_tracker` in `tests/pipeline/test_events.py` uses units only.
+  - A rolling Log moves 135-175 mt a tick on this recording, so a gap of 21-30 ticks mid-roll failed both rules. For the enemy that made a second spell play. It skips every guard (`events.py:1233`, `:1245`) and the elixir counter charges it in full again (`tools/public_state.py:820-835`).
+  - **The fix**, in both configs. Within `play_window_ticks` 20 of the play's last sighting, a spell of the play's card still merges at any distance, as before. Up to `spell_window_ticks` 50 (`SPELL_WINDOW`) it also merges, when it is born within `spell_reach_mt` 3,000 of where the play's spell was last seen, plus the play's own speed times the gap. Units keep `play_window_ticks` 20 from the play's first sighting.
+  - **Why a reach and not the window alone.** A card can come back sooner than "four other plays" suggests. A Poison is seen for 8 s, long enough for four other plays to bring the card back, and a Mirror re-casts the last card at once. With the window alone, a second cast of the card elsewhere within 2.5 s of the first one's last sighting was taken for the first. A static area spell has about no speed, so a second Zap or Poison on the other lane is a play of its own. A rolling Log (about 150 mt a tick) re-found downstream is still the same one. A Mirrored or re-cast spell at the same spot, or within 20 ticks, is still taken for the first.
+  - **Measured:** no change on this recording, with the old tracker or the new one, legacy or LIVE (there is no enemy spell, and our six casts stay six).
+  - Tests in `tests/pipeline/test_events.py`: an enemy Log seen in two flashes 25 ticks and 3,500 mt apart stays one play (two with a 20-tick window), with tracks and through the real Tracker. A Zap seen again 30 ticks later on the other lane is a second play, 1,500 mt away it is the same one, and within 20 ticks it is the same one at any distance.
 - **Checks on the PC** (GPU, each about the time of a replay). `$REC` is the Round 0 recording, as in SPARRING_RUNBOOK section 17 (line 599); use its copy under `reports\vision\gold\` if it has been moved.
 
   ```powershell
@@ -645,9 +683,9 @@ KataCR has 6 Zap casts and 1 Freeze cast.
   & $RG -c "import json,sys,glob,collections; f=sorted(glob.glob(sys.argv[1]+'/*/frames.jsonl'))[-1]; c=collections.Counter(); [c.update((d['cls'], 'enemy' if d['side_prob']>0.5 else 'ally') for d in (json.loads(l).get('frame') or {}).get('detections') or [] if d['cls'] in sys.argv[2].split(',')) for l in open(f, encoding='utf-8')]; print(f, dict(c) or 'none')" tmp\replay_conf05 'Zap,Freeze'
   ```
 
-  - The first replay should print the same `events: 46 opponent plays` and `enemy tracks: 46 plays (0 spells)` as before.
-  - The line after it lists the tracks that carried both a spell label and another label. On the sandbox copy of the replay it prints two: `['Giant', 'HogRider', 'Log']` (uid 383) and `['Cannon', 'Log']` (uid 385).
-  - The last line counts low-confidence Zap and Freeze boxes. `none` means the pinned model has no signal for either spell. Keep the quotes around `'Zap,Freeze'`: a bare `Zap,Freeze` is a PowerShell array, which reaches Python as two arguments.
+  - The first replay should print `events: 47 opponent plays` and `enemy tracks: 47 plays (0 spells)`, the sandbox re-run's figures with the tracker fix (46 before it; the 47th is the Barbarians at 2930 above).
+  - The line after it lists the tracks that carried both a spell label and another label. It should print `none`. Before the fix it printed two on the sandbox copy of the replay: `['Giant', 'HogRider', 'Log']` (uid 383) and `['Cannon', 'Log']` (uid 385).
+  - The last line counts low-confidence Zap and Freeze boxes. `none` means the pinned model has no signal for Zap. Round 0 has no Freeze cast, so Freeze stays untested until deck I's friendlies. Keep the quotes around `'Zap,Freeze'`: a bare `Zap,Freeze` is a PowerShell array, which reaches Python as two arguments.
   - `--max-det 300` keeps weak boxes that the 150-box cap would cut at conf 0.05. If the Round 0 harvest scan has run, its `scan_frames.jsonl` already keeps every box at conf 0.05 or more.
 
 ## 9. Fidelity

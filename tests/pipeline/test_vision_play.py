@@ -1194,7 +1194,7 @@ def fake_live_modules(calls):
     ids = {n: i for i, n in enumerate(NAMES)}
     cat = [[n] for n in NAMES]
     table = SimpleNamespace(doc={"classes": [], "units": {}}, deck_labels=lambda deck: set(),
-                            digest="dc897910e1e8")
+                            spell_labels=lambda: frozenset(), digest="dc897910e1e8")
     return {
         "public_state": SimpleNamespace(PublicStateBuilder=Builder, LiveObserver=None,
                                         row_inputs=lambda state: {}),

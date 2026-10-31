@@ -66,7 +66,8 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      (red and blue banners and the OK button), the end screen's crowns
   -> HudReader (clock -> tick, elixir, hand, towers; templates captured on the PC)
   -> Detector (scripts/vision/detector.py; weights from --detector or the pin file) -> HP bars
-     -> Tracker (own_classes = the deck's labels, vision_classes.ClassTable.deck_labels)
+     -> Tracker (own_classes = the deck's labels, vision_classes.ClassTable.deck_labels;
+        spell_classes = ClassTable.spell_labels: a spell's boxes and a unit's never share a track)
      -> EventDeriver (opponent plays, own landings; EventTables from data/rs_rows/spawn_primary.json)
   -> BattleState: a battle starts once the clock runs for a second with the panel on screen, and
      ends on the end screen, a stopped clock (10 s), a clock reset or 8 s off the battle screen
@@ -1872,7 +1873,7 @@ def _main(args: argparse.Namespace) -> int:
     # The hand boxes follow --geometry's card slots (the taps do too).
     hud_reader = HUD.HudReader(store, {n: ids[n] for n in args.deck}, deck=deck_ids,
                                regions=HUD.load_regions(geometry=geometry))
-    tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck))
+    tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck), spell_classes=table.spell_labels())
     # N02 (--unknown-plays): UNKNOWN plays and unknown units; without it, the calls as before
     unknown = bool(args.unknown_plays)
     deriver = EV.EventDeriver(tables, event_config(args), own_deck=deck_ids)

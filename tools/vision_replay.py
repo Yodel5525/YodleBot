@@ -1234,7 +1234,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config and config.get("deck") and config.get("deck_ids"):
         live_names = {int(i): str(n) for n, i in zip(config["deck"], config["deck_ids"])}
     unknown = bool(args.unknown_plays)
-    perception = ReplayPerception(hud_reader=hud_reader, tracker=Tracker(own_classes=table.deck_labels(deck)),
+    # the live chain's tracker (scripts/vision_play.py): our deck's labels, the spell labels
+    tracker = Tracker(own_classes=table.deck_labels(deck), spell_classes=table.spell_labels())
+    perception = ReplayPerception(hud_reader=hud_reader, tracker=tracker,
                                   deriver=EV.EventDeriver(tables, ev_config, own_deck=deck_ids), geometry=geometry,
                                   detector=detector, names=names, ticks=ticks, recorded=args.recorded)
     source = CAP.FileReplaySource(rec_path, realtime=False, fps=args.fps)

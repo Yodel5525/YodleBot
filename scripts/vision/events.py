@@ -18,13 +18,27 @@ team is decided (or after ``team_wait_ticks``, by a fallback). In order:
    class down: within PLAY_WINDOW = 20 ticks of that play's first sighting and
    ``merge_radius_mt`` of it (3 Skeletons, a Goblin Gang's spear goblins). For
    spells the window chains from the play's LAST sighting (a rolling Log
-   re-acquired downstream; a Poison seen for 8 s).
+   re-acquired downstream; a Poison seen for 8 s): any distance within
+   PLAY_WINDOW of it, and up to ``spell_window_ticks`` (SPELL_WINDOW = 50) when
+   the new track is born within ``spell_reach_mt`` (3000) of where the play's
+   spell was last seen, plus the play's own speed times the gap. A rolling Log
+   moves 135-175 mt a tick on the owner's 2026-10-29 friendly, so a gap of 21-30
+   ticks mid-roll got past both rule 1's reach and a 20-tick window, and the
+   opponent's spell was a second full-cost play (spells skip the guards). The
+   reach keeps a second cast of the card elsewhere a play of its own: a Poison
+   is seen for 8 s, long enough for four other plays to bring the card back, and
+   a Mirror re-casts at once. A Mirrored or re-cast spell within PLAY_WINDOW of
+   the last sighting, or at the same spot, is still taken for the first one.
 3. Child. A living or just-dead parent of the same team (seen at most
    ``just_dead_ticks`` before the child, within ``child_radius_mt``) whose class
    creates this class (EventTables.children: spawners, death spawns,
    projectile and area spawns; "*" for Clone): a Witch's skeletons, a Golem's
    golemites, a Goblin Barrel's goblins, a Furnace's Fire Spirits for as long as
-   it lives. FAR CHILD: a child its parent's shot drops where the shot lands
+   it lives. A spell's track keeps following the tracker's label once classified
+   (a look-alike label the tracker fixes), and a spell's classes also explain the
+   children of the spells it is boxed for (SPELL_LOOKALIKES: a Barbarian Barrel
+   boxed as the Log rolls out a Barbarian, which the tracker keeps a track of its
+   own). FAR CHILD: a child its parent's shot drops where the shot lands
    (EventTables.child_reach, per parent and child class: an evolved Mortar's
    goblin up to 13.6 tiles away, the Mother Witch's cursed hog) may be that far
    from the parent, but only when no other new track of its team (one waiting,
@@ -202,8 +216,9 @@ from .tracker import MID_Y_MT, TICK_MS
 from .types import (ENEMY_TEAM, OWN_TEAM, UNKNOWN_CARD, UNKNOWN_TEAM, Events, OppPlay, OwnLanding,
                     Track, now)
 
-__all__ = ["PLAY_WINDOW", "TOKEN_OFFSET", "KIND_UNIT", "KIND_SPELL", "WILDCARD", "SPAWN_CHILDREN",
-           "KATACR_SPELL_CLASSES", "UNKNOWN_CARD", "UNKNOWN_PLAY_COST", "LIVE_GUARDS",
+__all__ = ["PLAY_WINDOW", "SPELL_WINDOW", "TOKEN_OFFSET", "KIND_UNIT", "KIND_SPELL", "WILDCARD",
+           "SPAWN_CHILDREN", "KATACR_SPELL_CLASSES", "SPELL_LOOKALIKES", "UNKNOWN_CARD", "UNKNOWN_PLAY_COST",
+           "LIVE_GUARDS",
            "DEPLOY_ANYWHERE_CLASSES", "EventTables", "EventConfig", "EventDeriver", "OwnTap",
            "LandingStats", "OppStats", "StateTracks", "load_spawn_children", "unit_class_map",
            "cardless_classes", "record_plays", "guard_settings", "strip_form", "now"]
@@ -212,6 +227,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPAWN_CHILDREN = ROOT / "data" / "vision" / "spawn_children.json"
 
 PLAY_WINDOW = 20               # ticks: same card, same play (scripts/gamestate/live_play.py)
+SPELL_WINDOW = 50              # ticks: a spell seen again this long after its last sighting, same cast
 TOKEN_OFFSET = 2               # row token = catalogue id + 2 (tools/rs_memory.TOKEN_OFFSET)
 KIND_UNIT, KIND_SPELL = "unit", "spell"     # OppPlay.kind
 WILDCARD = "*"                 # in EventTables.children: explains a child of any class
@@ -248,6 +264,11 @@ KATACR_SPELL_CLASSES: dict[str, tuple[str, ...]] = {
 }
 #: Spells whose children can be of any class (the copies a Clone makes).
 CLONE_CARDS = ("Clone",)
+#: Spells the detector may box with another spell's label, by that label's card: its classes also
+#: explain the look-alike's children (EventTables.from_names). A Barbarian Barrel boxed as the Log
+#: rolls out a Barbarian; with the tracker's kind rule (scripts/vision/tracker.py, SPELLS) that
+#: Barbarian is a track of its own, which the Log's play then explains instead of a Barbarians play.
+SPELL_LOOKALIKES: dict[str, tuple[str, ...]] = {"Log": ("BarbLog",)}
 
 _FORM_SUFFIX = re.compile(r"(_EV\d+|Hero)$")
 
@@ -580,10 +601,16 @@ class EventTables:
                 c = cmap(k)
                 if c:
                     children.setdefault(p, set()).add(c)
-        for name, kids in table.get("spell_children", {}).items():
+        spell_kids = table.get("spell_children", {})
+        for name, kids in spell_kids.items():
             cid = card_ids.get(name)
             for sc in spells.get(cid, ()) if cid is not None else ():
                 children.setdefault(sc, set()).update(c for c in map(cmap, kids) if c)
+        for name, looks in SPELL_LOOKALIKES.items():     # a look-alike spell's children too
+            cid = card_ids.get(name)
+            kids = {c for look in looks for c in map(cmap, spell_kids.get(look, ())) if c}
+            for sc in spells.get(cid, ()) if cid is not None and kids else ():
+                children.setdefault(sc, set()).update(kids)
         for name in CLONE_CARDS:
             cid = card_ids.get(name)
             for sc in spells.get(cid, ()) if cid is not None else ():
@@ -719,6 +746,8 @@ def cardless_classes(classes_doc: Mapping[str, Any]) -> frozenset[str]:
 class EventConfig:
     """Deriver parameters: times in battle ticks, distances in world millitiles."""
     play_window_ticks: int = PLAY_WINDOW     # same card within this = the same play
+    spell_window_ticks: int = SPELL_WINDOW   # ... a spell: within this of the play's last sighting
+    spell_reach_mt: float | None = 3000.0    # ... past play_window_ticks only this near (+ its speed x gap)
     merge_radius_mt: float = 5000.0          # ... and (units) this close to the play
     just_dead_ticks: int = 30                # a parent seen this recently still explains a child
     child_radius_mt: float = 4500.0          # ... born this close to it (Graveyard radius 4000)
@@ -762,8 +791,8 @@ class EventConfig:
         return cls(**{**LIVE_GUARDS, **over})
 
     def __post_init__(self):
-        for name in ("play_window_ticks", "just_dead_ticks", "reid_ticks", "team_wait_ticks",
-                     "ambiguity_wait_ticks", "unit_sight_lag_ticks", "spell_sight_lag_ticks",
+        for name in ("play_window_ticks", "spell_window_ticks", "just_dead_ticks", "reid_ticks",
+                     "team_wait_ticks", "ambiguity_wait_ticks", "unit_sight_lag_ticks", "spell_sight_lag_ticks",
                      "tap_max_lag_ticks", "forget_ticks", "min_play_age_ticks", "young_drop_ticks",
                      "own_recent_ticks", "late_reach_ticks"):
             if getattr(self, name) < 0:
@@ -772,6 +801,8 @@ class EventConfig:
             raise ValueError("EventConfig.reid_motion_cos must be in [-1, 1]")
         if self.deploy_zone_mt is not None and not self.deploy_zone_mt >= 0:
             raise ValueError("EventConfig.deploy_zone_mt must be None or >= 0")
+        if self.spell_reach_mt is not None and not self.spell_reach_mt >= 0:
+            raise ValueError("EventConfig.spell_reach_mt must be None or >= 0")
         anywhere = self.deploy_anywhere
         object.__setattr__(self, "deploy_anywhere",
                            frozenset([anywhere] if isinstance(anywhere, str) else (str(c) for c in anywhere)))
@@ -1058,6 +1089,8 @@ class EventDeriver:
                     rec.hp = float(tr.hp_frac)
                 if rec.state == PENDING:
                     rec.cls = tr.cls            # the tracker may still fix the label
+                elif self.tables.is_spell(rec.cls) and self.tables.is_spell(tr.cls):
+                    rec.cls = tr.cls            # a spell's too, for the children it explains (_parent)
                 if rec.play is not None:
                     rec.play.last_tick = max(rec.play.last_tick, rec.last_tick)
             rec.seen_team = tr.team
@@ -1509,15 +1542,34 @@ class EventDeriver:
                 classes = self.tables.classes_of(play.card)
             if rec.cls not in classes:
                 continue
-            if spell:
-                ok = (rec.first_tick - play.last_tick <= cfg.play_window_ticks
-                      and rec.first_tick - play.tick > -cfg.play_window_ticks)
+            if spell:                            # a cast seen again: from its LAST sighting
+                gap = rec.first_tick - play.last_tick
+                ok = ((gap <= cfg.play_window_ticks and rec.first_tick - play.tick > -cfg.play_window_ticks)
+                      or (gap <= cfg.spell_window_ticks and rec.first_tick - play.tick > -cfg.spell_window_ticks
+                          and self._spell_reaches(play, rec, max(0, gap))))
             else:
                 ok = (abs(rec.first_tick - play.tick) < cfg.play_window_ticks
                       and _dist(play.x, play.y, rec.bx, rec.by) <= cfg.merge_radius_mt)
             if ok:
                 return play
         return None
+
+    def _spell_reaches(self, play: _Play, rec: _Rec, gap: int) -> bool:
+        """Rule 2 for a spell seen again past play_window_ticks: whether `rec` was born within
+        spell_reach_mt of where the play's spell was last seen, plus the play's own speed (from
+        its first sighting to that point) times the `gap` in ticks: a rolling Log re-found
+        downstream, a Poison's area seen again, but not a second cast of the card elsewhere."""
+        reach = self.config.spell_reach_mt
+        if reach is None:
+            return True
+        last = max((r for r in (self._recs.get(u) for u in play.uids)
+                    if r is not None and self.tables.is_spell(r.cls)), key=lambda r: r.last_tick, default=None)
+        if last is None:                         # its tracks forgotten: from its first sighting
+            lx, ly, life = play.x, play.y, play.last_tick - play.tick
+        else:
+            lx, ly, life = last.x, last.y, last.last_tick - play.tick
+        speed = _dist(play.x, play.y, lx, ly) / max(1, life)
+        return _dist(lx, ly, rec.bx, rec.by) <= reach + speed * gap
 
     def _parent(self, rec: _Rec, team: int) -> _Rec | None:
         cfg = self.config

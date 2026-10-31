@@ -25,9 +25,69 @@ Per update (one call per processed frame):
    The assignment is Hungarian (scipy.optimize.linear_sum_assignment) when
    scipy imports, else greedy cheapest-pair-first. Unmatched observations start
    tentative tracks; a track is reported after ``min_hits`` sightings.
+   SPELLS (Tracker(spell_classes=...), the labels that show a spell: an area or a
+   projectile, ClassTable.spell_labels()). Without spell_classes the kind is not
+   looked at and none of this applies.
+   * Kinds. A pair of which exactly one side, the track's label or the
+     observation's, is a spell label is FORBIDDEN in the assignment: a spell's
+     boxes and a unit's do not share a track, and a track keeps the kind it was
+     born with (the label vote never switches kind). The Hungarian solver
+     maximises the number of pairs first, and the label cost alone (class_cost)
+     let any track within its gate take a spare box of the other kind (the
+     owner's 2026-10-29 friendly: our Log's track took our new Cannon's boxes and
+     ran as Cannon, so that Cannon was never our play; the enemy Hog Rider's track
+     took the rolling Log's boxes, turned Log, then our team, and the Hog left
+     the board).
+   * Flickers. The one exception: a spell-labelled box the size of the box a unit
+     track is missing on this frame is that unit's box with a misread label (the
+     detector flickers between labels), and it joins the unit's track after the
+     assignment, as every flicker did before, for as many frames as it lasts. The
+     rule: the box is left over by the assignment, the unit track has no box on
+     this frame, its prediction is within ``max_gate_mt`` of the box, and the box's
+     width and height are each within ``flicker_size_ratio`` (1.4) of the track's
+     last box. On the 2026-10-29 friendly 97% of a unit track's consecutive boxes
+     are within 1.4 of each other (the median 1.05), and the one spell box born
+     next to a unit track missing its box (our Log by the Hog Rider at 3581) is 1.7
+     times as wide and half as tall. On that 747-px frame a Zap is about 175 px
+     wide, a Skeleton 36 and a Hog Rider 74 x 86; 7 of the 5,664 unit boxes have a
+     side within 1.4 of 175 px. Without the rule a misread would start a spell
+     track of its own, and spells skip the event deriver's guards: one box of our
+     unit read as Zap or Rocket was a full-cost enemy play (24 of 24 own boxes so
+     relabelled on that recording, 0 with this rule and the width floor below). A
+     misread of 2 frames or more that continues no unit track (the first boxes of
+     a new unit, or boxes past the gate of a track that broke up) is still a
+     spell track at its second box: 1-2 of 24 such replacements of our units' boxes
+     and 5-8 of 24 of the enemy's, whose tracks break up more (3-7 before the kind
+     rule, when such a track turned spell after 3 frames). Cost: a real spell whose
+     box replaces a unit box of about its size (a Zap on a big unit whose own box
+     is lost under it), or a small projectile's first box next to a unit track
+     missing its box (until it outruns the gate), is taken for the unit's.
+     Observations without a box size (Observation.box_w/box_h None) are never
+     flickers.
+   * Short spells. A spell box is reported from its first sighting (a Zap is on
+     screen for a frame or two) when it is at least ``spell_confirm_conf``
+     confident, its label is one the deck rule makes the enemy's (own_classes
+     given, the label not in it: a Zap, a Freeze), and it is at least
+     ``spell_confirm_min_mt`` (4,000) wide on the ground (Observation.box_w_mt;
+     unknown passes). Every other spell box waits for ``min_hits`` as a unit does.
+     A box of a spell our deck has too (Log, Fireball) has no team at birth unless
+     its half and side say so, and the event deriver gives an undecided spell to
+     the enemy, so one stray box of our own Log was a full-cost enemy play. A
+     unit-wide one is most likely a unit's box misread where no track can take it
+     (the first box of a new unit; on the 2026-10-29 friendly 5 of 24 enemy boxes
+     so replaced by a Zap were an enemy Zap without this floor, 0 with it): unit
+     boxes there are at most 3,355 mt wide (p99 2,789), KataCR's Zap box is about
+     4,900 and its Freeze 6,000.
+   * Fast spells. A spell track pairs with a box of its own label within
+     ``spell_gate_mt`` (growing like gate_mt, up to ``spell_max_gate_mt``) and its
+     speed is clamped at ``spell_max_speed_mt_per_tick``, not a unit's 150: a
+     Goblin Barrel flies about 600 mt a tick and our Fireball 375, so with a unit's
+     gate every box of a flight started a track of its own (several copies of one
+     cast on the board). Boxes of another spell label keep the unit gate.
 3. Label vote. A decayed histogram of labels weighted by detector confidence.
    The reported label changes only when a different label was seen in
-   ``label_switch_frames`` consecutive frames AND outweighs every other label.
+   ``label_switch_frames`` consecutive frames AND outweighs every other label
+   (and, with spell_classes, is of the track's kind).
 4. Team vote. Evidence is summed as a log-likelihood ratio (positive = enemy):
    the side classifier's per-frame P(enemy) (clipped), the HP-bar colour, the
    board half a track was born in, and our own taps (a new track of a tapped
@@ -51,13 +111,14 @@ deploying flag (see deploy_ticks_left). Tracks that expired on the last update
 are in ``Tracker.expired`` (for the event deriver's "just-dead parent" rule).
 ``Tracker.last_assignment`` lists, in the order the last update's observations
 came, the uid each went to: the track it was matched to, or the tentative track
-it started (reported once it has ``min_hits`` sightings). Harvest tools read it to
-carry a detection's box to its track (N05).
+it started (reported once it is confirmed: ``min_hits`` sightings, or a
+confident enemy-only spell's first). Harvest tools read it to carry a detection's box to
+its track (N05).
 
 Imports only the standard library; scipy (and numpy with it) is optional.
 
     from scripts.vision.tracker import Tracker, observations_from_detections
-    tracker = Tracker(own_classes=HOG26_CLASSES)
+    tracker = Tracker(own_classes=table.deck_labels(deck), spell_classes=table.spell_labels())
     tracker.note_own_tap({"hog-rider"}, x_mt, y_mt, tick)      # after each tap we send
     tracks = tracker.update(observations_from_detections(dets, geometry, size), tick)
 """
@@ -170,6 +231,10 @@ class Observation:
     side_prob is the side classifier's P(the unit is the OPPONENT's); 0.5 means
     no opinion. bar_team is the team the HP-bar colour implies (UNKNOWN_TEAM
     when no bar was read). hp_frac is the HP-bar fill, None when unread.
+    box_w and box_h are the detector box's size in frame pixels (None when
+    unknown); the tracker only compares them with each other (module doc,
+    SPELLS: flickers). box_w_mt is the box's width on the ground, in world
+    millitiles at the box's middle row (None when unknown; SPELLS: short spells).
     """
     cls: str
     x_mt: float
@@ -179,6 +244,9 @@ class Observation:
     form: int = FORM_BASE
     hp_frac: float | None = None
     bar_team: int = UNKNOWN_TEAM
+    box_w: float | None = None
+    box_h: float | None = None
+    box_w_mt: float | None = None
 
 
 def observations_from_detections(detections: Iterable[Detection], geometry: Any,
@@ -188,7 +256,9 @@ def observations_from_detections(detections: Iterable[Detection], geometry: Any,
 
     Uses a detection's ground_px when set, else the geometry's ground point of
     its box (flying classes use the geometry's flyer offset). HP fraction and
-    bar colour are left unset; the HP-bar reader fills them in.
+    bar colour are left unset; the HP-bar reader fills them in. box_w / box_h
+    are the box's size in pixels, box_w_mt its width in world millitiles (the
+    geometry's mapping of its left and right edges at its middle row).
     """
     out = []
     for d in detections:
@@ -196,7 +266,16 @@ def observations_from_detections(detections: Iterable[Detection], geometry: Any,
             x, y = geometry.px_to_world(d.ground_px[0], d.ground_px[1], size)
         else:
             x, y = geometry.ground_point(d.box, size, cls=d.cls, flying=d.cls in flying)
-        out.append(Observation(d.cls, float(x), float(y), float(d.conf), float(d.side_prob), int(d.form)))
+        x1, y1, x2, y2 = (float(v) for v in d.box)
+        w, h = x2 - x1, y2 - y1
+        w_mt = None
+        if w > 0:
+            ax, ay = geometry.px_to_world(x1, 0.5 * (y1 + y2), size)
+            bx, by = geometry.px_to_world(x2, 0.5 * (y1 + y2), size)
+            w_mt = math.hypot(float(bx) - float(ax), float(by) - float(ay))
+        out.append(Observation(d.cls, float(x), float(y), float(d.conf), float(d.side_prob), int(d.form),
+                               box_w=w if w > 0 else None, box_h=h if h > 0 else None,
+                               box_w_mt=w_mt if w_mt is not None and math.isfinite(w_mt) else None))
     return out
 
 
@@ -248,10 +327,17 @@ class TrackerConfig:
     tap_window_ticks: float = 60.0          # a track born up to this long after a tap
     tap_radius_mt: float = 2500.0           # and born this close to the aim
     tap_claim_age_ticks: float = 10.0       # a young track may still be claimed (late label fix)
+    # spells (only with Tracker(spell_classes=...); module doc, SPELLS)
+    spell_confirm_conf: float | None = 0.5  # an enemy-only spell box this sure is reported at once (None: min_hits)
+    spell_confirm_min_mt: float | None = 4000.0   # ... if at least this wide (a Zap ~4,900; None: any width)
+    flicker_size_ratio: float | None = 1.4  # a spell box this near in size to a unit's missing box is its (None: off)
+    spell_gate_mt: float = 2500.0           # a spell track's gate for a box of its own label ...
+    spell_max_gate_mt: float = 4000.0       # ... growing like gate_mt up to this
+    spell_max_speed_mt_per_tick: float = 1000.0   # a spell track's velocity clamp (a Goblin Barrel: ~600)
 
     def __post_init__(self):
         positive = ("gate_mt", "max_gate_mt", "max_speed_mt_per_tick", "decide_llr", "llr_cap",
-                    "tap_radius_mt")
+                    "tap_radius_mt", "spell_gate_mt", "spell_max_gate_mt", "spell_max_speed_mt_per_tick")
         for name in positive:
             if not getattr(self, name) > 0:
                 raise ValueError(f"TrackerConfig.{name} must be > 0")
@@ -270,6 +356,17 @@ class TrackerConfig:
             raise ValueError("TrackerConfig needs decide_llr <= flip_llr <= llr_cap")
         if self.max_gate_mt < self.gate_mt:
             raise ValueError("TrackerConfig.max_gate_mt must be >= gate_mt")
+        if self.spell_max_gate_mt < self.spell_gate_mt:
+            raise ValueError("TrackerConfig.spell_max_gate_mt must be >= spell_gate_mt")
+        floor = self.spell_confirm_conf
+        if floor is not None and (isinstance(floor, bool) or not 0.0 <= floor <= 1.0):
+            raise ValueError("TrackerConfig.spell_confirm_conf must be None or in [0, 1]")
+        wide = self.spell_confirm_min_mt
+        if wide is not None and (isinstance(wide, bool) or not 0.0 <= wide < math.inf):
+            raise ValueError("TrackerConfig.spell_confirm_min_mt must be None or a width >= 0")
+        ratio = self.flicker_size_ratio
+        if ratio is not None and (isinstance(ratio, bool) or not ratio >= 1.0 or math.isinf(ratio)):
+            raise ValueError("TrackerConfig.flicker_size_ratio must be None or a finite number >= 1")
 
 
 @dataclass(slots=True)
@@ -297,6 +394,9 @@ class TrackState:
     vote_team: int = UNKNOWN_TEAM                # the team the evidence decided
     cues: dict[str, float] = field(default_factory=dict)   # evidence per cue, unclipped
     tap_claimed: bool = False
+    confirmed_at_birth: bool = False             # an enemy-only spell box over spell_confirm_conf started it
+    box_w: float | None = None                   # the last box's size in pixels (None: unknown)
+    box_h: float | None = None
 
     def predict(self, tick: float, max_ticks: float) -> tuple[float, float]:
         """Position extrapolated to `tick` (at most `max_ticks` ahead)."""
@@ -331,18 +431,28 @@ class Tracker:
     own_classes: the vision classes our deck can put on the board (None turns
     the deck-membership rule off). similarity(a, b) -> [0, 1]: optional
     label similarity for the association cost (e.g. aliases the detector
-    confuses). solver: "auto" | "scipy" | "greedy" (resolve_solver).
-    Call reset() at the start of every battle.
+    confuses). spell_classes: the labels that show a spell
+    (vision_classes.ClassTable.spell_labels(): the spell cards' names, which
+    detector.py puts in Detection.cls, and their KataCR names); a spell box and
+    a unit's track do not pair (but a unit's box with a misread spell label
+    joins its unit), nor a unit box and a spell's track, and a confident spell
+    box of a label only the enemy casts is reported at once (module doc,
+    SPELLS). None (the default) leaves the kind out, as before. solver: "auto" | "scipy" |
+    "greedy" (resolve_solver). Call reset() at the start of every battle.
     """
 
     def __init__(self, config: TrackerConfig | None = None, *, solver: str = "auto",
                  own_classes: Collection[str] | None = None,
-                 similarity: Callable[[str, str], float] | None = None):
+                 similarity: Callable[[str, str], float] | None = None,
+                 spell_classes: Collection[str] | None = None):
         self.config = config or TrackerConfig()
         self.solver = resolve_solver(solver)
         self._lsa = _load_scipy_lsa() if self.solver == "scipy" else None
         self.own_classes = None if own_classes is None else frozenset(own_classes)
         self.similarity = similarity
+        if isinstance(spell_classes, str):
+            raise TypeError("spell_classes is a collection of labels, not one label")
+        self.spell_classes = None if spell_classes is None else frozenset(spell_classes)
         self.reset()
 
     def reset(self) -> None:
@@ -379,8 +489,13 @@ class Tracker:
         tracks = list(self._tracks.values())
         cost = [[self._cost(t, o, tick) for o in obs] for t in tracks]
         uids = [0] * len(obs)
-        matched = set()
+        matched, seen = set(), set()
         for i, j in _assign(cost, self.solver, self._lsa):
+            self._absorb(tracks[i], obs[j], tick)
+            matched.add(j)
+            seen.add(i)
+            uids[j] = tracks[i].uid
+        for i, j in self._flickers(tracks, obs, seen, matched, tick):
             self._absorb(tracks[i], obs[j], tick)
             matched.add(j)
             uids[j] = tracks[i].uid
@@ -400,7 +515,16 @@ class Tracker:
             return []
         cfg = self.config
         return [self._report(t, self._tick) for t in self._tracks.values()
-                if t.hits >= cfg.min_hits and self._tick - t.last_tick <= cfg.coast_ticks]
+                if self.confirmed(t) and self._tick - t.last_tick <= cfg.coast_ticks]
+
+    def confirmed(self, state: TrackState) -> bool:
+        """Whether a track is reported: min_hits sightings, or (with spell_classes) a spell
+        started by a box of spell_confirm_conf or more of a label our deck cannot cast."""
+        return state.hits >= self.config.min_hits or state.confirmed_at_birth
+
+    def is_spell(self, label: str) -> bool:
+        """Whether `label` is one of spell_classes (always False without them)."""
+        return self.spell_classes is not None and label in self.spell_classes
 
     def states(self) -> list[TrackState]:
         """Every live track, tentative and coasting ones included (read only)."""
@@ -442,7 +566,7 @@ class Tracker:
         cfg = self.config
         gone = []
         for uid, t in list(self._tracks.items()):
-            confirmed = t.hits >= cfg.min_hits
+            confirmed = self.confirmed(t)
             ttl = cfg.max_age_ticks if confirmed else cfg.tentative_ttl_ticks
             if tick - t.last_tick > ttl:
                 del self._tracks[uid]
@@ -459,11 +583,22 @@ class Tracker:
             sim = max(sim, float(self.similarity(t.label, cls)))
         return _clip(sim, 0.0, 1.0)
 
+    def _gate(self, t: TrackState, o: Observation, tick: float) -> float:
+        """The gate of track `t` for box `o`: a spell track's for a box of its own label is
+        spell_gate_mt (fast spells), every other pair's gate_mt; both grow while unseen."""
+        cfg = self.config
+        grown = cfg.gate_growth_mt_per_tick * max(0.0, tick - t.last_tick)
+        if o.cls == t.label and self.is_spell(t.label):
+            return min(cfg.spell_max_gate_mt, cfg.spell_gate_mt + grown)
+        return min(cfg.max_gate_mt, cfg.gate_mt + grown)
+
     def _cost(self, t: TrackState, o: Observation, tick: float) -> float:
         cfg = self.config
+        if self.is_spell(t.label) != self.is_spell(o.cls):
+            return FORBIDDEN                     # a spell's box never joins a unit's track, nor the reverse
         px, py = t.predict(tick, cfg.max_predict_ticks)
         d = math.hypot(o.x_mt - px, o.y_mt - py)
-        gate = min(cfg.max_gate_mt, cfg.gate_mt + cfg.gate_growth_mt_per_tick * max(0.0, tick - t.last_tick))
+        gate = self._gate(t, o, tick)
         if d > gate:
             return FORBIDDEN
         c = d / gate + cfg.class_cost * (1.0 - self._class_sim(t, o.cls))
@@ -473,6 +608,35 @@ class Tracker:
             # 0 when side_prob is 0.5 or agrees, 1 when it is fully against the team
             c += cfg.team_cost * max(0.0, 2.0 * abs(target - o.side_prob) - 1.0)
         return c
+
+    def _flickers(self, tracks: Sequence[TrackState], obs: Sequence[Observation], seen: Collection[int],
+                  matched: Collection[int], tick: float) -> list[tuple[int, int]]:
+        """SPELLS, flickers (module doc): pairs (track index, observation index) of a spell box
+        the assignment left over and a unit track it did not see on this frame, whose prediction
+        is within max_gate_mt of the box and whose last box has about the box's size (each side
+        within flicker_size_ratio): the unit's own box with a misread label."""
+        cfg = self.config
+        ratio = cfg.flicker_size_ratio
+        if self.spell_classes is None or ratio is None:
+            return []
+        cols = [j for j, o in enumerate(obs) if j not in matched and self.is_spell(o.cls)
+                and o.box_w is not None and o.box_h is not None]
+        rows = [i for i, t in enumerate(tracks) if i not in seen and not self.is_spell(t.label)
+                and t.box_w is not None and t.box_h is not None]
+        if not cols or not rows:
+            return []
+        cost = []
+        for i in rows:
+            t = tracks[i]
+            px, py = t.predict(tick, cfg.max_predict_ticks)
+            row = []
+            for j in cols:
+                o = obs[j]
+                d = math.hypot(o.x_mt - px, o.y_mt - py)
+                size = max(o.box_w / t.box_w, t.box_w / o.box_w, o.box_h / t.box_h, t.box_h / o.box_h)
+                row.append(d / cfg.max_gate_mt if d <= cfg.max_gate_mt and size <= ratio else FORBIDDEN)
+            cost.append(row)
+        return [(rows[a], cols[b]) for a, b in _assign(cost, self.solver, self._lsa)]
 
     def _birth(self, o: Observation, tick: float) -> TrackState:
         cfg = self.config
@@ -485,6 +649,14 @@ class Tracker:
         t.label_weights[o.cls] = max(float(o.conf), 1e-3)
         t.form_weights[int(o.form)] = max(float(o.conf), 1e-3)
         t.streak_label, t.streak = o.cls, 1
+        t.box_w, t.box_h = o.box_w, o.box_h
+        floor = cfg.spell_confirm_conf
+        # at once only a spell the deck rule makes the enemy's: one stray box of our own Log or
+        # Fireball has no team yet, and the event deriver would give it to the enemy
+        wide = cfg.spell_confirm_min_mt          # a unit-sized box is a misread unit, or waits
+        t.confirmed_at_birth = (floor is not None and self.is_spell(o.cls) and float(o.conf) >= floor
+                                and self.own_classes is not None and o.cls not in self.own_classes
+                                and (wide is None or o.box_w_mt is None or o.box_w_mt >= wide))
         self._tracks[uid] = t
         if o.y_mt > MID_Y_MT + cfg.spawn_deadzone_mt:
             self._add_cue(t, "spawn", -cfg.spawn_llr)
@@ -506,12 +678,15 @@ class Tracker:
                 a = cfg.velocity_alpha
                 vx, vy = a * rvx + (1 - a) * t.vx, a * rvy + (1 - a) * t.vy
             speed = math.hypot(vx, vy)
-            if speed > cfg.max_speed_mt_per_tick:
-                vx, vy = vx * cfg.max_speed_mt_per_tick / speed, vy * cfg.max_speed_mt_per_tick / speed
+            vmax = cfg.spell_max_speed_mt_per_tick if self.is_spell(t.label) else cfg.max_speed_mt_per_tick
+            if speed > vmax:
+                vx, vy = vx * vmax / speed, vy * vmax / speed
             t.vx, t.vy = vx, vy
         t.x_mt, t.y_mt = float(o.x_mt), float(o.y_mt)
         t.last_tick = tick
         t.hits += 1
+        if o.box_w is not None and o.box_h is not None:
+            t.box_w, t.box_h = o.box_w, o.box_h
         t.conf = 0.5 * t.conf + 0.5 * float(o.conf)
         if o.hp_frac is not None:
             t.hp_frac = _clip(float(o.hp_frac), 0.0, 1.0)
@@ -536,7 +711,8 @@ class Tracker:
             t.streak += 1
         else:
             t.streak_label, t.streak = o.cls, 1
-        if o.cls != t.label and t.streak >= cfg.label_switch_frames:
+        if (o.cls != t.label and t.streak >= cfg.label_switch_frames
+                and self.is_spell(o.cls) == self.is_spell(t.label)):    # a track keeps its kind
             mine = t.label_weights[o.cls]
             if all(mine > v for k, v in t.label_weights.items() if k != o.cls):
                 t.label = o.cls

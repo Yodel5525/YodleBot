@@ -288,6 +288,21 @@ def test_crosswalk_round_trip_hog26(table):
     assert "knight" not in labels and "Knight" not in labels
 
 
+def test_spell_labels_are_the_spell_cards_and_their_katacr_names(table):
+    """The tracker's spell_classes (scripts/vision/tracker.py, SPELLS): every name the detector
+    gives a spell box, and no class a card puts on the board as a unit."""
+    spells = table.spell_labels()
+    assert {"Zap", "zap", "zap-evolution", "Freeze", "freeze", "Log", "the-log", "Fireball", "fireball",
+            "Rocket", "rocket", "GoblinBarrel", "goblin-barrel", "royal-delivery"} <= spells
+    assert {n for n, e in table.katacr.items() if e["type"] == "spell"} <= spells
+    # a spell's units keep their own classes; the one shared name is a cardless building
+    assert {"Goblin", "BarrelGoblin", "HealSpirit", "Recruit", "Skeleton", "Barbarian"}.isdisjoint(spells)
+    assert spells & {c.name for c in table} == {"RoyalDelivery"} and not table["RoyalDelivery"].card_names
+    for name in spells - {"RoyalDelivery"}:
+        assert table.from_detector(name).type == "spell", name
+    assert table.deck_labels(HOG26) & spells == {"Fireball", "fireball", "Log", "the-log"}
+
+
 def test_katacr_map_covers_every_detector_class(table):
     assert set(table.katacr) == set(vc.KATACR_CLASSES)
     types = {name: e["type"] for name, e in table.katacr.items()}
