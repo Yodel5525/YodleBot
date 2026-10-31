@@ -399,7 +399,7 @@ def known():
 def test_the_legend_lists_only_the_declared_deck(keys):
     resolver = VA.CardResolver(TABLE, keys, EVENTS)
     have = known()
-    assert len(have) == 174                                   # tonight's 155 labels and the registry's 19
+    assert len(have) == 155 + len(VA.Registry.load())         # tonight's 155 labels and the registry's entries
     legend = VA.build_legend(VA.parse_deck(DECK_A, resolver), TABLE, have)
     assert [e.label for e in legend] == LEGEND_A and [e.n for e in legend] == list(range(14))
     assert [e.label for e in legend if not e.known] == ["AngryBarbarian_EV1", "BabyDragon_EV1"]
