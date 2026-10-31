@@ -158,7 +158,6 @@ def test_check_prefix_catches_a_reorder_or_a_removal(base):
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin@enemy", "Ronin")]}, "must not contain"),
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin", "Ronin", type="object")]}, "type must be"),
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin", "Ronin", form="super")]}, "form must be"),
-    ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("BerserkerHero", "Berserker", form="hero")]}, "needs base"),
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin", "Ronin", base="Knight")]}, "evo and hero entries only"),
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin", "Ronin", valid_from_client="new")]}, "valid_from_client"),
     ({"schema": VA.REGISTRY_SCHEMA, "labels": [entry("Ronin", "Ronin", train_as="Ronin")]}, "self"),
@@ -178,6 +177,8 @@ def test_malformed_registries_are_refused(doc, needle):
     (entry("Vines", "Vines"), "is a spell in the class table, not a unit"),
     (entry("MergeMaiden_Normal", "MergeMaiden_Normal"), "not a deck card (internal)"),
     (entry("BerserkerHero", "Berserker", form="hero", base="Knight"), "base must be 'Berserker'"),
+    (entry("BerserkerHero", "Berserker", form="hero"), "needs base"),
+    (entry("SkeletonArmy_EV1_General", "SkeletonArmy", form="evo", base="Skeleton"), "has no base form"),
     (entry("BerserkerHero", "Berserker"), "reads as the hero form"),
     (entry("Ronin", "Ronin", train_as="Knight"), "train_as 'Knight'"),
     (entry("Ronin", "NoSuchCard"), "not a card of the class table"),
@@ -185,6 +186,21 @@ def test_malformed_registries_are_refused(doc, needle):
 def test_entries_that_contradict_classes_json_are_reported(bad, needle):
     problems = registry(bad).validate(TABLE)
     assert any(needle in p for p in problems), problems
+
+
+def test_a_class_that_only_exists_evolved_is_an_evo_entry_without_base(base):
+    """The evolved Skeleton Army's General and the evolved Witch's skeletons have no base form in
+    classes.json: their entries keep base null, validate clean, and train as themselves (a '*'
+    legend label the registry lacks would leave its images out of the mix)."""
+    reg = registry(entry("SkeletonArmy_EV1_General", "SkeletonArmy", form="evo"),
+                   entry("Witch_EV1_Healing_Skeleton", "Witch", form="evo"))
+    assert reg.validate(TABLE) == []
+    ext = reg.extend(base)
+    for label in ("SkeletonArmy_EV1_General", "Witch_EV1_Healing_Skeleton"):
+        assert reg.get(label).base is None
+        for tracks in (0, 100):
+            assert reg.train_label(label, tracks) == label
+        assert reg.train_index(ext, label, L.ENEMY_SIDE, 0) == ext.yolo_index(label, L.ENEMY_SIDE)
 
 
 def test_extend_refuses_a_missing_base_or_an_unpinned_base(base):

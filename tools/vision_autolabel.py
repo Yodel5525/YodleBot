@@ -637,9 +637,6 @@ def _parse_entry(d: Any, where: str) -> tuple[ExtraLabel | None, list[str]]:
             problems.append(f"{where}: {key} must be a label name or null, got {value!r}")
     if form == FORM_BASE and base is not None:
         problems.append(f"{where}: base is for evo and hero entries only")
-    if form != FORM_BASE and base is None:
-        problems.append(f"{where}: an {FORM_NAMES[form]} entry needs base, the base-form label it "
-                        "trains as while it is thin")
     if train_as is not None and train_as == label:
         problems.append(f"{where}: train_as names the label itself; use \"{TRAIN_SELF}\"")
     if valid is not None:
@@ -802,8 +799,17 @@ class Registry:
                     problems.append(f"{where}: class {vc.name} is made by {', '.join(vc.card_names) or 'no card'}, "
                                     f"not {e.card}")
                 if e.form != FORM_BASE:
+                    # base is the class's base-form label; a class that only exists in this form
+                    # (the evolved Skeleton Army's General, the evolved Witch's skeletons) has
+                    # none, so its entry keeps base null and trains as itself.
                     want = table.detector_key(lab.class_id, FORM_BASE)
-                    if e.base != want:
+                    if want is None and e.base is not None:
+                        problems.append(f"{where}: {vc.name} has no base form: leave base null "
+                                        "(the entry trains as itself)")
+                    elif want is not None and e.base is None:
+                        problems.append(f"{where}: an {e.form_name} entry needs base, the base-form label "
+                                        f"({want!r}) it trains as while it is thin")
+                    elif e.base != want:
                         problems.append(f"{where}: base must be {want!r}, the base form of {vc.name}")
             target = e.train_as if e.train_as != TRAIN_SELF else None
             if target is not None:
