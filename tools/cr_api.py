@@ -160,7 +160,8 @@ UNCONFIRMED: dict[str, str] = {
     "support_items": "whether /cards lists tower troops under supportItems",
     "slug_other_names": "the RoyaleAPI key of a name with an apostrophe or an accent; no card "
                         "has one today",
-    # the battle log (tools/opponents.py probe, U03)
+    # the battle log (tools/opponents.py probe, U03). All five were settled on the PC on
+    # 2026-10-31 (SEASON_UPDATES 7.1); they stay listed so probe re-checks them after updates.
     "battlelog_forms": "whether battle-log cards carry the form played (evolutionLevel on the "
                        "card), or only what the player owns",
     "hero_slot_missing": "whether a hero-slot card goes missing from a battle-log deck (77 of "

@@ -10,7 +10,7 @@ top players' decks, pulled into one local store (U03 of docs/SEASON_UPDATES.md).
     .venvs\royalegym\Scripts\python.exe tools\opponents.py status
 
 Spec: docs/SEASON_UPDATES.md 4.1 (the daily pull, about 55 calls; Mondays the top players,
-about 1,000 calls at 2 per second), 7.1 (the source and what is unconfirmed), 7.2 (what is
+about 1,000 calls at 2 per second), 7.1 (the source, and what the probe settled), 7.2 (what is
 stored), 7.3 (card names: cr_api.slug), 7.7 (courtesy and privacy), 12 (U03) and 13.1-13.3 (the
 owner's decisions of 2026-10-30: an API key in .secrets\supercell_token, the clan told, no
 names or tags committed). HTTP goes through tools/cr_api.py (U02): the shared rate, the 429
@@ -86,9 +86,10 @@ A battle record (battles.jsonl, meta_battles.jsonl; "v" RECORD_VERSION):
 Forms (FORM_RULES). The API's evolutionLevel is a bit mask, 1 evolution and 2 hero
 (API_NOTES.md). In a profile's currentDeck it is what the player OWNS, not what is equipped,
 and the deck's slots fix the form: slot 1 takes an evolution, slot 2 a hero (or a champion),
-slot 3 either (API_NOTES.md). Whether a battle-log card's evolutionLevel is the form played or
-what the player owns is unconfirmed; the probe settles it. The raw bits and the slot are kept on
-every card, so any rule can be applied later:
+slot 3 either (API_NOTES.md). On a battle-log card it is the form played: the probe confirmed it
+on the PC on 2026-10-31 (a slot-2 Musketeer hero shows 2 although both forms are owned; SEASON_UPDATES
+7.1), and probe keeps checking it. The raw bits and the slot are kept on every card, so any rule
+can be applied later:
   slot   (default) a form only where the slot takes it: slot 1 evolution if bit 1, slot 2 hero
          if bit 2, slot 3 whichever bit is set (None when both are), slots 4-8 base. Right under
          either meaning, as long as the battle log lists cards in slot order.

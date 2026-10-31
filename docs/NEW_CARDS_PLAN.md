@@ -382,7 +382,7 @@ $SID = '20261029_R0_1'
 - **Its gap items:** Boss Bandit (no class), Zap and Freeze (thin), the Minion Horde evo (base class only). All four are also in capture decks (C; C and G; I; I), so Round 0 is their natural gold.
 - **The 10 GoldenKnight plays** the pinned detector reported. The deck has no Golden Knight, so none of them is one. Label each GoldenKnight cluster after looking at it: Boss Bandit, which has no class yet, is the expected answer. The tracker forces any label outside our deck to the enemy side (1.8), so some may be the main account's Executioner, Elite Barbarians or Guards (label them as those), or Yodle2's own units such as Hog Rider (label them `o`). Golden Knight is in no clanmate's ranked deck.
 - **The Elite Barbarians evolution.** Slot 3 showed no evolution bit and the card was played as base. The API collection confirms that the main account lacks that evolution (4.8.7); a clanmate's friendlies supply it (4.8.8).
-- **The probe** (`opponents.py probe`, SEASON_UPDATES 7.1) can run on the existing log; it needs no new friendly. Its form test counts any owned form in a slot that cannot take it: Round 0's Executioner (slot 4) and Zap (slot 7), and Lumberjack, Balloon and Barbarian Barrel in slots 4-8 of the main account's usual ranked deck (10 battles in the log); each counts if you own its evolution or hero. Deck A's friendly 1 gives that test nothing: its special cards sit in slots that take their forms, and its five plain cards have no forms. It does test slot-2 hero reporting: the Electro Wizard hero sits in slot 2. The probe on the PC (2026-10-30) found the form played (4.8.4).
+- **The probe** (`opponents.py probe`, SEASON_UPDATES 7.1) can run on the existing log; it needs no new friendly. Its form test counts any owned form in a slot that cannot take it: Round 0's Executioner (slot 4) and Zap (slot 7), and Lumberjack, Balloon and Barbarian Barrel in slots 4-8 of the main account's usual ranked deck (10 battles in the log); each counts if you own its evolution or hero. Deck A's friendly 1 gives that test nothing: its special cards sit in slots that take their forms, and its five plain cards have no forms. It does test slot-2 hero reporting: the Electro Wizard hero sits in slot 2. The probe on the PC (2026-10-30) found the form played, and the 2026-10-31 friendly confirmed it with a dual-form card (4.8.4).
 - **Optional Round 0b.** One natural friendly with your usual ranked deck, as a second natural gold and, if wanted, a probe friendly against Yodle2 (an evolution in slot 1, a hero in slot 2, all proven owned). It holds four clan gap items: Vines, the Baby Dragon evo, the Electro Wizard hero and the P.E.K.K.A evo. About 7 minutes of play and 27 minutes of labelling.
 
   ```powershell
@@ -614,7 +614,7 @@ From the 1,176 collection-mode sides:
 
 #### 4.8.4 Forms: how they are read, and where -ev1 or -hero could be wrong
 
-**How `opponents.py` reads a form.** The API's `evolutionLevel` is a bit mask: 1 evolution, 2 hero. Whether a battle-log card's bits mean the form played or the forms owned is unconfirmed (SEASON_UPDATES 7.1). So the default `form_rule` `slot` reads a form only where the slot can take it:
+**How `opponents.py` reads a form.** The API's `evolutionLevel` is a bit mask: 1 evolution, 2 hero. On a battle-log card it is the form played (confirmed on 2026-10-31, below and SEASON_UPDATES 7.1). The default `form_rule` `slot` reads a form only where the slot can take it:
 - slot 1: evolution if bit 1;
 - slot 2: hero if bit 2;
 - slot 3: whichever bit is set, and no form (ambiguous) when both are;
@@ -642,9 +642,9 @@ This is right under either meaning, as long as the log lists cards in slot order
 1. After a friendly of deck E (the Musketeer evo in slot 3), read the probe's "latest" card table.
 2. The main account owns both Musketeer forms: 1 means the log shows the form played; 3 means it shows ownership.
 
-**The probe on the PC (2026-10-30)** found the form played: an owned evolution in slot 4 shows as base, cards come in deck order, and no side has 7 cards. Friendlies show every card at level 11. Whether a slot-2 hero always reports as a hero is checked with the next friendly (A's friendly 1, or any deck with a hero in slot 2).
+**The probe on the PC (2026-10-30)** found the form played: an owned evolution in slot 4 shows as base, cards come in deck order, and no side has 7 cards. Friendlies show every card at level 11.
 
-Knight in slot 3 would be the most useful check, but no capture deck has it.
+**The probe after the 2026-10-31 friendly settles it.** The main account played Cannon evolution in slot 1, the Musketeer hero in slot 2 and the Electro Wizard hero in slot 3. The log shows 1, 2 and 2. The account owns both Musketeer forms (3), so the log shows the form played, not ownership. A dual-form card in slot 3 therefore carries one bit, the form played, and the slot-3 risk above is gone: the slot and field rules agree on every card. The clan numbers for evolutions and heroes, including Knight, Valkyrie, Musketeer and Wizard in slot 3, stand as computed.
 
 #### 4.8.5 Tower troops
 

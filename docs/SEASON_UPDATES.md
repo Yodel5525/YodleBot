@@ -429,14 +429,16 @@ No checkpoint copies and no lineage ledger are needed, and rollback stays trivia
 
 **What it does not give:** balance numbers or replays. Balance always comes from the RoyaleSim table.
 
-**Unconfirmed until one probe on the PC** (U03 `probe`, after a friendly where the main account plays an evolution in slot 1 and a hero in slot 2):
-- whether battle-log cards carry the form played;
-- whether a hero-slot card goes missing (77 of 300 top players' `currentDeck` had 7 cards);
-- the battle `type` strings and the `deckSelection` value;
-- the log length;
-- the card levels shown for a friendly.
+**Settled by the probe on the PC** (U03 `probe`, 2026-10-30 and, after a friendly with an evolution in slot 1 and heroes in slots 2 and 3, 2026-10-31):
+- **Battle-log cards carry the form played.** In the 2026-10-31 friendly the main account's Musketeer in slot 2 shows `evolutionLevel` 2 (hero) although the account owns both forms (3); Cannon in slot 1 shows 1 and the Electro Wizard hero in slot 3 shows 2. Owned evolutions in slots that cannot take them show 0 (Executioner in slot 4, Zap and Battle Ram in slot 7, Skeletons and Ice Spirit in slots 4-5). Over 30 battles, 0 cards show a form their slot cannot take; 88 of 240 cards carry the field.
+- **No hero-slot card goes missing:** 0 of 60 one-against-one sides have 7 cards (only `currentDeck` drops one).
+- **Card order is the deck order:** 28 of 28 battles list `currentDeck`'s cards in its order.
+- **Types:** a spar is type `friendly`, deckSelection `collection`, gameMode `Friendly` (72000007). Others seen: `pathOfLegend`/`collection`/`Ranked1v1_NewArena`; `trail`/`eventDeck`/`Challenge_AllCards_EventDeck_NoSet`; `trail`/`collection`/`Showdown_Friendly` and `Ladder`.
+- **Log length:** 30 battles in the main account's log.
+- **Levels:** a friendly shows every card at level 11 (16 of 16 cards; none equals the collection's level).
+- Both players' logs show the same cards for a spar. The fields seen on a side include `kingTowerHitPoints`, `princessTowersHitPoints`, `supportCards` (the tower troop) and `elixirLeaked`.
 
-Spars are recognised by opponent tag (clan roster, owner, friends list), not by type string.
+The default `form_rule` `slot` and the `field` rule agree on every card seen, so nothing changes in `opponents.py`. Spars are still recognised by opponent tag (clan roster, owner, friends list), not by type string. The keys stay in `cr_api.UNCONFIRMED` so that `probe` keeps checking them after a game update.
 
 ### 7.2 What is stored
 
@@ -796,7 +798,7 @@ U07 derives them. A test asserts that the derived sets equal today's sets on the
 2. **Server-side content changes** can land with no new build and no new table. The calendar, the roster radar and the owner reading patch notes are the only detectors for balance-only server patches.
 3. **The grid guards against regressions only.** It cannot show that a new table matches the live game.
 4. **Carry-over keeps play trained under the old balance.** That is the intent for small patches. Big patches need RL in the new table and real friendlies.
-5. **The API's form encoding** in battle logs is unconfirmed. The worst case is base forms everywhere, with a WARN.
+5. **The API's form encoding** in battle logs was confirmed on 2026-10-31 (7.1): the log shows the form played. A game update could change it; `opponents.py probe` re-checks it, and the worst case is base forms everywhere, with a WARN.
 6. **Simulated opponents are weaker than top players**, so pool scores are optimistic. Cold cards are played from an untrained or unknown row.
 7. **The RL budgets are unmeasured.** Run `train_loop --bench` first.
 8. **Supply chain.** The routine installs a native wheel from PyPI. Mitigations: hash pin, side venv first, tests and grid before promotion, a wheel cache, one-command rollback.
