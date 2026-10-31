@@ -95,7 +95,9 @@ The registry (N07)
   spell card itself) and be written as ClassTable.detector_key writes it.
   Thin forms: a hero or evolution entry trains as its base label while it has fewer than
   thin_tracks (8) labelled training tracks, so the card is still named right (train_label,
-  train_index); "train_as" pins the choice. valid_from_client (per entry) and "reworks" (for
+  train_index); "train_as" pins the choice. A class that only exists in that form (the evolved
+  Skeleton Army's General and Spectral, the evolved Witch's skeletons) has no base label: its
+  entry keeps base null and trains as itself. valid_from_client (per entry) and "reworks" (for
   base labels) drop sessions recorded on an older client from that label (valid_for).
 
 Ingest (N08)
@@ -181,7 +183,8 @@ Scan, sheet and label (N09, N10)
       tracks.json does not copy it, so an `ingest --force` role change cannot go stale here.
     - A label not in the registry yet (a '*' legend entry) trains as its class's base form
       (trains_as: Registry.train_label with the table) until it is appended and has
-      thin_tracks tracks; class indices are written only by N13's mix, under
+      thin_tracks tracks; a class with no base form has no index until it is appended, so mix
+      leaves its images out; class indices are written only by N13's mix, under
       Registry.extend(base, require_pin=True) (emit stores label names).
     - Auto-accepted tracks (source "auto") are on no cluster: N12's review samples them as a
       group of their own.
@@ -587,7 +590,7 @@ class ExtraLabel:
     card: str
     type: str
     form: int = FORM_BASE
-    base: str | None = None              # form entries: the base-form label
+    base: str | None = None              # form entries: the base-form label (None: the class has none)
     train_as: str | None = None          # None: automatic; "self"; or a label name
     valid_from_client: str | None = None
     phase: int | None = None
@@ -798,7 +801,7 @@ class Registry:
                 if e.card not in vc.card_names:
                     problems.append(f"{where}: class {vc.name} is made by {', '.join(vc.card_names) or 'no card'}, "
                                     f"not {e.card}")
-                if e.form != FORM_BASE:
+                if e.form != FORM_BASE and lab.form == e.form:
                     # base is the class's base-form label; a class that only exists in this form
                     # (the evolved Skeleton Army's General, the evolved Witch's skeletons) has
                     # none, so its entry keeps base null and trains as itself.
@@ -878,9 +881,10 @@ class Registry:
     def train_label(self, label: str, tracks: int, table: Any = None) -> str:
         """The label a box of `label` is written as, given its number of labelled training
         tracks: a form entry trains as its base while it has fewer than thin_tracks, unless
-        train_as pins it; every other label trains as itself. With the class table, a hero or
-        evolution form that is not in the registry yet (labelled from a '*' legend entry)
-        trains as its class's base form, as a thin form does."""
+        train_as pins it; every other label (a form entry without base among them) trains as
+        itself. With the class table, a hero or evolution form that is not in the registry yet
+        (labelled from a '*' legend entry) trains as its class's base form, as a thin form does;
+        a class with no base form gives the label itself, which the extended set lacks."""
         e = self._by_label.get(str(label))
         if e is None and table is not None:
             lab = L.resolve_label(table, str(label))
@@ -1917,9 +1921,9 @@ def build_legend(deck: Sequence[DeckCard], table: Any, known: Iterable[str] = ()
             vc = table.get(cls)
             if vc is None or vc.retired:
                 continue
-            forms = [vc.base_form]
-            if c.form != FORM_BASE and c.form in vc.forms and c.form != vc.base_form:
-                forms.append(c.form)
+            # the base form and the slot's form, where the class has them: a class that only
+            # exists evolved (the evolved Skeleton Army's General) is on an evo slot's legend only
+            forms = [f for f in dict.fromkeys((FORM_BASE, c.form)) if f in vc.forms]
             for f in forms:
                 add(table.detector_key(vc.id, f), c.card, f, L.TYPE_UNIT, c.given)
         if info.get("kind") == "spell":
@@ -1934,7 +1938,8 @@ def legend_lines(legend: Sequence[LegendEntry]) -> list[str]:
     lines += [f" {k} {text}" for k, text in CODES.items()]
     if any(not e.known for e in legend):
         lines.append(" * no detector label yet: label it all the same, and append it to the registry before "
-                     "training (a form trains as its base until it has enough tracks)")
+                     "training (a form trains as its base until it has enough tracks; a class with no base form "
+                     "has no index until it is appended, and mix leaves its images out)")
     return lines
 
 
@@ -2925,9 +2930,17 @@ def emit_session(sid: str, *, labels_root: str | os.PathLike | None = None, stor
                         "and mix leaves images out); emit again with --force once prepare_yolo_dataset has written it")
     if not gold:
         new = sorted(label for label in per_label if label not in known)
-        if new:
-            warnings.append(f"{', '.join(new)}: no detector label yet (a '*' legend entry); mix trains a form as its "
-                            "base until it is in data/vision/detector_extra_labels.json with enough tracks")
+        falls = {label: (registry.train_label(label, 0, table) if registry is not None else label) for label in new}
+        fallback = [label for label in new if falls[label] != label]
+        stuck = [label for label in new if falls[label] == label]
+        if fallback:
+            warnings.append(f"{', '.join(f'{k} (as {falls[k]})' for k in fallback)}: no detector label yet (a '*' "
+                            "legend entry); mix trains a form as its base until it is in "
+                            "data/vision/detector_extra_labels.json with enough tracks")
+        if stuck:
+            warnings.append(f"{', '.join(stuck)}: no detector label yet and nothing to train as (no base form): mix "
+                            "has no index for them and leaves their images out until they are appended to "
+                            "data/vision/detector_extra_labels.json")
         if (paths.gold_dir / EMIT_JSON).is_file():
             warnings.append(f"{paths.gold_dir} holds a gold emit made while {sid} was gold: the gate no longer uses "
                             "it; delete it")

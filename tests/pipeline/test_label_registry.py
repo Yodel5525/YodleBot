@@ -203,6 +203,16 @@ def test_a_class_that_only_exists_evolved_is_an_evo_entry_without_base(base):
         assert reg.train_index(ext, label, L.ENEMY_SIDE, 0) == ext.yolo_index(label, L.ENEMY_SIDE)
 
 
+def test_a_wrong_form_entry_gets_no_base_hint_about_itself():
+    """ElectroWizardHero_Surge is a base-form class: entered as a hero it is reported once, as the
+    wrong form, without a base hint that names the label itself."""
+    problems = registry(entry("ElectroWizardHero_Surge", "ElectroWizard", form="hero")).validate(TABLE)
+    assert any("reads as the base form" in p for p in problems), problems
+    assert not any("base" in p and "reads as" not in p for p in problems), problems
+    assert registry(entry("ElectroWizardHero_Surge", "ElectroWizard"),
+                    entry("SkeletonContainerNew", "SkeletonBalloon")).validate(TABLE) == []
+
+
 def test_extend_refuses_a_missing_base_or_an_unpinned_base(base):
     lone_form = registry(entry("BerserkerHero", "Berserker", form="hero", base="Berserker"))
     with pytest.raises(VA.RegistryError, match="no label of the extended set"):

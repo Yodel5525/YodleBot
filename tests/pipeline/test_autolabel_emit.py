@@ -595,6 +595,30 @@ def test_yolo_rows_indices_against_the_label_set_digest():
         VA.Registry.from_dict({"schema": VA.REGISTRY_SCHEMA, "labels": ENTRIES}).extend(base, require_pin=True)
 
 
+def test_emit_names_what_an_unregistered_form_trains_as(tmp_path, keys):
+    """A '*' label the registry lacks: a form with a base trains as that base; a class with no
+    base form (the evolved Skeleton Army's Spectral) has no index, and emit says so."""
+    pytest.importorskip("numpy")
+    from scripts.vision import unit_harvest as UH
+
+    sid = "20261101_A_1"
+    paths, geom = synthetic_scan(tmp_path, keys, sid)
+    reg = VA.Registry.from_dict({"schema": VA.REGISTRY_SCHEMA, "labels": []})
+    kw = dict(labels_root=tmp_path / "labels", store=tmp_path / "store", table=TABLE, registry=reg)
+    VA.make_sheet(sid, geometry=geom, log=lambda m: None, **kw)
+    VA.label_session(sid, "0=s,1=SkeletonArmy_EV1_Spectral,2=x", sheet=1, off_deck=True, **kw)
+    VA.make_sheet(sid, geometry=geom, log=lambda m: None, **kw)
+    VA.label_session(sid, "0=BabyDragon_EV1,1=?", sheet=2, off_deck=True, **kw)
+    res = VA.emit_session(sid, config=UH.EmitConfig(birth_s=0.3, image_format="npy"), geometry=geom,
+                          log=lambda m: None, **kw)
+    falls = [w for w in res.warnings if "no detector label yet" in w]
+    assert any("BabyDragon_EV1 (as BabyDragon)" in w and "trains a form as its base" in w for w in falls), falls
+    # GiantBuffer (auto-accepted on the synthetic scan) is a base label this empty registry lacks: no index either
+    assert any(w.startswith("GiantBuffer, SkeletonArmy_EV1_Spectral: no detector label yet and nothing to train as")
+               and "leaves their images out" in w for w in falls), falls
+    assert not any("SkeletonArmy_EV1_Spectral" in w and "as its base" in w for w in falls), falls
+
+
 def test_effective_bad_tracks_and_decisions():
     tracks = {"tracks": [{"key": "17", "label": "BossBandit", "at": "2026-11-01T21:00:00", "source": "owner"},
                          {"key": "18", "code": "x", "at": "2026-11-01T21:00:00"},

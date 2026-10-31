@@ -426,6 +426,25 @@ def test_the_label_map_is_parsed_strictly():
     assert VA.parse_map("") == ([], []) and VA.parse_map(None) == ([], [])
 
 
+def test_a_class_that_only_exists_evolved_is_on_an_evo_slot_legend_only(keys):
+    """The evolved Skeleton Army's General and Spectral and the evolved Witch's skeletons have no
+    base form: a base Skeleton Army or Witch slot cannot show them, an evolution slot can."""
+    resolver = VA.CardResolver(TABLE, keys, EVENTS)
+    have = known()
+
+    def labels(token):
+        card, problem = resolver.resolve(token)
+        assert problem is None, problem
+        return [e.label for e in VA.build_legend([card], TABLE, have)]
+
+    assert labels("skeleton-army") == ["Skeleton"]
+    assert labels("skeleton-army-ev1") == ["Skeleton", "Skeleton_EV1", "SkeletonArmy_EV1_General",
+                                           "SkeletonArmy_EV1_Spectral"]
+    assert labels("witch") == ["Witch", "Skeleton"]
+    assert labels("witch-ev1") == ["Witch", "Witch_EV1", "Skeleton", "Skeleton_EV1", "Witch_EV1_Healing_Skeleton",
+                                   "Witch_EV1_Skeleton_Interval"]
+
+
 def test_names_resolve_through_classes_json_and_the_legend(keys):
     resolver = VA.CardResolver(TABLE, keys, EVENTS)
     have = known()
