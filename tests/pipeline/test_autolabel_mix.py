@@ -27,7 +27,6 @@ import importlib.util
 import json
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,13 +72,28 @@ def write_katacr(k: Path, base: L.LabelSet, images=None) -> Path:
     return k
 
 
+def shipped_registry(dst: Path, base) -> Path:
+    """A copy of the shipped registry at `dst`, in its own one-entry-per-line text, without the
+    form entries whose base label the tiny test base lacks (extend() refuses those)."""
+    text = VA.REGISTRY_PATH.read_text(encoding="utf-8")
+    doc = json.loads(text)
+    have = set(base.labels) | {e["label"] for e in doc["labels"] if e.get("form", "base") == "base"}
+    drop = {e["label"] for e in doc["labels"] if e.get("form", "base") != "base" and e.get("base") not in have}
+    lines = [line for line in text.splitlines()
+             if not (line.lstrip().startswith('{"label":') and json.loads(line.strip().rstrip(","))["label"] in drop)]
+    rows = [i for i, line in enumerate(lines) if line.lstrip().startswith('{"label":')]
+    for j, i in enumerate(rows):
+        lines[i] = lines[i].rstrip().rstrip(",") + ("," if j < len(rows) - 1 else "")
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dst
+
+
 def tiny_katacr(root: Path):
     """(katacr folder, base, registry path): a small tmp/yolo over BASE_KATACR, and a copy of the
     shipped registry pinned to that base with pin_base."""
     base, _ = L.build_label_set(TABLE, BASE_KATACR)
     k = write_katacr(root / "tmp" / "yolo", base)
-    reg = root / "detector_extra_labels.json"
-    shutil.copyfile(VA.REGISTRY_PATH, reg)
+    reg = shipped_registry(root / "detector_extra_labels.json", base)
     changed, _msg = VA.pin_base(reg, base)
     assert changed
     return k, base, reg
@@ -145,8 +159,7 @@ def train_detector_module():
 
 def test_pin_base(tmp_path, capsys):
     base, _ = L.build_label_set(TABLE, BASE_KATACR)
-    reg = tmp_path / "detector_extra_labels.json"
-    shutil.copyfile(VA.REGISTRY_PATH, reg)
+    reg = shipped_registry(tmp_path / "detector_extra_labels.json", base)
     before = reg.read_bytes()
     assert VA.Registry.load(reg).base_pin.get("digest") is None
     changed, msg = VA.pin_base(reg, base)
@@ -157,7 +170,7 @@ def test_pin_base(tmp_path, capsys):
     changed_lines = [(a, b) for a, b in zip(old, new) if a != b]
     assert [b.strip() for _a, b in changed_lines] == ['"labels": 4,', '"yolo_classes": 8,', f'"digest": "{base.digest}",']
     entries = [line for line in new if line.lstrip().startswith('{"label":')]
-    assert len(entries) == len(VA.Registry.load(VA.REGISTRY_PATH)) and entries == [
+    assert len(entries) == len(VA.Registry.from_dict(json.loads(before))) and entries == [
         line for line in old if line.lstrip().startswith('{"label":')]                  # one entry per line, as it was
     doc_old, doc_new = json.loads(before), json.loads(after)
     doc_old["base"].update(digest=base.digest, labels=4, yolo_classes=8)
@@ -178,8 +191,7 @@ def test_pin_base(tmp_path, capsys):
     with pytest.raises(VA.RegistryError, match="by hand"):
         VA.pin_base(bare, base)
     # the command: a real base only, never the preview
-    reg3 = tmp_path / "reg3.json"
-    shutil.copyfile(VA.REGISTRY_PATH, reg3)
+    reg3 = shipped_registry(tmp_path / "reg3.json", base)
     base_file = VA.write_json(tmp_path / "detector_labels.json", base.to_dict())
     assert VA.main(["labels", "--registry", str(reg3), "--base", str(tmp_path / "none.json"), "--pin-base"]) == VA.EXIT_INPUT
     assert VA.main(["labels", "--registry", str(reg3), "--base", str(base_file), "--pin-base"]) == VA.EXIT_OK
@@ -195,7 +207,7 @@ def test_name_collisions_and_the_dataset_yaml(tmp_path):
     got = VA.name_collisions(["HogRider@ally", "Knight@ally", "hogrider@ALLY "])
     assert len(got) == 1 and "0 'HogRider@ally' and 2 'hogrider@ALLY '" in got[0]
     base, _ = L.build_label_set(TABLE, BASE_KATACR)
-    reg = VA.Registry.load()
+    reg = VA.Registry.load(shipped_registry(tmp_path / "reg.json", base))
     pinned = VA.Registry(reg.entries, thin_tracks=reg.thin_tracks, base_pin={"digest": base.digest})
     assert VA.name_collisions(pinned.extend(base, require_pin=True).yolo_names()) == []
     assert VA.name_collisions(VA.crosswalk_base(TABLE).yolo_names()) == []              # tonight's names (the preview)

@@ -37,6 +37,8 @@
   {"label": "DarkMagic", "card": "DarkMagic", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Void: the DarkMagicAOE circle (2.5 tiles, 4 s)"},
   {"label": "Vines", "card": "Vines", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Vines: the Vines_AeO area (2.5 tiles, 1.4 s)"},
   {"label": "GoblinCurse", "card": "GoblinCurse", "type": "spell", "form": "base", "train_as": null, "valid_from_client": null, "phase": 1, "added": "2026-10-30", "note": "Goblin Curse: the GoblinCurseBase circle (3 tiles, 6 s)"},
-  {"label": "MinionHorde_EV1", "card": "MinionHorde", "type": "unit", "form": "evo", "base": "Minion", "train_as": null, "valid_from_client": null, "phase": 2, "added": "2026-10-31", "note": "evolved Minion Horde (blue minions, magenta horns, diamond badges); Round 0 gold has 40+ labelled tracks; trains as Minion while thin"}
+  {"label": "MinionHorde_EV1", "card": "MinionHorde", "type": "unit", "form": "evo", "base": "Minion", "train_as": null, "valid_from_client": null, "phase": 2, "added": "2026-10-31", "note": "evolved Minion Horde (blue minions, magenta horns, diamond badges); Round 0 gold has 40+ labelled tracks; trains as Minion while thin"},
+  {"label": "SkeletonBalloon_EV1", "card": "SkeletonBalloon", "type": "unit", "form": "evo", "base": "SkeletonBalloon", "train_as": null, "valid_from_client": null, "phase": 2, "added": "2026-10-31", "note": "evolved Skeleton Barrel (Tier 1 deck A, slot 1); trains as SkeletonBalloon while thin"},
+  {"label": "ElectroWizardHero", "card": "ElectroWizard", "type": "unit", "form": "hero", "base": "ElectroWizard", "train_as": null, "valid_from_client": null, "phase": 2, "added": "2026-10-31", "note": "Electro Wizard hero form (Tier 1 deck A, slot 2; owned by the main account); trains as ElectroWizard while thin"}
  ]
 }
