@@ -103,6 +103,7 @@ import numpy as np  # noqa: E402
 from latency_probe import describe  # noqa: E402
 from scripts import vision_play as VP  # noqa: E402
 from scripts.vision import hpbars  # noqa: E402
+from scripts.vision import tower_labels as TL  # noqa: E402
 from scripts.vision.detector import BAR_CLASSES, Detector, DetectorConfig, box_iou  # noqa: E402
 from scripts.vision.geometry import check_frame_size  # noqa: E402
 from scripts.vision.labels import (TYPE_SPELL, TYPE_TOWER, TYPE_UNIT, parse_side,  # noqa: E402
@@ -539,6 +540,16 @@ class ReplayPerception:
                 spells.append(d)
         return units, spells, bars
 
+    def _tower_evidence(self, dets: list[Detection] | None, size: Sequence[int]) -> Any:
+        """tower_labels.TowerEvidence of a frame's detections (None: no detections)."""
+        if dets is None:
+            return None
+        try:
+            make = getattr(self.hud_reader, "tower_evidence", None)
+            return make(dets, size) if callable(make) else TL.TowerEvidence.from_detections(dets, size)
+        except Exception:
+            return None
+
     def step(self, rgb: np.ndarray, t: float, stale_s: float = 0.0, *,
              recorded: VisionFrame | None = None, detect: bool = False) -> Step:
         img = np.asarray(rgb)
@@ -562,23 +573,36 @@ class ReplayPerception:
                 and t - self._last_panel_t > self.hud_reset_gap_s):
             self._reset_hud()                       # back on a battle screen after a while
         self._last_panel_t = t
-        vf.hud = self.hud_reader.read(img, t)
-        report = getattr(self.hud_reader, "report", None)
-        step.hud_report = report.summary() if hasattr(report, "summary") else None
+        # As live (LivePerception): the towers are read after the detector, with its tower boxes
+        # (the recording's, scaled, with --recorded), when the HUD reader reads in two phases.
+        two_phase = callable(getattr(self.hud_reader, "read_towers", None))
+        vf.hud = self.hud_reader.read(img, t, towers=False) if two_phase else self.hud_reader.read(img, t)
         vf.tick = vf.hud.clock_tick
         step.track_tick, step.tick_source = self.tick_at(t, vf.tick)
         tick = step.track_tick
         if tick is not None:
             self._last_tick = int(tick)
-        res, dets = None, None
+        res, dets, det_exc = None, None, None
         if self.recorded:
             if recorded is not None:
                 dets = scale_detections(recorded.detections, recorded.frame_size, (w, h))
                 step.det_source = "recorded"
         elif self.detector is not None and (tick is not None or detect):
-            res = self.detector.detect(img)
-            dets = list(res.detections)
-            step.det, step.det_source = res, "detector"
+            try:
+                res = self.detector.detect(img)
+                dets = list(res.detections)
+                step.det, step.det_source = res, "detector"
+            except Exception as exc:                    # raised after the towers are read
+                det_exc = exc
+        if two_phase:
+            self.hud_reader.read_towers(img, t, vf.hud, self._tower_evidence(dets, (w, h)))
+            revived = getattr(getattr(self.hud_reader, "report", None), "towers_revived", None)
+            if revived and callable(getattr(self.deriver, "revive_towers", None)):
+                self.deriver.revive_towers(revived)
+        report = getattr(self.hud_reader, "report", None)
+        step.hud_report = report.summary() if hasattr(report, "summary") else None
+        if det_exc is not None:
+            raise det_exc
         if dets is None:
             return step
         vf.detections = dets
@@ -946,6 +970,10 @@ class Replay:
                                 "cues": step.cues.to_dict(), "hud_report": step.hud_report}
         if vf.screen == SCREEN_BATTLE:
             info["hud_agree"] = self.hud.add(vf.hud, recorded, self._card_key)
+            misread = (step.hud_report or {}).get("towers_misread")
+            if misread:
+                self._log("towers_misread", battle=self.battle.number if self.battle.in_battle else None,
+                          tick=vf.tick, **misread)
         info["det"] = self.dets.add(step)
         if step.det_source is not None and step.track_tick is not None:
             info["tracks"] = self.tracks.add(self.segment, vf.tracks, step.track_tick)

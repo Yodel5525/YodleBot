@@ -1133,6 +1133,14 @@ class EventDeriver:
                 self.fallen_towers.add(key)
         return set(self.fallen_towers)
 
+    def revive_towers(self, keys: Iterable[str]) -> set[str]:
+        """Forget that the towers `keys` fell (the HUD misread them as destroyed: HudReader's
+        overtime check revived them), which closes their pockets again. Returns the fallen
+        towers."""
+        for key in keys or ():
+            self.fallen_towers.discard(str(key))
+        return set(self.fallen_towers)
+
     # -- outputs --------------------------------------------------------------
     def card_of(self, uid: int) -> int | None:
         """The card that put track `uid` on the board, once classified (None for the tracks of

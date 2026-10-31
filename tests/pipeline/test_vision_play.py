@@ -169,8 +169,9 @@ class FakeTapper:
         self.calls.append((tuple(a), tuple(b)))
 
 
-def make_decider(policy, *, captured=None, fail_at=None):
-    """A Decider on a minimal state built from the HUD; row_fn records (tick, view, opp cards)."""
+def make_decider(policy, *, captured=None, fail_at=None, refusals=None):
+    """A Decider on a minimal state built from the HUD; row_fn records (tick, view, opp cards).
+    With `refusals` (a RefusedTapGuard) its legality is RefusalLegality over the accept-all one."""
 
     def state_fn(vf, ctx):
         if fail_at is not None and vf.tick == fail_at:
@@ -188,7 +189,10 @@ def make_decider(policy, *, captured=None, fail_at=None):
             captured.setdefault("views", []).append((tick, view))
         return {"tick": tick}
 
-    return VP.Decider(policy=policy, legality=lambda slot, card, x, y: True,
+    legality = lambda slot, card, x, y: True  # noqa: E731
+    if refusals is not None:
+        legality = VP.RefusalLegality(legality, refusals)
+    return VP.Decider(policy=policy, legality=legality,
                       config=RD.DecideConfig.live(0.0), state_fn=state_fn, row_fn=row_fn,
                       rng=np.random.default_rng(0))
 
@@ -197,8 +201,9 @@ def make_decider(policy, *, captured=None, fail_at=None):
 # scripted frames
 # ---------------------------------------------------------------------------
 
-def battle_vf(t, tick, *, opp=(), own=()):
-    hud = Hud(hand=list(HAND), next=0, elixir_milli=7000, clock_tick=tick, phase=PHASE_REGULATION)
+def battle_vf(t, tick, *, opp=(), own=(), hand=None, elixir=7000):
+    hud = Hud(hand=list(HAND if hand is None else hand), next=0, elixir_milli=elixir, clock_tick=tick,
+              phase=PHASE_REGULATION)
     return VisionFrame(t_capture=t, tick=tick, hud=hud, events=Events(list(opp), list(own)),
                        screen=SCREEN_BATTLE, frame_size=(225, 400))
 
@@ -239,21 +244,28 @@ def read_records(session_dir):
 
 def run_script(tmp_path, script, *, mode=CT.AUTO, taps=True, play_ticks=(100,), tapper=None,
                size=(225, 400), on_read=None, decider=None, image_every=0, tap_guard=None,
-               perception=None):
+               perception=None, refusals=None, control=None):
+    """Runs `script` (see the module doc). refusals: a RefusedTapGuard for the runner and the
+    default decider's legality (None: no guard, as before). control: a dict that receives the
+    ControlState as "state" before the run (for on_read hooks that press F8)."""
     clock = FakeClock()
     rgb = np.zeros((size[1], size[0], 3), dtype=np.uint8)
     frames = [Frame(t, rgb, 0.0) for t, _ in script]
     perception = FakePerception(script) if perception is None else perception
-    control = CT.ControlState(mode, taps_enabled=taps, stop_file=tmp_path / "STOP", control_file=None,
-                              names=NAMES, clock=clock)
+    ctl = CT.ControlState(mode, taps_enabled=taps, stop_file=tmp_path / "STOP", control_file=None,
+                          names=NAMES, clock=clock)
+    if control is not None:
+        control["state"] = ctl
+    control = ctl
     recorder = VisionRecorder(tmp_path / "rec", session="s", image_every=image_every, image_format="npy",
                               clock=clock, wall_clock=lambda: 0.0)
     tapper = FakeTapper() if tapper is None else tapper
     lines = []
     runner = VP.VisionPlay(source=FakeSource(frames, clock, on_read), perception=perception,
-                           decider=decider or make_decider(FakePolicy(play_ticks)), control=control,
-                           recorder=recorder, geometry=GEOMETRY, tapper=tapper, card_names=NAMES,
-                           clock=clock, sleep=lambda s: None, out=lines.append, tap_guard=tap_guard)
+                           decider=decider or make_decider(FakePolicy(play_ticks), refusals=refusals),
+                           control=control, recorder=recorder, geometry=GEOMETRY, tapper=tapper,
+                           card_names=NAMES, clock=clock, sleep=lambda s: None, out=lines.append,
+                           tap_guard=tap_guard, refusals=refusals)
     rc = runner.run()
     recorder.close()
     return SimpleNamespace(rc=rc, runner=runner, tapper=tapper, perception=perception, control=control,
@@ -496,6 +508,28 @@ def test_status_line_every_second(tmp_path):
         "[battle 1] tick 106 | elixir 7.0 | hand Log/HogRider/Skeletons/IceSpirits next Cannon | "
         "AUTO(tap) | last HogRider -> (13, 22) [tap] @100 | 10 fps, 1 taps")
     assert status[2].startswith("[end] tick 122")
+
+
+def test_status_line_shows_the_towers_the_bot_plays_on(tmp_path):
+    """The runbook has the owner hand back to AUTO only once the status line's towers look right
+    (a misread 0 opens a pocket: the 2026-10-31 failure): the princess towers' HP as read, "?"
+    unread, and the crowns; nothing when no tower is read (test_status_line_every_second)."""
+    from scripts.vision.types import TowerHp
+    script = standard_script()
+    for _, vf in script:
+        if isinstance(vf, VisionFrame) and vf.screen == VP.SCREEN_BATTLE:
+            vf.hud.towers = {"enemy_left": TowerHp(3052, 3052), "enemy_right": TowerHp(0, 3052),
+                             "own_left": TowerHp(2101, 3052), "own_right": TowerHp(None, None),
+                             "enemy_king": TowerHp(4824, 4824), "own_king": TowerHp(4824, 4824)}
+            vf.hud.crowns = (1, 0)
+    res = run_script(tmp_path, script, play_ticks=(100,))
+    status = [line for line in res.lines if line.startswith("[battle 1]")]
+    assert status and status[0].startswith(
+        "[battle 1] tick 106 | elixir 7.0 | hand Log/HogRider/Skeletons/IceSpirits next Cannon | "
+        "towers them 3052 0 us 2101 ? crowns 1-0 | AUTO(tap) | last HogRider")
+    assert VP.towers_text(Hud()) == ""
+    assert VP.towers_text(Hud(towers={"own_left": TowerHp(3052, 3052)})) == (
+        " | towers them ? ? us 3052 ? crowns 0-0")
 
 
 def test_human_plays_are_compared_with_what_the_bot_would_play(tmp_path):
@@ -771,6 +805,140 @@ def test_live_perception_survives_a_failing_detector():
     assert p.detect_errors == 1 and str(p.last_detect_error) == "CUDA out of memory"
 
 
+class TwoPhaseHud(FakeHudReader):
+    """FakeHudReader read in two phases (HudReader's surface): read(towers=False), then
+    read_towers with the detector's tower evidence, which it records."""
+
+    def __init__(self, ticks):
+        super().__init__(ticks)
+        self.evidence = []
+        self.towers_flags = []
+        self.report = SimpleNamespace(towers_revived=[])
+
+    def read(self, rgb, t, towers=True):
+        self.towers_flags.append(towers)
+        return super().read(rgb, t)
+
+    def read_towers(self, rgb, t, hud, evidence=None):
+        self.evidence.append(evidence)
+        return hud
+
+
+def test_live_perception_reads_the_towers_with_the_detectors_boxes():
+    """FIX A/B: the HUD's towers are read after the detector, with the frame's tower boxes (a
+    tower skin's label is read where the detector puts it; a tower it sees is never read
+    destroyed). A failing detector or none: read_towers still runs, with None. A HUD reader
+    without read_towers is read in one call, as before."""
+    from scripts.vision.tower_labels import LABEL_REF_PX, TOWER_BODY_REF_PX
+    from scripts.vision.tracker import Tracker
+
+    size = (225, 400)
+    sx, sy = size[0] / 1080.0, size[1] / 1920.0
+
+    def scaled(box):
+        return (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
+
+    towers = [Detection("PrincessTower", 0.9, 0.9, scaled(TOWER_BODY_REF_PX["enemy_right"])),
+              Detection("tower-bar", 0.9, 0.9, scaled(LABEL_REF_PX["enemy_left"]))]
+
+    def perception(hud, detector):
+        return VP.LivePerception(hud_reader=hud, tracker=Tracker(own_classes={"HogRider"}),
+                                 deriver=EV.EventDeriver(EV.EventTables({}), own_deck=range(8)),
+                                 geometry=GEOMETRY, detector=detector)
+
+    hud = TwoPhaseHud([100])
+    p = perception(hud, FakeDetector(towers, size))
+    vf = p.perceive(Frame(1.0, battle_image(size), 0.0))
+    [ev] = hud.evidence
+    assert hud.towers_flags == [False] and vf.tick == 100 and p.detect_errors == 0
+    assert ev.seen("enemy_right") and ev.seen("enemy_left") and not ev.seen("own_left")
+    assert set(ev.placement) == {"enemy_left"}
+
+    class Broken:
+        def detect(self, rgb):
+            raise RuntimeError("CUDA out of memory")
+
+    hud = TwoPhaseHud([100])
+    p = perception(hud, Broken())
+    vf = p.perceive(Frame(1.0, battle_image(size), 0.0))
+    assert hud.evidence == [None] and p.detect_errors == 1 and vf.hud.hand == HAND
+    assert str(p.last_detect_error) == "CUDA out of memory"
+    hud = TwoPhaseHud([100])
+    p = perception(hud, None)
+    p.perceive(Frame(1.0, battle_image(size), 0.0))
+    assert hud.evidence == [None] and hud.towers_flags == [False]
+    hud = TwoPhaseHud([None])                              # no tick: the detector does not run
+    det = FakeDetector(towers, size)
+    perception(hud, det).perceive(Frame(1.0, battle_image(size), 0.0))
+    assert hud.evidence == [None] and det.calls == 0
+    plain = FakeHudReader([100])                            # read(rgb, t) only: one call, as before
+    p = perception(plain, FakeDetector(towers, size))
+    vf = p.perceive(Frame(1.0, battle_image(size), 0.0))
+    assert plain.reads == 1 and vf.tick == 100 and p.detect_errors == 0
+
+
+def test_live_perception_takes_revived_towers_out_of_the_fallen_ones():
+    from scripts.vision.tracker import Tracker
+
+    hud = TwoPhaseHud([3610])
+    hud.report.towers_revived = ["enemy_left"]
+    d = EV.EventDeriver(EV.EventTables({}), own_deck=range(8))
+    d.fallen_towers.update({"enemy_left", "own_right"})
+    p = VP.LivePerception(hud_reader=hud, tracker=Tracker(own_classes={"HogRider"}), deriver=d,
+                          geometry=GEOMETRY, detector=FakeDetector([], (225, 400)))
+    p.perceive(Frame(1.0, battle_image(), 0.0))
+    assert d.fallen_towers == {"own_right"}
+
+
+class TowerReportPerception(FakePerception):
+    """FakePerception with a HUD reader whose report moves both enemy labels 36 px up from tick
+    80 (the detector) and revives two towers at tick 96 (the overtime check)."""
+
+    def __init__(self, script):
+        from scripts.vision import hud as H
+        super().__init__(script)
+        self.H = H
+        info = {"shift_px": {"enemy_left": [0.0, -36.0]}, "source": {"enemy_left": "detector"},
+                "holds": {"enemy_left": 12}, "revived": ["enemy_left", "enemy_right"]}
+        self.hud_reader = SimpleNamespace(report=None, towers_info=lambda: info)
+
+    def perceive(self, frame):
+        vf = super().perceive(frame)
+        if vf.screen == SCREEN_BATTLE:
+            rep = self.H.HudReport(t=vf.t_capture)
+            rep.tower_frac = {"enemy_left": 0.222}
+            if vf.tick >= 80:
+                rep.tower_shift = {"enemy_left": [0.0, -36.0, "detector"], "enemy_right": [1.4, -36.3, "detector"],
+                                   "own_left": [0.0, 0.0, "fixed"]}
+            if vf.tick == 96:
+                rep.towers_revived = ["enemy_left", "enemy_right"]
+                rep.towers_misread = {"crowns_before": [2, 0], "revived": ["enemy_left", "enemy_right"],
+                                      "crowns_after": [0, 0]}
+            self.hud_reader.report = rep
+        return vf
+
+
+def test_tower_labels_misreads_and_raw_reads_are_logged(tmp_path):
+    res = run_script(tmp_path, standard_script(), perception=TowerReportPerception(standard_script()))
+    recs = res.records
+    labels = recs["tower_label"]
+    assert [(r["key"], r["shift_px"], r["source"], r["battle"]) for r in labels] == [
+        ("enemy_left", [0.0, -36.0], "detector", 1), ("enemy_right", [1.4, -36.3], "detector", 1)]
+    assert labels[0]["tick"] == 90                          # the battle's first frame (from tick 90)
+    assert [ln for ln in res.lines if "calibration" in ln] == [
+        "enemy labels 36 px above calibration (tower skin; from the detector): HP read there"]
+    [mis] = recs["towers_misread"]
+    assert (mis["battle"], mis["tick"], mis["crowns_before"], mis["crowns_after"]) == (1, 96, [2, 0], [0, 0])
+    assert any(ln.startswith("towers misread: overtime began at 2-0") for ln in res.lines)
+    [end] = recs["battle_end"]
+    assert end["towers_info"]["holds"] == {"enemy_left": 12} and end["towers_info"]["revived"] == [
+        "enemy_left", "enemy_right"]
+    raw = [f["extra"].get("towers_raw") for f in recs["frame"] if f["frame"]["screen"] == SCREEN_BATTLE]
+    assert raw and all(r is not None and r["frac"] == {"enemy_left": 0.222} for r in raw)
+    assert raw[-1]["shift"] == {"enemy_left": [0.0, -36.0, "detector"], "enemy_right": [1.4, -36.3, "detector"]}
+    assert all("towers_raw" not in f["extra"] for f in recs["frame"] if f["frame"]["screen"] != SCREEN_BATTLE)
+
+
 def test_live_perception_survives_a_failing_board_chain():
     """Not only detect(): the HP bars, the ground points, the tracker and the events run on
     the detector's output and have never run on the pinned detector's real frames. A failure
@@ -951,12 +1119,42 @@ def test_result_book():
     book.end_frame((1, 0), 50.2)
     assert not book.due(SCREEN_END, 52.0) and book.due(SCREEN_END, 53.2) and book.due(SCREEN_MENU, 50.3)
     rec = book.finish()
-    assert (rec["outcome"], rec["crowns"], rec["end_frames"], rec["source"]) == ("win", [1, 0], 2, "end screen + hud")
+    # the end screen's crowns stand when read (FIX D; it was the larger of the two, "end screen +
+    # hud", which kept the HUD's misread 2-0 of the 2026-10-31 friendly); equal crowns: no note
+    assert (rec["outcome"], rec["crowns"], rec["end_frames"], rec["source"]) == ("win", [1, 0], 2, "end screen")
+    assert "crowns_disagree" not in rec
     book.open(2, "clock stopped", 100.0, (0, 1))
     assert not book.due(SCREEN_MENU, 119.0) and book.due(SCREEN_MENU, 120.0)
     rec = book.finish()
     assert (rec["outcome"], rec["source"], rec["record"]) == ("loss", "hud", {"win": 1, "loss": 1})
     assert book.done == 2 and book.finish() is None
+
+
+def test_result_book_the_end_screen_beats_the_hud_crowns():
+    """The 2026-10-31 friendly: the HUD read both enemy towers destroyed (2-0, a tower skin), the
+    end screen showed 1-0. The end screen's crowns stand and the HUD's go in crowns_disagree; an
+    end screen read 0-0 before the clock ran out keeps the HUD's (no battle ends 0-0 then, and
+    the loss layout is unverified), but not at the end of overtime."""
+    book = VP.ResultBook()
+    book.open(1, "end screen", 50.0, (2, 0), last_tick=4003)
+    book.end_frame((1, 0), 50.1)
+    rec = book.finish()
+    assert (rec["crowns"], rec["source"], rec["outcome"]) == ([1, 0], "end screen", "win")
+    assert rec["crowns_disagree"] == {"hud": [2, 0], "end": [1, 0]}
+    book.open(2, "end screen", 90.0, (0, 1), last_tick=2500)
+    book.end_frame((0, 0), 90.1)
+    rec = book.finish()
+    assert (rec["crowns"], rec["source"], rec["outcome"]) == ([0, 1], "hud (end screen read 0-0)", "loss")
+    assert rec["crowns_disagree"] == {"hud": [0, 1], "end": [0, 0]}
+    book.open(3, "end screen", 130.0, (0, 1), last_tick=5990)
+    book.end_frame((0, 0), 130.1)
+    rec = book.finish()
+    assert (rec["crowns"], rec["source"], rec["outcome"]) == ([0, 0], "end screen", "draw")
+    book.open(4, "end screen", 170.0, (0, 0), last_tick=1000)
+    book.end_frame((0, 0), 170.1)
+    rec = book.finish()
+    assert (rec["crowns"], rec["source"]) == ([0, 0], "end screen") and "crowns_disagree" not in rec
+    assert book.tally == {"win": 1, "loss": 1, "draw": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -1258,6 +1456,7 @@ def test_main_rehearses_the_whole_loop_on_a_recording(tmp_path, monkeypatch, cap
     assert rc == 0, out
     assert "source     replay of" in out and "(36 images, as fast as the chain runs); no device, no adb" in out
     assert "taps       off (the source is a recording)" in out
+    assert "refusals   refused taps: (dry run: logs only)" in out
     assert "detector   NONE (RuntimeError: no detector weights (test))" in out
     assert "decide     live; wait_keep 0.25 (wait bias 1.386); would-play every 10 ticks" in out
     assert "CPU, 4 torch threads" in out and calls["threads"] == 2
@@ -1274,6 +1473,11 @@ def test_main_rehearses_the_whole_loop_on_a_recording(tmp_path, monkeypatch, cap
     assert (cfg["source_kind"], cfg["replay"]["images"], cfg["replay"]["realtime"]) == ("replay", 36, False)
     assert (cfg["taps"], cfg["tap_refusal"], cfg["decide"], cfg["wait_keep"], cfg["args_json"]) == (
         False, "the source is a recording", "live", 0.25, True)
+    assert cfg["tap_guard"]["enforce"] is False and cfg["tap_guard"]["k"] == 3
+    assert cfg["tap_guard"]["refuse_after_ticks"] == 30 and cfg["tap_guard"]["final_after_ticks"] == 60
+    # MANUAL: no tap and no dry play, so nothing was watched
+    assert recs["session_end"][0]["tap_guard"]["watched"] == 0
+    assert recs["battle_end"][0]["tap_guard"]["watched"] == 0
     assert recs["battle_start"][0]["tick"] == 90 and recs["result"][0]["outcome"] == "win"
     [d] = decisions(recs)
     assert (d["tick"], d["card"], d["action"]) == (100, 2, CT.ACTION_MANUAL)
@@ -1364,3 +1568,219 @@ def test_running_vision_play_never_loads_scripts_gamestate():
                          text=True, timeout=180)
     assert res.returncode == 0, res.stderr
     assert json.loads(res.stdout.strip().splitlines()[-1]) == {"bad": [], "mods": 15, "torch": False}
+
+
+# ---------------------------------------------------------------------------
+# FIX E: the refused-tap guard (scripts/vision/tap_refusal.py) in the loop
+# ---------------------------------------------------------------------------
+
+from scripts.vision import tap_refusal as TR  # noqa: E402
+
+
+def long_script(last_tick=320, *, hand_at=None, elixir_at=None, battles=1):
+    """standard_script's battle stretched to ticks 70..last_tick (2 ticks a frame, 0.1 s apart),
+    the end screen after each battle, `battles` times. hand_at(tick) / elixir_at(tick): the
+    HUD's hand and elixir (default: HAND and 7.0)."""
+    items = [menu_vf(t_of(0)), menu_vf(t_of(1))]
+    for _ in range(battles):
+        for tick in range(70, last_tick + 1, 2):
+            items.append(battle_vf(t_of(len(items)), tick, hand=None if hand_at is None else hand_at(tick),
+                                   elixir=7000 if elixir_at is None else elixir_at(tick)))
+        items += [end_vf(t_of(len(items)), tick=last_tick + 2) for _ in range(5)]
+        items += [menu_vf(t_of(len(items))) for _ in range(3)]
+    return [(t_of(i), item) for i, item in enumerate(items)]
+
+
+def frame_of(tick, battle=1, last_tick=320):
+    """The frame index of `tick` in long_script (battle 1, 2, ...)."""
+    per = (last_tick - 70) // 2 + 1 + 8
+    return 2 + (battle - 1) * per + (tick - 70) // 2
+
+
+def played(res):
+    """(tick, action, model tile, legality) of each play decision on the frame lines."""
+    return [(e["decision"]["tick"], e["action"], (e["decision"]["tx"], e["decision"]["ty"]),
+             e["decision"]["legality"])
+            for e in (f["extra"] for f in res.records["frame"]) if e.get("decision", {}).get("kind") == RD.PLAY]
+
+
+def in_box(tile, centre=PLAY_TILE, r=2):
+    return abs(tile[0] - centre[0]) <= r and abs(tile[1] - centre[1]) <= r
+
+
+def test_refusal_guard_a_landed_tap_is_never_refused(tmp_path):
+    """The Hog tapped at 100: its slot empties at 110 and refills with the Musketeer at 130, the
+    elixir falls by 4 at 110. tap_landed, no tap_refused, AUTO all along."""
+    g = TR.RefusedTapGuard(enforce=True)
+    hand = lambda tk: HAND if tk < 110 else ([7, VP.EMPTY_CARD, 6, 4] if tk < 130 else [7, 5, 6, 4])  # noqa: E731
+    elixir = lambda tk: 7000 if tk < 110 else 3000  # noqa: E731
+    res = run_script(tmp_path, long_script(200, hand_at=hand, elixir_at=elixir), play_ticks=(100,),
+                     refusals=g)
+    [landed] = res.records["tap_landed"]
+    assert (landed["battle"], landed["tap_tick"], landed["card"], landed["name"], landed["slot"]) == (
+        1, 100, 2, "HogRider", PLAY_SLOT)
+    assert landed["evidence"] in ("elixir", "hand") and landed["tick"] <= 116 and landed["dry"] is False
+    assert "tap_refused" not in res.records and "tap_guard_manual" not in res.records
+    assert res.control.mode == CT.AUTO and len(res.tapper.calls) == 1
+    [end] = res.records["battle_end"]
+    assert (end["tap_guard"]["watched"], end["tap_guard"]["landed"], end["tap_guard"]["refused"]) == (1, 1, 0)
+    assert res.records["session_end"][0]["tap_guard"]["landed"] == 1
+    assert not any("tap did nothing" in line for line in res.lines)
+
+
+def test_refusal_guard_a_tap_that_did_nothing_is_refused_and_masked(tmp_path):
+    """The hand never changes: the Hog tapped at 100 is refused at 130 and kept off the box
+    around (4, 22); the play at 162 goes elsewhere through the "+refusals" legality."""
+    g = TR.RefusedTapGuard(enforce=True)
+    res = run_script(tmp_path, long_script(200), play_ticks=(100, 162), refusals=g)
+    [refused, *_] = res.records["tap_refused"]
+    assert (refused["battle"], refused["tick"], refused["tap_tick"], refused["age"]) == (1, 130, 100, 30)
+    assert (refused["card"], refused["name"], refused["slot"], refused["cost"]) == (2, "HogRider", 1, 4)
+    assert refused["model_tile"] == [4, 22] and refused["screen_tile"] == [13, 22] and refused["zone"] == "own"
+    assert refused["mask"] == {"kind": "box", "x0": 2, "y0": 20, "x1": 6, "y1": 24, "until_tick": 730}
+    assert (refused["dry"], refused["applied"], refused["refusals"]) == (False, True, 1)
+    assert refused["elixir_at_tap"] == 7000 and refused["present_ticks"] == 15
+    plays = played(res)
+    assert plays[0] == (100, CT.ACTION_TAP, PLAY_TILE, "callable")      # nothing masked yet: as before
+    tick, action, tile, legality = plays[1]
+    assert (tick, action) == (162, CT.ACTION_TAP) and not in_box(tile) and legality == "callable+refusals"
+    assert [t["tick"] for t in res.records["tap"]] == [100, 162]
+    assert any(line.startswith("tap did nothing: HogRider -> (13, 22) at tick 100 (still in its slot 30 ticks")
+               for line in res.lines)
+    assert any("| AUTO(tap) | refused 1/3 | last" in line for line in res.lines)
+    assert res.control.mode == CT.AUTO
+
+
+def test_refusal_guard_three_refusals_switch_to_manual(tmp_path):
+    """Taps at 100, 162 (the slot of the last refusal: toggle_suspect) and 224, finals at 160,
+    222 and 284: MANUAL from the decision at 284 on; the play at 300 is a suggestion only."""
+    g = TR.RefusedTapGuard(enforce=True)
+    res = run_script(tmp_path, long_script(320), play_ticks=(100, 162, 224, 300), refusals=g)
+    assert len(res.tapper.calls) == 3 and [t["tick"] for t in res.records["tap"]] == [100, 162, 224]
+    refused = res.records["tap_refused"]
+    assert [(r["tick"], r["toggle_suspect"], r["mask"] is None) for r in refused] == [
+        (130, False, False), (192, True, True), (254, False, False)]
+    assert [r["tick"] for r in res.records["tap_refusal_final"]] == [160, 222, 284]
+    [manual] = res.records["tap_guard_manual"]
+    assert (manual["battle"], manual["tick"], manual["k"], manual["mode_before"], manual["switched"],
+            manual["dry"]) == (1, 284, 3, CT.AUTO, True, False)
+    assert [f["tap_tick"] for f in manual["finals"]] == [100, 162, 224]
+    [mode] = res.records["mode"]
+    assert (mode["mode"], mode["prev"], mode["source"], mode["tick"]) == (CT.MANUAL, CT.AUTO, "refused taps", 284)
+    assert res.control.mode == CT.MANUAL
+    [line] = [x for x in res.lines if x.startswith("REFUSED TAPS:")]
+    assert line.startswith("REFUSED TAPS: 3 taps this battle did nothing in the game (last HogRider -> (")
+    assert line.endswith("at tick 224). Switched to MANUAL: play yourself, or press F8 for AUTO once the "
+                         "status line looks right.")
+    late = [p for p in played(res) if p[0] == 300]
+    assert late and late[0][1] == CT.ACTION_MANUAL
+    [end] = res.records["battle_end"]
+    assert (end["tap_guard"]["refused"], end["tap_guard"]["final"], end["tap_guard"]["toggle"],
+            end["tap_guard"]["switched"]) == (3, 3, 1, 1)
+
+
+def test_refusal_guard_a_dry_run_only_logs_and_decides_as_without_it(tmp_path):
+    """No --tap: the AUTO(dry) plays get virtual watches, refused because nothing was tapped;
+    the decisions are those of a run without the guard, nothing switches, one dry line."""
+    g = TR.RefusedTapGuard(enforce=False)
+    res = run_script(tmp_path / "guard", long_script(320), taps=False, play_ticks=(100, 162, 224, 300),
+                     refusals=g)
+    plain = run_script(tmp_path / "plain", long_script(320), taps=False, play_ticks=(100, 162, 224, 300))
+    assert played(res) == played(plain)
+    assert all(p[3] == "callable" and p[1] == CT.ACTION_DRY for p in played(res))
+    refused = res.records["tap_refused"]
+    assert [(r["tick"], r["toggle_suspect"]) for r in refused] == [(130, False), (192, True), (254, False)]
+    assert all(r["dry"] is True and r["applied"] is False for r in refused)
+    [manual] = res.records["tap_guard_manual"]
+    assert (manual["tick"], manual["switched"], manual["dry"], manual["mode_before"]) == (284, False, True, CT.AUTO)
+    assert res.control.mode == CT.AUTO and "mode" not in res.records
+    assert res.tapper.calls == [] and "tap" not in res.records
+    dry = [x for x in res.lines if x.startswith("dry run: the refused-tap guard would switch")]
+    assert len(dry) == 1 and "no tap was sent, so the plays were watched as if tapped" in dry[0]
+    assert not any("tap did nothing" in x or x.startswith("REFUSED TAPS") for x in res.lines)
+
+
+def test_refusal_guard_watches_only_taps_that_were_sent(tmp_path):
+    """MANUAL with --tap, a vetoed tap and a failed tap: no watch at all."""
+    g = TR.RefusedTapGuard(enforce=True)
+    res = run_script(tmp_path / "manual", long_script(200), mode=CT.MANUAL, play_ticks=(100,), refusals=g)
+    assert g.summary(session=True)["watched"] == 0 and "tap_refused" not in res.records
+    g = TR.RefusedTapGuard(enforce=True)
+    run_script(tmp_path / "veto", long_script(200), play_ticks=(100,), refusals=g,
+               tap_guard=lambda frame: "the end screen is up")
+    assert g.summary(session=True)["watched"] == 0
+    g = TR.RefusedTapGuard(enforce=True)
+    run_script(tmp_path / "fail", long_script(200), play_ticks=(100,), refusals=g, tapper=FakeTapper(fail=True))
+    assert g.summary(session=True)["watched"] == 0
+
+
+def test_refusal_guard_rearms_when_the_owner_hands_back(tmp_path):
+    """After the switch at 284 the owner presses F8 (tick 290): tap_guard_rearmed, the masks
+    stay, and the next single refusal (the tap at 300, final at 360) does not switch again."""
+    g = TR.RefusedTapGuard(enforce=True)
+    holder = {}
+
+    def on_read(i):
+        if i == frame_of(290, last_tick=380):
+            holder["state"].toggle("hotkey")
+
+    res = run_script(tmp_path, long_script(380), play_ticks=(100, 162, 224, 300), refusals=g,
+                     on_read=on_read, control=holder)
+    [rearmed] = res.records["tap_guard_rearmed"]
+    assert (rearmed["battle"], rearmed["tick"]) == (1, 290)
+    assert [m["source"] for m in res.records["mode"]] == ["refused taps", "hotkey"]
+    assert [t["tick"] for t in res.records["tap"]] == [100, 162, 224, 300]
+    assert len(res.records["tap_guard_manual"]) == 1 and res.control.mode == CT.AUTO
+    assert [r["tick"] for r in res.records["tap_refusal_final"]][-1] == 360
+    tile = [p for p in played(res) if p[0] == 300][0][2]
+    assert not in_box(tile)                                   # the first refusal's mask stayed
+
+
+def test_refusal_guard_rearms_when_the_owner_took_over_before_its_switch(tmp_path):
+    """The owner presses F8 (MANUAL) at tick 250, on the "tap did nothing" lines, before the 3rd
+    refusal is final (284): the guard cannot switch, says so, and disarms. His F8 back to AUTO
+    at 290 rearms it, so three more refusals (finals 360, 422, 484) switch to MANUAL again;
+    before the fix it stayed disarmed and the bot kept tapping ("refused 7/3")."""
+    g = TR.RefusedTapGuard(enforce=True)
+    holder = {}
+    last = 560
+
+    def on_read(i):
+        if i in (frame_of(250, last_tick=last), frame_of(290, last_tick=last)):
+            holder["state"].toggle("hotkey")
+
+    res = run_script(tmp_path, long_script(last), play_ticks=(100, 162, 224, 300, 362, 424, 486),
+                     refusals=g, on_read=on_read, control=holder)
+    assert [r["tick"] for r in res.records["tap_refusal_final"]] == [160, 222, 284, 360, 422, 484]
+    first, second = res.records["tap_guard_manual"]
+    assert (first["tick"], first["mode_before"], first["switched"], first["dry"]) == (284, CT.MANUAL, False, False)
+    assert (second["tick"], second["mode_before"], second["switched"]) == (484, CT.AUTO, True)
+    [rearmed] = res.records["tap_guard_rearmed"]
+    assert (rearmed["battle"], rearmed["tick"]) == (1, 290)
+    assert [(m["mode"], m["source"]) for m in res.records["mode"]] == [
+        (CT.MANUAL, "hotkey"), (CT.AUTO, "hotkey"), (CT.MANUAL, "refused taps")]
+    assert res.control.mode == CT.MANUAL
+    assert [t["tick"] for t in res.records["tap"]] == [100, 162, 224, 300, 362, 424]
+    said = [x for x in res.lines if x.startswith("REFUSED TAPS:")]
+    assert len(said) == 2
+    assert said[0].endswith("Already MANUAL: play yourself; press F8 for AUTO once the status line looks "
+                            "right (the count then starts again).")
+    assert "Switched to MANUAL" in said[1]
+    assert not any("refused 4/3" in x for x in res.lines)
+    [end] = res.records["battle_end"]
+    assert (end["tap_guard"]["final"], end["tap_guard"]["switched"]) == (6, 1)
+
+
+def test_refusal_guard_a_new_battle_clears_masks_and_count(tmp_path):
+    """Battle 1: the Hog at 100 refused at 130 (masked around (4, 22)) and final at 160.
+    Battle 2: the Hog at 100 taps (4, 22) again, and the count starts at 0."""
+    g = TR.RefusedTapGuard(enforce=True)
+    res = run_script(tmp_path, long_script(170, battles=2), play_ticks=(100, 162), refusals=g)
+    taps = [(t["battle"], t["tick"], tuple(t["model_tile"])) for t in res.records["tap"]]
+    assert taps[0] == (1, 100, PLAY_TILE) and taps[1][:2] == (1, 162) and not in_box(taps[1][2])
+    assert taps[2] == (2, 100, PLAY_TILE) and taps[3][:2] == (2, 162)
+    ends = res.records["battle_end"]
+    assert [e["tap_guard"]["final"] for e in ends] == [1, 1]
+    assert [e["tap_guard"]["watched"] for e in ends] == [2, 2]
+    assert res.records["session_end"][0]["tap_guard"]["watched"] == 4
+    assert [r["refusals"] for r in res.records["tap_refused"]] == [1, 1]

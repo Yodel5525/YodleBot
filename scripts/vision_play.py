@@ -31,6 +31,17 @@ almost every decision is a wait; while it does not tap, a wait is followed (at m
 --would-every ticks) by a second look that plays the gate's best card at its best tile
 (Decider.would, never tapped), and each human play is compared with the newest of those.
 
+REFUSED TAPS (scripts/vision/tap_refusal.py, FIX E). A tap on a tile where the card may not go
+does nothing in the game. Each tap sent is watched from the HUD: the card leaving its slot (or
+the elixir falling by its cost, or the deriver's landing) is a landing; the card still in its
+slot 30 ticks later is a refusal (tap_refused, a console line). The refused card is then kept
+off that spot through the legality (RefusalLegality: the enemy half of that lane for the
+battle, else 2 tiles around it for 30 s), and after 3 final refusals in a battle the runner
+switches AUTO to MANUAL (tap_guard_manual, mode source "refused taps"); F8 back to AUTO
+rearms it, also when the owner was in MANUAL already as the 3rd one came. The guard never
+taps and never sets AUTO. In a dry run it only logs: the AUTO(dry) plays are watched as if
+tapped, the legality and the decisions stay exactly as without it.
+
 REPLAY (--source <a session folder written by VisionRecorder>, e.g. capture --record's or a
 vision_play session's): the whole loop on the recording's images, on this process's clock, in
 real time or with --replay-fast as fast as it runs; taps are refused, no emulator or adb is
@@ -142,6 +153,8 @@ import rs_schema  # noqa: E402  (standard library only: the row schema names)
 from scripts.vision import control as CT  # noqa: E402
 from scripts.vision import events as EV  # noqa: E402
 from scripts.vision import hpbars  # noqa: E402
+from scripts.vision import tap_refusal as TR  # noqa: E402
+from scripts.vision import tower_labels as TL  # noqa: E402
 from scripts.vision.geometry import check_frame_size  # noqa: E402
 from scripts.vision.tracker import observations_from_detections  # noqa: E402
 from scripts.vision.types import (  # noqa: E402
@@ -388,10 +401,16 @@ class BattleContext:
 
 
 class ResultBook:
-    """The result of each battle: the HUD's crowns at the end, then the end screen's."""
+    """The result of each battle: the HUD's crowns at the end, then the end screen's, which
+    win when read (the HUD's tower reading can be wrong: a tower skin read both enemy towers
+    destroyed on 2026-10-31, the end screen showed 1-0). The end screen's 0-0 before the clock
+    ran out is the exception: no battle ends 0-0 then, and the loss layout of the end screen
+    is unverified, so the HUD's crowns stand."""
 
     SETTLE_S = 3.0       # end-screen frames read this long (the crowns animate in)
     WAIT_S = 20.0        # no end screen this long after the end: the HUD's crowns stand
+    #: An end screen's 0-0 counts only from this tick (overtime ends at 6000).
+    ZERO_ZERO_FROM_TICK = 5900
 
     def __init__(self):
         self.open_rec: dict[str, Any] | None = None
@@ -427,15 +446,26 @@ class ResultBook:
         return t - rec["t_end"] >= self.WAIT_S
 
     def finish(self) -> dict[str, Any] | None:
-        """Close the open result; crowns are the larger of the two readings per side
-        (perception misses crowns rather than inventing them)."""
+        """Close the open result: the end screen's crowns when it was read ("end screen"; a
+        HUD reading that differs goes in crowns_disagree), else the HUD's ("hud"); an end screen
+        read 0-0 before tick ZERO_ZERO_FROM_TICK while the HUD has crowns keeps the HUD's
+        ("hud (end screen read 0-0)")."""
         rec, self.open_rec = self.open_rec, None
         if rec is None:
             return None
-        hud, end = rec["hud_crowns"], rec["end_crowns"]
-        crowns = hud if end is None else [max(hud[0], end[0]), max(hud[1], end[1])]
+        hud, end = [int(c) for c in rec["hud_crowns"]], rec["end_crowns"]
+        last = rec.get("last_tick")
+        if end is None:
+            crowns, source = hud, "hud"
+        elif (end == [0, 0] and hud != [0, 0]
+              and (last is None or int(last) < self.ZERO_ZERO_FROM_TICK)):
+            crowns, source = hud, "hud (end screen read 0-0)"
+        else:
+            crowns, source = [int(end[0]), int(end[1])], "end screen"
+        if end is not None and hud != end:
+            rec["crowns_disagree"] = {"hud": hud, "end": [int(end[0]), int(end[1])]}
         rec["crowns"] = crowns
-        rec["source"] = "hud" if end is None else "end screen + hud"
+        rec["source"] = source
         rec["outcome"] = battle_outcome(crowns[0], crowns[1])
         self.tally[rec["outcome"]] += 1
         self.done += 1
@@ -744,6 +774,14 @@ class LivePerception:
     the tracker or the events on its output) costs the frame its units and events only: the
     HUD, the tick and the coasting tracks are still returned, `detect_errors` counts the
     failures and `last_detect_error` keeps the last one.
+
+    The towers are read after the detector (a HUD reader with read_towers, HudReader's two
+    phases): read(rgb, t, towers=False), the tick, detect(), then always read_towers(rgb, t,
+    hud, evidence) with the frame's tower boxes (tower_evidence; None when the detector did not
+    run or failed): a tower skin's label is read where the detector puts it, and a tower the
+    detector still sees is never read destroyed. Towers the HUD's overtime check revived
+    (report.towers_revived) are taken out of the deriver's fallen towers. A reader without
+    read_towers is read in one call, as before.
     """
 
     def __init__(self, *, hud_reader: Any, tracker: Any, deriver: Any, geometry: Any,
@@ -851,9 +889,19 @@ class LivePerception:
                 and t - self._last_panel_t > self.hud_reset_gap_s):
             self._reset_hud()                        # back on a battle screen after a while
         self._last_panel_t = t
-        vf.hud = self.hud_reader.read(rgb, t)
+        two_phase = callable(getattr(self.hud_reader, "read_towers", None))
+        vf.hud = self.hud_reader.read(rgb, t, towers=False) if two_phase else self.hud_reader.read(rgb, t)
         vf.tick = vf.hud.clock_tick
         tick = self._track_tick(vf.tick, t)
+        res, det_exc = None, None
+        if tick is not None and self.detector is not None:
+            try:
+                res = self.detector.detect(rgb)
+            except Exception as exc:                 # re-raised in the board chain below
+                det_exc = exc
+        if two_phase:
+            self.hud_reader.read_towers(rgb, t, vf.hud, self._tower_evidence(res))
+            self._revive_towers()
         if tick is None or self.detector is None:
             return vf
         # The whole board chain is guarded, not only detect(): HP bars, ground points, the
@@ -862,7 +910,8 @@ class LivePerception:
         # exception here costs the frame its units and events; its HUD and tick still reach
         # BattleState and the decision.
         try:
-            res = self.detector.detect(rgb)
+            if det_exc is not None:
+                raise det_exc
             units, spells, bars = res.units(), res.spells(), res.bars()
             reads = hpbars.read_unit_hp(rgb, [d.box for d in units], [b.box for b in bars])
             obs = observations_from_detections(list(units) + list(spells), self.geometry, res.frame_size)
@@ -882,6 +931,22 @@ class LivePerception:
             return vf
         self.detect_frames += 1
         return vf
+
+    def _tower_evidence(self, res: Any) -> Any:
+        """tower_labels.TowerEvidence of a DetectorResult (None for none, or boxes it cannot read)."""
+        if res is None:
+            return None
+        try:
+            dets, size = list(getattr(res, "detections", None) or ()), getattr(res, "frame_size", None)
+            make = getattr(self.hud_reader, "tower_evidence", None)
+            return make(dets, size) if callable(make) else TL.TowerEvidence.from_detections(dets, size)
+        except Exception:
+            return None
+
+    def _revive_towers(self) -> None:
+        revived = getattr(getattr(self.hud_reader, "report", None), "towers_revived", None)
+        if revived and self.deriver is not None and callable(getattr(self.deriver, "revive_towers", None)):
+            self.deriver.revive_towers(revived)
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1021,43 @@ class Decider:
         d = RD.decide(self.policy, row, state, self.team, self.legality, self.would_config,
                       rng=self.would_rng, pending=pending, tick=tick, dt=1, sub=self.sub)
         return d if d.is_play else None
+
+
+class RefusalLegality:
+    """Legality with the refused-tap guard's masks (scripts/vision/tap_refusal.py) on top.
+
+    bind(state, team): the inner legality bound to the state (rs_decide._bind), returned as it
+    is while the guard is not active (no mask, no real watch open, or not enforced: a dry run
+    or a replay). Decisions and their `legality` names then stay byte-identical. Otherwise a
+    Bound named "<inner>+refusals" whose check turns the engine sub-tiles into own-frame model
+    tiles (rs_decide.own) and refuses a masked tile without asking the inner check. Decider.would
+    goes through the same legality, so would-plays respect the masks too."""
+
+    def __init__(self, inner: Any, guard: Any, *, sub: int = RD.SUBTILE_PER_MILLITILE):
+        self.inner = inner
+        self.guard = guard
+        self.sub = int(sub)
+
+    @property
+    def name(self) -> str:
+        return f"{getattr(self.inner, 'name', 'callable')}+refusals"
+
+    def bind(self, state: Mapping[str, Any], team: int) -> Any:
+        bound = RD._bind(self.inner, state, team)
+        guard = self.guard
+        raw = state.get("tick") if isinstance(state, Mapping) else None
+        tick = None if raw is None else int(raw)
+        if guard is None or not guard.active(tick):
+            return bound
+        team, sub = int(team), self.sub
+
+        def check(slot: int, card: int, x_sub: int, y_sub: int) -> bool:
+            ox, oy = RD.own(x_sub, y_sub, team, sub)
+            if guard.masked(card, int(ox // 1000), int(oy // 1000), tick):
+                return False
+            return bound(slot, card, x_sub, y_sub)
+
+        return RD.Bound(f"{bound.name}+refusals", check)
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1202,13 @@ class VisionPlay:
                 bot would play now. It goes to ControlState.note_would, where each human play
                 is compared with it ("would" in the human_play record), to the frame record
                 ("would") and to the status line. 0: never.
+    refusals    scripts/vision/tap_refusal.RefusedTapGuard, or None (no guard: as before). It
+                watches every tap sent (and, in a dry run, every AUTO(dry) play, virtually),
+                is shown each battle-screen frame before the decision, logs tap_landed /
+                tap_refused / ... and, when enforced, switches AUTO to MANUAL after k refused
+                taps in a battle (tap_guard_manual). Its masks reach the decisions through
+                the Decider's legality (RefusalLegality).
+    hotkey      the takeover key named in the refused-taps console line (--hotkey)
     """
 
     def __init__(self, *, source: Any, perception: Any, decider: Decider, control: Any,
@@ -1111,12 +1220,18 @@ class VisionPlay:
                  out: Callable[[str], Any] = print, poll_s: float = 0.002, max_error_logs: int = 50,
                  max_stale_s: float = MAX_STALE_S,
                  tap_guard: Callable[[Any], str | None] | None = None,
-                 unknown_plays: bool = False, would_every_ticks: int = 10):
+                 unknown_plays: bool = False, would_every_ticks: int = 10,
+                 refusals: Any = None, hotkey: str | None = CT.DEFAULT_HOTKEY):
         self.unknown_plays = bool(unknown_plays)
+        self.refusals = refusals                       # RefusedTapGuard (not tap_guard: ScreenGuard)
+        self.hotkey = hotkey
+        self._refusal_gen: int | None = None           # the control generation of the guard's switch
+        self._refusal_dry_said = False                 # the dry run's "would switch" line, per battle
         self.would_every_ticks = max(0, int(would_every_ticks or 0))
         self._would: Any = None                        # the last would-play Suggestion
         self._would_tick: int | None = None
         self._frame_size_said = False
+        self._tower_said: set[str] = set()              # tower_label logged this battle (keys)
         self.source = source
         self.perception = perception
         self.decider = decider
@@ -1225,7 +1340,8 @@ class VisionPlay:
                 self._finish_result()
             self._log("session_end", reason=self.stop_reason, frames=self.frames, taps=self.taps,
                       vetoed=self.vetoed, errors=dict(self.errors), results=dict(self.results.tally),
-                      control=dict(getattr(self.control, "counts", {}) or {}))
+                      control=dict(getattr(self.control, "counts", {}) or {}),
+                      **self._refusal_summary(session=True))
             self._flush_control()
         self.out(f"stopped: {self.stop_reason}; {self.frames} frames, {self.taps} taps, "
                  f"results {dict(self.results.tally) or '-'}, errors {dict(self.errors) or '-'}")
@@ -1264,6 +1380,10 @@ class VisionPlay:
             out = self._after_perception(vf, frame, ms)
         except Exception as exc:                       # before the tap: no tap this frame
             self._error("decide_error", exc, tick=vf.tick)
+        try:
+            self._tower_logs(vf)
+        except Exception as exc:
+            self._error("diagnostics_error", exc)
         self._record(vf, frame, out, ms)
         self._flush_control()
 
@@ -1300,9 +1420,114 @@ class VisionPlay:
             ctx.observer.events(vf.events)
         if vf.tick is not None or vf.events.own_landings:
             self.control.attribute(vf.events.own_landings, tick=vf.tick)
+        if self.refusals is not None and vf.screen == SCREEN_BATTLE and vf.tick is not None:
+            try:                                       # before the decision: a switch applies to it
+                self._observe_refusals(vf, ctx)
+            except Exception as exc:
+                self._error("refusal_error", exc, tick=vf.tick)
         if not self.can_decide(vf):
             return None
         return self._decide(vf, frame, ctx, ms)
+
+    # -- refused taps (scripts/vision/tap_refusal.py) ---------------------------------
+    def _observe_refusals(self, vf: VisionFrame, ctx: BattleContext) -> None:
+        """Shows the guard this frame's hand, elixir and landings; logs its events; switches
+        AUTO to MANUAL on tap_guard_manual when enforced; rearms it once the owner handed back."""
+        g = self.refusals
+        ctl = self.control
+        if (self._refusal_gen is not None and ctl.mode == CT.AUTO
+                and ctl.generation != self._refusal_gen):
+            g.rearm(int(vf.tick))                      # the owner pressed F8 (or the window) again
+            self._log("tap_guard_rearmed", battle=ctx.number, tick=int(vf.tick), gen=ctl.generation)
+            self._refusal_gen = None
+        events = g.observe(int(vf.tick), float(vf.t_capture), list(vf.hud.hand), vf.hud.elixir_milli,
+                           vf.events.own_landings)
+        for kind, data in events:
+            rec = dict(data)
+            if kind == "tap_guard_manual":
+                self._refusal_manual(rec, ctx)
+                continue
+            self._log(kind, battle=ctx.number, name=self.name(rec.get("card")), **rec)
+            if kind == "tap_refused" and not rec.get("dry"):
+                self.out(self._refused_line(rec))
+            elif kind == "tap_refusal_retracted" and not rec.get("dry"):
+                self.out(f"tap of {self.name(rec.get('card'))} at tick {rec['tap_tick']} landed after all "
+                         f"({rec['evidence']}, {rec['lag']} ticks): refusal withdrawn")
+
+    def _refused_line(self, rec: Mapping[str, Any]) -> str:
+        """The console line of a refusal while the bot taps (screen tiles, as the status line)."""
+        tile = rec.get("screen_tile") or rec.get("model_tile")
+        mask = rec.get("mask")
+        if rec.get("toggle_suspect"):
+            then = "the card was probably still selected from the last refused tap: no mask"
+        elif mask and mask.get("kind") == TR.LANE:
+            side = "left" if rec.get("zone") == "enemy_left" else "right"
+            then = f"{self.name(rec.get('card'))} stays off the enemy {side} lane for this battle"
+        else:
+            until = (mask or {}).get("until_tick")
+            secs = (int(until) - int(rec.get("tick") or 0)) / 20.0 if until is not None else 0.0
+            then = (f"{self.name(rec.get('card'))} stays {TR.MASK_BOX_RADIUS + 1} tiles or more away from "
+                    f"there for {secs:.0f} s")
+        return (f"tap did nothing: {self.name(rec.get('card'))} -> {tuple(tile) if tile else '?'} at tick "
+                f"{rec.get('tap_tick')} (still in its slot {rec.get('age')} ticks later); {then}")
+
+    def _refusal_manual(self, rec: dict, ctx: BattleContext) -> None:
+        """tap_guard_manual: switch AUTO to MANUAL (enforced, not dry), log and say it."""
+        g, ctl = self.refusals, self.control
+        mode_before = ctl.mode
+        switched = False
+        enforced = bool(g.enforce and not rec.get("dry"))
+        if enforced and mode_before == CT.AUTO:
+            switched = bool(ctl.set_mode(CT.MANUAL, source="refused taps"))
+            if switched:
+                g.mark_switched()
+        if enforced:
+            # The guard disarmed itself on this event. Whether it switched or the owner was in
+            # MANUAL already (he took over on the "tap did nothing" lines), the next hand back to
+            # AUTO (a new control generation) rearms it: else it never switched again this battle.
+            self._refusal_gen = ctl.generation
+        self._log("tap_guard_manual", battle=ctx.number, mode_before=mode_before, switched=switched, **rec)
+        finals = rec.get("finals") or []
+        last = finals[-1] if finals else {}
+        tile = last.get("screen_tile") or last.get("tile")
+        where = (f"last {self.name(last.get('card'))} -> {tuple(tile) if tile else '?'} at tick "
+                 f"{last.get('tap_tick')}")
+        if switched:
+            key = self.hotkey if self.hotkey and str(self.hotkey).lower() not in ("", "none", "off") else None
+            self.out(f"REFUSED TAPS: {len(finals)} taps this battle did nothing in the game ({where}). "
+                     f"Switched to MANUAL: play yourself, or press {key or 'the window button'} for AUTO "
+                     "once the status line looks right.")
+        elif enforced:
+            key = self.hotkey if self.hotkey and str(self.hotkey).lower() not in ("", "none", "off") else None
+            self.out(f"REFUSED TAPS: {len(finals)} taps this battle did nothing in the game ({where}). "
+                     f"Already {str(ctl.mode).upper()}: play yourself; press {key or 'the window button'} "
+                     "for AUTO once the status line looks right (the count then starts again).")
+        elif rec.get("dry") and not self._refusal_dry_said:
+            self._refusal_dry_said = True
+            self.out(f"dry run: the refused-tap guard would switch to MANUAL now ({len(finals)} refusals, "
+                     f"{where}; no tap was sent, so the plays were watched as if tapped)")
+
+    def _refusal_summary(self, *, session: bool = False) -> dict[str, Any]:
+        """{"tap_guard": the guard's summary} for battle_end / session_end; {} without one."""
+        if self.refusals is None:
+            return {}
+        try:
+            return {"tap_guard": self.refusals.summary(session=session)}
+        except Exception as exc:
+            self._error("refusal_error", exc)
+            return {}
+
+    def _watch_tap(self, d: Any, vf: VisionFrame, *, virtual: bool) -> None:
+        """Opens the guard's watch on a tap just sent (virtual: a dry run's play)."""
+        if self.refusals is None:
+            return
+        try:
+            self.refusals.sent(d.card, d.slot, d.cost, int(vf.tick), float(vf.t_capture),
+                               tile=(d.tx, d.ty), screen_tile=d.world_tile,
+                               elixir_milli=vf.hud.elixir_milli, spendable_milli=d.spendable_milli,
+                               virtual=virtual)
+        except Exception as exc:
+            self._error("refusal_error", exc, tick=vf.tick)
 
     def _tap_veto(self, frame: Any) -> str | None:
         """The tap guard's answer for the frame decided on; a guard that fails vetoes."""
@@ -1359,6 +1584,7 @@ class VisionPlay:
             self.taps += 1
             ctx.taps += 1
             ctx.pending.append(RD.Pending(d.card, d.cost, d.slot, int(vf.tick)))
+            self._watch_tap(d, vf, virtual=False)
             ms["capture_to_tap"] = round((self.clock() - float(frame.t)) * 1000.0, 2)
             self._log("tap", battle=ctx.number, tick=int(vf.tick), card=d.card, name=self.name(d.card),
                       slot=d.slot, model_tile=[d.tx, d.ty], screen_tile=list(d.world_tile),
@@ -1382,6 +1608,8 @@ class VisionPlay:
         if why:
             extra["why"] = why
         rec = self.control.note_decision(s, tapped=tapped, **extra)
+        if d.is_play and rec.get("action") == CT.ACTION_DRY:
+            self._watch_tap(d, vf, virtual=True)       # a dry run: watched as if tapped (logs only)
         if d.is_play or self.last_decision is None:   # the status line keeps the last play
             self.last_decision = rec
         out = {"decision": d.to_record(), "action": rec.get("action"), "px": px}
@@ -1450,6 +1678,14 @@ class VisionPlay:
         self.last_decision = None
         self._would = None
         self._would_tick = None
+        self._tower_said = set()
+        self._refusal_gen = None
+        self._refusal_dry_said = False
+        if self.refusals is not None:
+            try:
+                self.refusals.new_battle()
+            except Exception as exc:
+                self._error("refusal_error", exc, tick=vf.tick)
         primed = getattr(self.perception, "primed_until", None)
         self._log("battle_start", battle=n, tick=vf.tick, first_tick=first, mode=self.control.mode,
                   **({"joined": True, "primed_until": primed} if primed is not None else {}))
@@ -1475,8 +1711,10 @@ class VisionPlay:
             stats["opp_unknown"] = ctx.opp_unknown
         self.results.open(n, self.battle.ended_reason, float(vf.t_capture), hud.crowns,
                           last_tick=self.battle.last_tick, towers=towers, **stats)
+        info = self._towers_info()
         self._log("battle_end", battle=n, reason=self.battle.ended_reason, tick=self.battle.last_tick,
-                  hud_crowns=list(hud.crowns), towers=towers, **stats, **self._opp_diagnostics(ctx))
+                  hud_crowns=list(hud.crowns), towers=towers, **stats, **self._opp_diagnostics(ctx),
+                  **({"towers_info": info} if info else {}), **self._refusal_summary())
         self.out(f"battle {n} over ({self.battle.ended_reason}) at tick {self.battle.last_tick}")
         try:
             if keeps_towers(self.battle.ended_reason):   # perhaps the same battle coming back
@@ -1511,8 +1749,59 @@ class VisionPlay:
         self._log("result", **rec)
         own, enemy = rec["crowns"]
         tally = self.results.tally
-        self.out(f"battle {rec['battle']}: {rec['outcome'].upper()} {own}-{enemy} ({rec['source']}); "
+        hud = rec["hud_crowns"]
+        said = f"; HUD read {hud[0]}-{hud[1]}" if rec.get("crowns_disagree") else ""
+        self.out(f"battle {rec['battle']}: {rec['outcome'].upper()} {own}-{enemy} ({rec['source']}{said}); "
                  f"record {tally['win']}-{tally['loss']}-{tally['draw']} (W-L-D)")
+
+    # -- towers -----------------------------------------------------------------
+    def _hud_report(self, vf: VisionFrame) -> Any:
+        """The HUD reader's report of this frame (None off the battle screen, or none)."""
+        if vf.screen != SCREEN_BATTLE:
+            return None
+        rep = getattr(getattr(self.perception, "hud_reader", None), "report", None)
+        return rep if rep is not None and getattr(rep, "t", None) == vf.t_capture else None
+
+    def _towers_info(self) -> dict[str, Any]:
+        """HudReader.towers_info() for the battle_end record ({} without it)."""
+        try:
+            fn = getattr(getattr(self.perception, "hud_reader", None), "towers_info", None)
+            return dict(fn()) if callable(fn) else {}
+        except Exception as exc:
+            self._error("diagnostics_error", exc)
+            return {}
+
+    def _tower_logs(self, vf: VisionFrame) -> None:
+        """tower_label once per princess tower and battle whose label is read away from its
+        calibrated boxes (a tower skin), with a status line; towers_misread when the HUD's
+        overtime check revived towers."""
+        rep = self._hud_report(vf)
+        if rep is None:
+            return
+        battle = self.battle.number if self.battle.in_battle else None
+        misread = getattr(rep, "towers_misread", None)
+        if misread:
+            self._log("towers_misread", battle=battle, tick=vf.tick, **dict(misread))
+            self.out(f"towers misread: overtime began at {misread['crowns_before'][0]}-"
+                     f"{misread['crowns_before'][1]} crowns; revived {', '.join(misread['revived']) or 'none'}"
+                     f" -> {misread['crowns_after'][0]}-{misread['crowns_after'][1]}")
+        if battle is None:
+            return
+        moved = []
+        for key, (dx, dy, src) in sorted((getattr(rep, "tower_shift", None) or {}).items()):
+            if key in self._tower_said or src == TL.SOURCE_FIXED or not (dx or dy):
+                continue
+            self._tower_said.add(key)
+            moved.append((key, dx, dy, src))
+            self._log("tower_label", battle=battle, tick=vf.tick, key=key, shift_px=[dx, dy], source=src)
+        for side in ("enemy", "own"):
+            these = [m for m in moved if m[0].startswith(side)]
+            if not these:
+                continue
+            dy = sum(m[2] for m in these) / len(these)
+            which = f"{side} labels" if len(these) > 1 else f"{these[0][0]} label"
+            self.out(f"{which} {abs(dy):.0f} px {'above' if dy < 0 else 'below'} calibration "
+                     f"(tower skin; from the {these[0][3]}): HP read there")
 
     def _record(self, vf: VisionFrame, frame: Any, out: dict | None, ms: dict) -> None:
         active = self.battle.in_battle or vf.screen in (SCREEN_BATTLE, SCREEN_END)
@@ -1520,6 +1809,12 @@ class VisionPlay:
             return
         extra: dict[str, Any] = {"battle": self.battle.number if self.battle.in_battle else None,
                                  "state": self.battle.state, "ms": ms}
+        rep = self._hud_report(vf)
+        if rep is not None and callable(getattr(rep, "towers_compact", None)):
+            try:
+                extra["towers_raw"] = rep.towers_compact()
+            except Exception:
+                pass
         if out is not None:
             extra.update(out)
         try:
@@ -1574,9 +1869,36 @@ class VisionPlay:
         if w is not None and self.battle.in_battle:
             would = f" | would {w.name or self.name(w.card)}" + (
                 f" -> {tuple(w.tile)}" if w.tile is not None else "") + f" @{w.tick}"
-        return (f"[{where}] tick {tick} | elixir {elixir} | hand {hand} next {self.name(hud.next)} | "
-                f"{self.mode_label()} | last {last}{would} | {self._fps:.0f} fps, {self.taps} taps"
+        towers = towers_text(hud) if self.battle.in_battle else ""
+        refused = ""
+        g = self.refusals
+        if g is not None and self.battle.in_battle:
+            j = len(getattr(g, "finals", ()) or ())
+            if j:
+                refused = f" | refused {j}/{g.k}"
+        return (f"[{where}] tick {tick} | elixir {elixir} | hand {hand} next {self.name(hud.next)}{towers} | "
+                f"{self.mode_label()}{refused} | last {last}{would} | {self._fps:.0f} fps, {self.taps} taps"
                 + (f", {errs} errors" if errs else ""))
+
+
+#: The status line's towers: the princess towers, screen left to right, theirs then ours.
+STATUS_TOWERS = (("them", ("enemy_left", "enemy_right")), ("us", ("own_left", "own_right")))
+
+
+def towers_text(hud: Hud) -> str:
+    """The status line's " | towers them 3052 3052 us 3052 0 crowns 1-0" (the princess towers'
+    HP as the HUD reads them, "?" unread; crowns ours-theirs), or "" when no tower is read. A 0
+    for a standing tower means the bot treats its pocket as open: the owner checks it before
+    handing back to AUTO (docs/SPARRING_RUNBOOK.md 18)."""
+    towers = hud.towers or {}
+    if not any(towers.get(k) is not None for _, keys in STATUS_TOWERS for k in keys):
+        return ""
+    parts = []
+    for side, keys in STATUS_TOWERS:
+        hps = [getattr(towers.get(k), "hp", None) for k in keys]
+        parts.append(side + " " + " ".join("?" if hp is None else str(int(hp)) for hp in hps))
+    crowns = tuple(hud.crowns or (0, 0))
+    return f" | towers {' '.join(parts)} crowns {int(crowns[0])}-{int(crowns[1])}"
 
 
 # ---------------------------------------------------------------------------
@@ -1889,7 +2211,10 @@ def _main(args: argparse.Namespace) -> int:
     observer = make_observer(cat, plan, fields=list(getattr(royalesim, "CATALOGUE_FIELDS", ()) or ())
                              or None, law=RR.elixir_law(eng) if plan.v2 else None,
                              blind=detector is None, observer_cls=PS.LiveObserver)
-    decider = Decider(policy=policy, legality=legality, config=dcfg,
+    # The refused-tap guard (FIX E): its masks reach every decision and would-play through the
+    # legality; enforced (masks, MANUAL after k) only once a tapper exists (below).
+    tap_refusals = TR.RefusedTapGuard()
+    decider = Decider(policy=policy, legality=RefusalLegality(legality, tap_refusals, sub=sub), config=dcfg,
                       state_fn=make_state_fn(builder, perception, plan),
                       row_fn=make_row_fn(RR.obs_row, sub, plan, live_compat=live_compat, units=units,
                                          row_inputs=PS.row_inputs),
@@ -1921,6 +2246,7 @@ def _main(args: argparse.Namespace) -> int:
             except (TapError, OSError) as exc:          # OSError: adb itself would not start
                 print(f"refusing to tap: {_short(exc)}")
                 return 2
+        tap_refusals.enforce = tapper is not None
         # A dry run never opens adb: "auto" adds its adb fallback only once the tapper has run
         # emulator.verify (above). A recording is replayed on this process's clock ("rebased":
         # its frames and this session's records share one clock).
@@ -1973,12 +2299,18 @@ def _main(args: argparse.Namespace) -> int:
                  *detector_lines(detector, det_error, table),
                  f"  hud        clock templates {'ok' if hud_reader.clock_reader.ready else 'MISSING'}"
                  f" ({store.root}); regions {hud_reader.regions.name}",
+                 "  towers     HP read where each princess tower's label is (the detector's tower-bar "
+                 "boxes, else a pixel search: tower skins); a tower the detector still sees is never "
+                 "read destroyed",
                  "  rows       the row's hand: a played slot shows its card in flight, an unread one "
                  "is a pad (decide still masks both)",
                  f"  geometry   {geometry.name}; taps in device pixels {DEVICE_SIZE[0]}x{DEVICE_SIZE[1]}",
                  f"  source     {where}",
                  "  taps       " + ("ON (verified Clash Royale instance)" if tapper is not None else
                                      f"off ({refusal or 'dry run: no --tap'})")]
+        lines.append("  refusals   refused taps: " + (
+            f"logged, masked, MANUAL after {tap_refusals.k} in a battle" if tap_refusals.enforce
+            else "(dry run: logs only)"))
         if plan.v2:
             lines.append(f"  v2 rows    opponent elixir counted from the plays seen; our taps in flight "
                          f"until they land (--obs-delay {plan.obs_delay} ticks); spells in flight")
@@ -1988,6 +2320,12 @@ def _main(args: argparse.Namespace) -> int:
                          f"{deriver.config.unknown_cost} elixir, count not exact)")
         if detector is None:
             lines.append("  no detector: the board stays empty for the model and taps are refused")
+        note = hud_reader.tower_note() if callable(getattr(hud_reader, "tower_note", None)) else None
+        if note:
+            lines.append(f"  towers     note: {note}")
+        warn = hud_reader.tower_warning() if callable(getattr(hud_reader, "tower_warning", None)) else None
+        if warn:
+            lines.append(f"  WARNING    {warn}")
         if not hud_reader.clock_reader.ready:
             lines.append("  no clock templates: the clock cannot be read, so the bot never decides "
                          "(python -m scripts.vision.templates digits --font clock ...)")
@@ -2007,7 +2345,7 @@ def _main(args: argparse.Namespace) -> int:
                      vocab_drift=list(loaded.drift),
                      clock_templates=bool(hud_reader.clock_reader.ready),
                      **({"rows": plan.to_json()} if plan.v2 else {}),
-                     opp_guards=EV.guard_settings(deriver.config),
+                     opp_guards=EV.guard_settings(deriver.config), tap_guard=tap_refusals.config(),
                      **({"unknown_plays": {"cost": deriver.config.unknown_cost}} if unknown else {}))
         if detector is None:
             recorder.log("no_detector", error=det_error)
@@ -2020,7 +2358,8 @@ def _main(args: argparse.Namespace) -> int:
                             seconds=args.seconds, battles=args.battles,
                             out=lambda s: print(s, flush=True),
                             tap_guard=None if tapper is None else ScreenGuard(source),
-                            unknown_plays=unknown, would_every_ticks=args.would_every)
+                            unknown_plays=unknown, would_every_ticks=args.would_every,
+                            refusals=tap_refusals, hotkey=args.hotkey)
         return runner.run()
     finally:
         if ctl is not None:

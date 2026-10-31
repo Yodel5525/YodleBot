@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -406,6 +407,19 @@ def test_unknown_classes_the_guards_hold_back_still_count_as_unknown():
     assert d.how_of(3) == "late" and d.opp_stats.unknown == {"Witchling": 2} and plays(d) == [(HOG, 300)]
 
 
+def test_revive_towers_closes_a_pocket_the_hud_misread():
+    """HudReader's overtime check revives towers the HUD misread as destroyed (a tower skin):
+    their pockets close again, so a unit past the river in that lane is late, not a play."""
+    d = live()
+    d.update([], 100, towers={"own_right": VT.TowerHp(0, 3052)})
+    assert d.fallen_towers == {"own_right"}
+    assert d.revive_towers(["own_right", "enemy_left"]) == set() and d.revive_towers([]) == set()
+    d.update([], 150, towers={"own_right": VT.TowerHp(671, 3052)})
+    assert d.fallen_towers == set()
+    assert _hog_play_then_seen_past_the_river(d, 3, 14500, 400) == 4      # the right lane: shut
+    assert d.how_of(4) == "late" and plays(d) == [(HOG, 400)]
+
+
 def test_note_towers_reads_hud_towers_dicts_and_numbers_and_forgets_them_on_reset():
     d = live()
     assert d.note_towers({"own_left": VT.TowerHp(None, 3052), "own_right": 5, "enemy_left": True,
@@ -607,10 +621,66 @@ def test_the_runners_pass_the_hud_towers_to_the_deriver():
     assert step.det_source == "recorded" and d.fallen_towers == {"own_left"}
 
 
+class TwoPhaseTowerHud(TowerHud):
+    """TowerHud read in two phases (HudReader's surface): the towers come from read_towers,
+    which records the evidence it got, and its report revives enemy_left on the first frame."""
+
+    def __init__(self):
+        self.evidence = []
+        self.report = SimpleNamespace(towers_revived=["enemy_left"])
+
+    def read(self, rgb, t, towers=True):
+        hud = super().read(rgb, t)
+        if not towers:
+            hud.towers, hud.crowns = {}, (0, 0)
+        return hud
+
+    def read_towers(self, rgb, t, hud, evidence=None):
+        self.evidence.append(evidence)
+        hud.towers = super().read(rgb, t).towers
+        return hud
+
+
+def test_the_runners_read_the_towers_after_the_detector():
+    """LivePerception and ReplayPerception (--recorded) call read_towers with the frame's tower
+    boxes (the recording's, scaled to the image), and take the towers it revived out of the
+    deriver's fallen towers before the deriver reads the HUD's."""
+    pytest.importorskip("numpy")
+    from scripts import vision_play as VP
+    from scripts.vision.capture import Frame
+    from scripts.vision.labels import load_class_table
+    from scripts.vision.tower_labels import LABEL_REF_PX
+    from tests.pipeline import test_latency_and_replay as TLR
+    from tests.pipeline import test_vision_play as TVP
+
+    def label(size):
+        x0, y0, x1, y1 = LABEL_REF_PX["enemy_left"]
+        sx, sy = size[0] / 1080.0, size[1] / 1920.0
+        return VT.Detection("tower-bar", 0.9, 0.9, (x0 * sx, y0 * sy, x1 * sx, y1 * sy))
+
+    size = (225, 400)
+    hud = TwoPhaseTowerHud()
+    d = EV.EventDeriver(tables(), EV.EventConfig.live(), own_deck=HOG26)
+    d.fallen_towers.add("enemy_left")
+    p = VP.LivePerception(hud_reader=hud, tracker=T.Tracker(own_classes={"HogRider"}), deriver=d,
+                          geometry=TVP.GEOMETRY, detector=TVP.FakeDetector([label(size)], size))
+    vf = p.perceive(Frame(2.0, TVP.battle_image(size), 0.0))
+    assert vf.hud.towers["own_left"] == VT.TowerHp(0, 3052) and d.fallen_towers == {"own_left"}
+    assert len(hud.evidence) == 1 and hud.evidence[0].seen("enemy_left") and p.detect_errors == 0
+
+    hud = TwoPhaseTowerHud()
+    d = EV.EventDeriver(tables(), EV.EventConfig.live(), own_deck=HOG26)
+    r = TLR.VR.ReplayPerception(hud_reader=hud, tracker=T.Tracker(own_classes={"HogRider"}), deriver=d,
+                                geometry=TLR.GEOMETRY, names=TLR.VR.Names(load_class_table()), recorded=True)
+    recorded = VT.VisionFrame(t_capture=2.0, tick=100, detections=[label((450, 800))], frame_size=(450, 800),
+                              screen=VT.SCREEN_BATTLE)
+    step = r.step(TLR.battle_image(0), 2.0, recorded=recorded)
+    assert step.det_source == "recorded" and d.fallen_towers == {"own_left"}
+    assert len(hud.evidence) == 1 and hud.evidence[0].labels.keys() == {"enemy_left"}
+
+
 def test_battle_end_logs_the_deriver_and_elixir_counts():
     pytest.importorskip("numpy")
-    from types import SimpleNamespace
-
     from scripts import vision_play as VP
 
     d = live()

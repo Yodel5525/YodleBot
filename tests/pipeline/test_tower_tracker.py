@@ -37,15 +37,16 @@ def _at(v, i):
 
 
 def feed(tr: H.TowerHpTracker, reads, t0: float = 0.0, *, key: str = K, clock=None, bars=None,
-         confs=None) -> list[VT.TowerHp]:
-    """One update per reading (an HP or None), DT apart from t0; `clock`, `bars` and
-    `confs` are one value for every frame or a list. Returns `key`'s TowerHp per frame."""
+         confs=None, present=None) -> list[VT.TowerHp]:
+    """One update per reading (an HP or None), DT apart from t0; `clock`, `bars`, `confs` and
+    `present` are one value for every frame or a list. Returns `key`'s TowerHp per frame."""
     out = []
     for i, hp in enumerate(reads):
-        bar, conf = _at(bars, i), _at(confs, i)
+        bar, conf, pres = _at(bars, i), _at(confs, i), _at(present, i)
         out.append(tr.update({key: hp}, t0 + i * DT, None if bar is None else {key: bar},
                              hp_conf=None if conf is None else {key: conf},
-                             clock_running=_at(clock, i))[key])
+                             clock_running=_at(clock, i),
+                             present=None if pres is None else {key: pres})[key])
     return out
 
 
@@ -437,3 +438,153 @@ def test_hud_reader_clock_running_rules():
         False, False, False, False, False, False, True]
     one = reader_with([None], [None], towers_clock_reads=1)    # 1: the first accepted reading
     assert one.towers_clock_running(read) is True
+
+
+# ---------------------------------------------------------------------------
+# FIX B: presence (the detector's boxes, the crown badge) guards the zero
+# ---------------------------------------------------------------------------
+def fallen(present=True) -> H.TowerHpTracker:
+    """A tracker whose K fell to the bar's 0.22 (accepted on the 6th frame), seen standing."""
+    tr = tracker()
+    out = feed(tr, [None] * 6, bars=0.22, present=present)
+    assert out[-1] == VT.TowerHp(671, 3052)
+    return tr
+
+
+def test_a_tower_seen_standing_is_held_at_its_last_hp():
+    """(h) The 2026-10-31 friendly: the bar read 0.22 on the chicken's feathers, then nothing,
+    and the old rule destroyed the tower 2.5 s later. Seen standing, it holds at 671."""
+    tr = fallen()
+    out = feed(tr, [None] * 40, 6 * DT, bars=0.0, present=True)
+    assert all_are(out, VT.TowerHp(671, 3052)) and tr.crowns() == (0, 0)
+    assert tr.holds == {K: 40} and tr.held_now == [K] and tr.filter._zero_run == {}
+    old = tracker()                                              # without presence: today's rule
+    feed(old, [None] * 6, bars=0.22)
+    out = feed(old, [None] * 21, 6 * DT, bars=0.0)
+    assert out[19] == VT.TowerHp(671, 3052) and out[20] == VT.TowerHp(0, 3052) and old.crowns() == (1, 0)
+
+
+def test_a_tower_the_detector_lost_is_destroyed_after_8_frames_and_1_s():
+    """(i) Absence from the first zero: the zero comes on the 20th frame (2.5 s; 21 frames and
+    2.5 s of absence by then). Seen for 10 frames, then lost: 20 frames after the first loss.
+    Lost 15 frames into the zero run: absence (8 frames and 1 s) decides."""
+    tr = fallen()
+    out = feed(tr, [None] * 21, 6 * DT, bars=0.0, present=False)
+    assert out[19].hp == 671 and out[20] == VT.TowerHp(0, 3052)
+    assert tr.destroyed_by == {K: "detector"} and tr.crowns() == (1, 0)
+    tr = fallen()
+    out = feed(tr, [None] * 31, 6 * DT, bars=0.0, present=[True] * 10 + [False] * 21)
+    assert out[29].hp == 671 and out[30] == VT.TowerHp(0, 3052)
+    tr = fallen()
+    out = feed(tr, [None] * 24, 6 * DT, bars=0.0, present=[None] * 15 + [False] * 9)
+    assert out[22].hp == 671 and out[23] == VT.TowerHp(0, 3052)       # 9 frames, 1.0 s after frame 15
+
+
+def test_unknown_presence_after_a_sighting_never_destroys_and_unseen_keys_keep_the_old_rule():
+    """(j) Seen once (informative), then no evidence: never destroyed. Never seen: the old 2.5 s."""
+    tr = fallen()
+    out = feed(tr, [None] * 80, 6 * DT, bars=0.0, present=None)
+    assert all_are(out, VT.TowerHp(671, 3052)) and tr.holds == {}
+    legacy = fallen(present=None)
+    out = feed(legacy, [None] * 21, 6 * DT, bars=0.0, present=None)
+    assert out[20] == VT.TowerHp(0, 3052) and legacy.destroyed_by == {K: "hud"}
+    explicit = fallen()                              # informative passed in: the detector's keys
+    out = [explicit.update({K: None}, 6 * DT + i * DT, {K: 0.0}, informative=set())[K] for i in range(21)]
+    assert out[20] == VT.TowerHp(0, 3052)
+
+
+def test_three_lost_frames_inside_a_sighting_change_nothing():
+    """(k)"""
+    tr = fallen()
+    pres = [True] * 10 + [False] * 3 + [True] * 27
+    out = feed(tr, [None] * 40, 6 * DT, bars=0.0, present=pres)
+    assert all_are(out, VT.TowerHp(671, 3052)) and tr.holds == {K: 37}
+    assert tr.gone_frames[K] == 0 and K not in tr.gone_since
+
+
+def test_the_filter_holds_a_zero_back_until_zero_ok():
+    f = H.TowerHpFilter()
+    f.force(K, 0.5)
+    assert f.update(K, 0.0, 0.0, zero_ok=False) == 0.5
+    assert f.update(K, 0.0, 3.0, zero_ok=False) == 0.5            # the run counts while it waits
+    assert f.update(K, 0.0, 3.125) == 0.0
+    g = H.TowerHpFilter()
+    g.force(K, 0.5)
+    g.update(K, 0.0, 0.0)
+    g.clear_zero(K)
+    assert g.update(K, 0.0, 2.5) == 0.5 and g.update(K, 0.0, 5.0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# FIX C: a tower troop's lower max from a confident full reading
+# ---------------------------------------------------------------------------
+def test_a_full_tower_troop_lowers_the_max():
+    """(l) A Dagger Duchess at level 11 (2768) read 5 times at conf 0.95 with a full bar: max
+    2768 and full, no fall from the 3052 prior. A bar of 0.907, 2800 (no tower's full HP),
+    conf 0.7 or a damaged tower: no lowering."""
+    tr = tracker()
+    out = feed(tr, [2768] * 12, bars=1.0, confs=0.95)
+    assert all_are(out[:4], VT.TowerHp(3052, 3052)) and all_are(out[4:], VT.TowerHp(2768, 2768))
+    assert tr.lowered == {K: 2768} and tr.max[K] == 2768 and tr.crowns() == (0, 0)
+    for kw, want in (({"bars": 0.907, "confs": 0.95}, VT.TowerHp(2768, 3052)),
+                     ({"bars": 1.0, "confs": 0.7}, VT.TowerHp(2768, 3052)),
+                     ({"bars": None, "confs": 0.95}, VT.TowerHp(2768, 3052))):
+        tr = tracker()
+        out = feed(tr, [2768] * 12, **kw)
+        assert out[-1] == want and tr.max[K] == 3052 and tr.lowered == {}, kw
+    tr = tracker()
+    out = feed(tr, [2800] * 12, bars=1.0, confs=0.95)
+    assert out[-1] == VT.TowerHp(2800, 3052) and tr.lowered == {}
+    tr = tracker()
+    feed(tr, [2747] * 6, bars=0.9, confs=0.95)                     # damaged first
+    out = feed(tr, [2768] * 8, 6 * DT, bars=1.0, confs=0.95)
+    assert tr.max[K] == 3052 and tr.lowered == {} and out[-1].max == 3052
+    assert H.TowerHpTracker(prior_max_hp=PRIOR, lower_max=False).update(
+        {K: 2768}, 0.0, {K: 1.0}, hp_conf={K: 0.95})[K] == VT.TowerHp(3052, 3052)
+
+
+# ---------------------------------------------------------------------------
+# FIX D: revive
+# ---------------------------------------------------------------------------
+def test_revive_restores_the_last_hp_and_only_absence_destroys_it_again():
+    """(m)"""
+    tr = tracker()
+    feed(tr, [None] * 6, bars=0.222)
+    out = feed(tr, [None] * 21, 6 * DT, bars=0.0)
+    assert out[-1] == VT.TowerHp(0, 3052) and tr.destroyed_by == {K: "hud"}
+    assert tr.revive([K, "own_left"]) == [K] and tr.zero_locked == {K} and tr.revived == [K]
+    assert tr.frac[K] == 0.222 and tr.crowns() == (0, 0) and tr.destroyed_by == {}
+    out = feed(tr, [None] * 40, 27 * DT, bars=0.0)
+    assert all_are(out, VT.TowerHp(678, 3052))
+    # the zero run kept counting while the zero was refused: absence alone decides now (8 frames
+    # and 1.0 s)
+    out = feed(tr, [None] * 9, 67 * DT, bars=0.0, present=False)
+    assert out[7].hp == 678 and out[8] == VT.TowerHp(0, 3052) and tr.destroyed_by == {K: "detector"}
+
+
+# ---------------------------------------------------------------------------
+# the pixel hold through HudReader
+# ---------------------------------------------------------------------------
+class SeenTowers(StubTowers):
+    """StubTowers whose label badge always shows."""
+
+    def label_seen(self, rgb):
+        return {K: True}
+
+
+def test_hud_reader_the_badge_holds_a_tower_without_a_detector():
+    """(n) No detector: the crown badge at the placed label refuses the occlusion zero; a tower
+    reader without label_seen (or label_hold=False) keeps today's rule."""
+    reads = [2101] * 8 + [None] * 30
+    r = reader_with(None, [])
+    r.tower_reader = SeenTowers(reads)
+    huds = [r.read(FRAME, i * DT) for i in range(len(reads))]
+    assert all(h.towers[K] == VT.TowerHp(2101, 3052) for h in huds[6:]) and huds[-1].crowns == (0, 0)
+    assert r.report.tower_present[K] is True and r.report.towers_held == [K]
+    plain = reader_with(None, reads)                         # StubTowers: no label_seen
+    off = reader_with(None, [], label_hold=False)
+    off.tower_reader = SeenTowers(reads)
+    for rd in (plain, off):
+        huds = [rd.read(FRAME, i * DT) for i in range(len(reads))]
+        assert huds[8 + 19].towers[K].hp == 2101 and huds[8 + 20].towers[K] == VT.TowerHp(0, 3052)
+        assert huds[-1].crowns == (1, 0)

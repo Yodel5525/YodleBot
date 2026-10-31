@@ -1187,6 +1187,148 @@ def test_hud_reader_with_default_regions_and_store():
 
 
 # ---------------------------------------------------------------------------
+# Towers in two phases: tower skins (FIX A), presence (FIX B), the overtime check (FIX D)
+# ---------------------------------------------------------------------------
+def skin_battle_frames():
+    """747x1328 frames of the 2026-10-31 friendly, drawn: both enemy labels (crown badge, full
+    bar, '3052') 36 px above calibration; the first 8 frames also show the chicken's red
+    feathers in the calibrated bar box (which read 0.22 there), later frames do not."""
+    from tests.pipeline import test_tower_labels as TTL
+    base = TTL.skin_frame()
+    glyphs = compose("3052")
+    top = int(round((TTL.label_centre_v("enemy_left", TTL.SKIN_DV) - 33.0) * TTL.SY))
+    for x in (152, 152 + 391):
+        base[top:top + glyphs.shape[0], x:x + glyphs.shape[1]] = glyphs
+    feathers = base.copy()
+    for k in ("enemy_left", "enemy_right"):
+        ax, full = TTL.bar_geometry(k)
+        feathers[TTL.rows(282.5 + 8, 282.5 + 22), ax:ax + int(round(0.22 * full))] = TTL.FILL["enemy"]
+    return TTL, feathers, base
+
+
+def test_a_skinned_tower_reads_its_label_end_to_end():
+    """A real TowerReader on the drawn chicken-skin frames with the detector's tower-bar boxes:
+    3052 on every frame. With placement and the search off (the old fixed boxes, pinned): the
+    feathers' 0.22, then destroyed 2.5 s after they are gone, as the friendly logged."""
+    TTL, feathers, base = skin_battle_frames()
+    frames = [feathers] * 8 + [base] * 32
+    dets = TTL.skin_dets()
+    r = H.HudReader(digit_store(("tower",)), {}, regions=TTL.REGIONS, towers_wait_for_clock=False)
+    for i, f in enumerate(frames):
+        hud = r.read(f, i * 0.125, towers=False)
+        hud = r.read_towers(f, i * 0.125, hud, r.tower_evidence(dets, (TTL.W, TTL.HT)))
+        for k in ("enemy_left", "enemy_right"):
+            assert hud.towers[k] == VT.TowerHp(3052, 3052), (i, k)
+        assert hud.crowns == (0, 0) and r.report.errors == []
+    assert r.report.tower_digits["enemy_left"].hp == 3052 and r.report.tower_bars["enemy_right"] == 1.0
+    assert r.towers_info()["source"]["enemy_left"] == "detector"
+    old = H.HudReader(digit_store(("tower",)), {}, regions=TTL.REGIONS, towers_wait_for_clock=False,
+                      place_labels=False, search_labels=False)
+    huds = [old.read(f, i * 0.125) for i, f in enumerate(frames)]
+    assert huds[7].towers["enemy_left"] == VT.TowerHp(678, 3052) and huds[27].towers["enemy_left"].hp == 678
+    assert huds[28].towers["enemy_left"] == VT.TowerHp(0, 3052) and huds[28].crowns == (2, 0)
+
+
+def test_read_without_towers_then_read_towers_is_read():
+    one = H.HudReader(full_store(), CARD_IDS, regions=regions(), towers_clock_reads=1)
+    two = H.HudReader(full_store(), CARD_IDS, regions=regions(), towers_clock_reads=1)
+    for i in range(4):
+        f = hud_frame(clock="2:59" if i < 2 else "2:58")
+        a = one.read(f, 0.25 * i)
+        part = two.read(f, 0.25 * i, towers=False)
+        assert part.towers == {} and part.crowns == (0, 0)
+        b = two.read_towers(f, 0.25 * i, part)
+        assert a == b
+        sa, sb = one.report.summary(), two.report.summary()
+        sa.pop("ms"), sb.pop("ms")
+        assert sa == sb
+    bad = H.HudReader(full_store(), CARD_IDS, regions=regions())
+    hud = bad.read(np.zeros((400, 400, 3), dtype=np.uint8), 0.0, towers=False)
+    assert bad.read_towers(np.zeros((400, 400, 3), dtype=np.uint8), 0.0, hud) == VT.Hud()
+    assert len(bad.report.errors) == 1                    # the frame's error only
+
+
+class TickClock:
+    """Clock readings of a battle running 2.5 ticks a frame from `tick0` (regulation, then
+    overtime from tick 3600)."""
+    ready = True
+
+    def __init__(self, tick0):
+        self.tick = float(tick0) - 2.5
+
+    def read(self, rgb):
+        self.tick += 2.5
+        tk = int(self.tick)
+        s = 180 - tk // 20 if tk < 3600 else 120 - (tk - 3600) // 20
+        return H.ClockRead(s, None, 0.95, f"{s // 60}:{s % 60:02d}")
+
+
+class BarTowers:
+    """Both enemy bars read 0.22 for 10 frames, then 0.0 (no digits)."""
+
+    def __init__(self):
+        self.n = 0
+        self.placement = {}
+
+    def read_digits(self, rgb):
+        return {}
+
+    def read_bars(self, rgb):
+        self.n += 1
+        v = 0.22 if self.n <= 10 else 0.0
+        return {"enemy_left": v, "enemy_right": v}
+
+
+def overtime_run(evidence):
+    """48 frames from tick 3500 (overtime from the 41st); evidence(i) -> the detector's."""
+    r = H.HudReader(digit_store(("clock",)), {}, regions=regions())
+    r.clock_reader, r.tower_reader = TickClock(3500), BarTowers()
+    out = []
+    for i in range(48):
+        hud = r.read(FRAME, i * 0.125, towers=False)
+        hud = r.read_towers(FRAME, i * 0.125, hud, evidence(i))
+        out.append((hud, r.report.summary(), list(r.report.towers_revived)))
+    return r, out
+
+
+FRAME = np.zeros((SIZE[1], SIZE[0], 3), dtype=np.uint8)
+
+
+def test_the_overtime_check_revives_towers_misread_as_destroyed():
+    """Overtime only follows a tie: crowns of 2-0 at its first reading mean the enemy towers
+    were misread as destroyed (both, without a detector), and they come back at their last HP."""
+    r, out = overtime_run(lambda i: None)
+    first_ot = next(i for i, (h, _, _) in enumerate(out) if h.phase == OT)
+    before = out[first_ot - 1][0]
+    assert before.crowns == (2, 0) and before.towers["enemy_left"] == VT.TowerHp(0, 3052)
+    hud, summary, revived = out[first_ot]
+    assert revived == ["enemy_left", "enemy_right"] and hud.crowns == (0, 0)
+    assert hud.towers["enemy_left"] == VT.TowerHp(671, 3052) and hud.towers["enemy_right"] == VT.TowerHp(671, 3052)
+    assert summary["towers_misread"] == {"crowns_before": [2, 0], "revived": ["enemy_left", "enemy_right"],
+                                         "crowns_after": [0, 0]}
+    assert all(h.crowns == (0, 0) and not rv for h, _, rv in out[first_ot + 1:])     # once; zero-locked
+    assert r.towers_info()["revived"] == ["enemy_left", "enemy_right"]
+
+
+def test_the_overtime_check_keeps_a_tower_the_detector_saw_go():
+    """enemy_left seen by the detector and then lost (destroyed by absence); enemy_right never
+    seen (destroyed by the HUD alone): only enemy_right comes back, and 1-0 stays (logged)."""
+    seen = TL_EVIDENCE(labels={"enemy_left": (0.0, 0.0, 1.0, 1.0)})
+    r, out = overtime_run(lambda i: seen if i < 10 else TL_EVIDENCE())
+    assert r.towers.destroyed_by == {"enemy_left": "detector"}
+    first_ot = next(i for i, (h, _, _) in enumerate(out) if h.phase == OT)
+    hud, summary, revived = out[first_ot]
+    assert revived == ["enemy_right"] and hud.crowns == (1, 0)
+    assert summary["towers_misread"]["crowns_after"] == [1, 0]
+    assert summary["tower_present"]["enemy_left"] is False and summary["tower_present"]["enemy_right"] is None
+
+
+def TL_EVIDENCE(**kw):
+    from scripts.vision.tower_labels import TowerEvidence
+    return TowerEvidence(**kw)
+
+
+# ---------------------------------------------------------------------------
 # CLIs
 # ---------------------------------------------------------------------------
 def test_templates_cli_captures_digits_and_hand(tmp_path, capsys):

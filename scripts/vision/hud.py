@@ -46,7 +46,11 @@ Tower HP (vision-09). OCR of the hit points by each tower (TOWER_GLYPH_STYLE:
     (TowerHpTracker says why a real tower never does that). Without digit
     templates the princess bars' colour fill (tower_hp.py's masks and measure;
     checked on the owner's frames) gives the fraction. A king shows no number
-    until damaged: never read, it is full.
+    until damaged: never read, it is full. Tower skins move a princess tower's
+    label: its boxes are read where the detector's tower-bar box (or a pixel
+    search for the crown badge) puts the label, and a tower the detector still
+    sees is never read destroyed (HudReader, tower_labels.py). A confident full
+    reading below the prior lowers the max (tower troops: Dagger Duchess 2768).
 Hand (vision-15). NCC of each slot and the next box against your card art
     (base / evo / hero / greyed), 32x32 like scripts/brain/cards.py; an empty
     slot (flat crop, or an "empty" template) is EMPTY_CARD = -1. HandTracker
@@ -110,6 +114,7 @@ import numpy as np  # noqa: E402
 
 from .geometry import check_frame_size  # noqa: E402
 from .hpbars import FULL_SNAP, ally_mask, enemy_mask, measure_tower_bar  # noqa: E402
+from . import tower_labels as TL  # noqa: E402
 from .templates import (KIND_CLOCK_LABEL, KIND_EMPTY, KIND_HAND, KIND_NEXT, LABEL_PATCH,  # noqa: E402
                         MIN_MARGIN, MIN_SCORE, PATCH, VARIANT_FORM, CardMatcher, DigitOCR,
                         DigitRead, GlyphStyle, TemplateStore, crop_std)
@@ -146,9 +151,14 @@ _MEASURED = "measured on the owner's 747x1328 frames (client 160635001, 2026-10-
 _RECALLED = ("recalled from BuildABot constants.py (vendor/ClashRoyaleBuildABot is not in this "
              "clone), scaled from its 368x652 screenshot")
 
+_LABEL_REF = ("the detector's median tower-bar box on the owner's 2026-10-29 friendly (default tower "
+              "skin): where this tower's HP label is when its tower_* and bar_* boxes are right. "
+              "HudReader reads those boxes moved by the label's shift from here (tower skins move it; "
+              "scripts/vision/tower_labels.py)")
+
 #: name -> ((x0, y0, x1, y1) pixels at 1080x1920, end-exclusive; where it comes from).
 #: "there" in a source means the 747x1328 frames.
-BUILTIN_REGIONS_PX: dict[str, tuple[tuple[int, int, int, int], str]] = {
+BUILTIN_REGIONS_PX: dict[str, tuple[tuple[float, float, float, float], str]] = {
     "clock": ((920, 45, 1064, 101), _MEASURED + ": the M:SS digits (x 646-723, rows 36-66 there) +-7 px"),
     "clock_label": ((920, 12, 1064, 45), _MEASURED + ": the 'Time left:' / 'Overtime' text (rows 13-26 there)"),
     "elixir_digit": ((283, 1827, 379, 1881), _MEASURED + ": the count right of the drop (x 211-235, rows "
@@ -175,6 +185,7 @@ BUILTIN_REGIONS_PX: dict[str, tuple[tuple[int, int, int, int], str]] = {
     "bar_enemy_right": ((774, 275, 909, 325), "tower_hp.py:20,42-43,49: anchor 782 +-8"),
     "bar_own_left": ((208, 1145, 343, 1215), "tower_hp.py:45-47,49: anchor 216 +-8, band 1145-1215"),
     "bar_own_right": ((774, 1145, 909, 1215), "tower_hp.py:45-47,49: anchor 782 +-8"),
+    **{f"label_{k}": (TL.LABEL_REF_PX[k], _LABEL_REF) for k in TL.PRINCESS_KEYS},
 }
 #: Level-11 tower hit points (friendly battles, both sides), seen on the owner's
 #: frames: princess 3052 at the start, king 4824 on the end screen. HudReader
@@ -228,6 +239,14 @@ LEGAL_TOWER_MAX_HP: dict[str, frozenset[int]] = {
     for k in TOWER_KEYS}
 TOWER_DIGIT_REGIONS = {k: f"tower_{k}" for k in TOWER_KEYS}
 TOWER_BAR_REGIONS = {k: f"bar_{k}" for k in TOWER_KEYS if not k.endswith("king")}
+TOWER_LABEL_REGIONS = {k: f"label_{k}" for k in TL.PRINCESS_KEYS}
+#: A regions file without label_* boxes: its tower_* / bar_* boxes moved this far (px at
+#: REF_SIZE) from the built-in ones move the label reference with them (HudRegions.label_refs);
+#: less is the rounding of a file saved at another size.
+LABEL_FOLLOW_MIN_PX = 0.5
+#: ... and a label_* box this far (px at REF_SIZE) from where they put it is reported
+#: (HudReader.tower_warning): the detector's label boxes are matched within about this.
+LABEL_ODD_PX = 24.0
 
 
 def _rint(x: float) -> int:
@@ -269,6 +288,15 @@ class Rect:
         h, w = np.asarray(rgb).shape[:2]
         x0, y0, x1, y1 = self.px((w, h))
         return np.asarray(rgb)[y0:y1, x0:x1]
+
+    def shifted(self, du: float, dv: float) -> "Rect":
+        """The box moved by (du, dv) (normalised), kept inside the frame at its size."""
+        if not du and not dv:
+            return self
+        w, h = self.u1 - self.u0, self.v1 - self.v0
+        u0 = _clamp(self.u0 + float(du), 0.0, 1.0 - w)
+        v0 = _clamp(self.v0 + float(dv), 0.0, 1.0 - h)
+        return Rect(u0, v0, min(1.0, u0 + w), min(1.0, v0 + h))
 
 
 class HudRegions:
@@ -318,6 +346,50 @@ class HudRegions:
     def px(self, name: str, size: Sequence[int]) -> tuple[int, int, int, int] | None:
         r = self.get(name)
         return None if r is None else r.px(size)
+
+    def label_refs(self) -> tuple[dict[str, tuple[float, float, float, float]], bool]:
+        """(princess key -> its reference label box in pixels at REF_SIZE, whether any came from
+        tower_labels.LABEL_REF_PX because this table has no label_<key> box, e.g. a regions file
+        saved before they existed).
+
+        Such a fallback box is moved by this table's own tower_<key> and bar_<key> boxes: the
+        mean offset of their centres from the built-in ones (BUILTIN_REGIONS_PX), offsets under
+        LABEL_FOLLOW_MIN_PX ignored. A tower the owner fitted by moving both its boxes keeps
+        its label reference on them (else the label's shift would move those boxes a second
+        time). The label boxes are never to be copied between files: each file's "px" are at
+        its own frame_size."""
+        refs, fallback = {}, False
+        w, h = REF_SIZE
+        for key, name in TOWER_LABEL_REGIONS.items():
+            r = self.rects.get(name)
+            if r is None:
+                fallback = True
+                du, dv = self._tower_boxes_offset_px(key)
+                x0, y0, x1, y1 = TL.LABEL_REF_PX[key]
+                refs[key] = (tuple(TL.LABEL_REF_PX[key]) if not (du or dv)
+                             else (x0 + du, y0 + dv, x1 + du, y1 + dv))
+            else:
+                refs[key] = (r.u0 * w, r.v0 * h, r.u1 * w, r.v1 * h)
+        return refs, fallback
+
+    def _tower_boxes_offset_px(self, key: str) -> tuple[float, float]:
+        """The mean offset (px at REF_SIZE) of this table's tower_<key> and bar_<key> box
+        centres from the built-in boxes; an axis under LABEL_FOLLOW_MIN_PX is 0 (rounding)."""
+        w, h = REF_SIZE
+        offs = []
+        for name in (f"tower_{key}", f"bar_{key}"):
+            r, builtin = self.rects.get(name), BUILTIN_REGIONS_PX.get(name)
+            if r is None or builtin is None:
+                continue
+            bx0, by0, bx1, by1 = builtin[0]
+            offs.append(((r.u0 + r.u1) * w / 2.0 - (bx0 + bx1) / 2.0,
+                         (r.v0 + r.v1) * h / 2.0 - (by0 + by1) / 2.0))
+        if not offs:
+            return 0.0, 0.0
+        du = sum(o[0] for o in offs) / len(offs)
+        dv = sum(o[1] for o in offs) / len(offs)
+        return (0.0 if abs(du) < LABEL_FOLLOW_MIN_PX else du,
+                0.0 if abs(dv) < LABEL_FOLLOW_MIN_PX else dv)
 
     def to_dict(self, size: Sequence[int] = REF_SIZE) -> dict[str, Any]:
         w, h = int(size[0]), int(size[1])
@@ -811,6 +883,10 @@ class TowerHpFilter:
     of the confirming run; a zero only after `zero_confirm_seconds`, and only
     from an accepted value <= `zero_max_accepted` (occlusion looks like zero);
     a destroyed tower stays destroyed. Every tower starts full.
+
+    Not in the author's filter: update(..., zero_ok=False) holds a confirmed zero back (the zero
+    run keeps counting; TowerHpTracker passes it while the detector still sees the tower), and
+    clear_zero(key) drops a zero run (the tower was seen standing).
     """
 
     ZERO = 0.01
@@ -840,7 +916,11 @@ class TowerHpFilter:
         self._zero_run.pop(key, None)
         return self._accepted[key]
 
-    def update(self, key: str, raw: float, now: float) -> float:
+    def clear_zero(self, key: str) -> None:
+        """Forget `key`'s zero run (a zero needs zero_confirm_seconds again from the next one)."""
+        self._zero_run.pop(key, None)
+
+    def update(self, key: str, raw: float, now: float, *, zero_ok: bool = True) -> float:
         accepted = self._accepted.get(key)
         if accepted is None:
             self._accepted[key] = raw
@@ -852,7 +932,7 @@ class TowerHpFilter:
                 self._zero_run.pop(key, None)
                 return accepted
             run = self._zero_run.setdefault(key, now)
-            if now - run >= self.zero_confirm_seconds:
+            if now - run >= self.zero_confirm_seconds and zero_ok:
                 self._accepted[key] = 0.0
             return self._accepted[key]
         self._zero_run.pop(key, None)
@@ -879,13 +959,20 @@ class TowerRead:
 class TowerReader:
     """HP digits by each tower (font 'tower', TOWER_GLYPH_STYLE unless `style`
     is given) and, for the princess towers, the bar's colour fill as a
-    fallback fraction."""
+    fallback fraction.
+
+    placement: princess key -> (du, dv) normalised, the shift its tower_* and bar_* boxes are
+    read at (HudReader sets it from the label's position each frame; a tower skin moves the
+    label, tower_labels.py). label_refs: key -> the reference label box (pixels at REF_SIZE)
+    for which the configured boxes are right (HudRegions.label_refs)."""
 
     def __init__(self, store: TemplateStore | None, regions: HudRegions, style: GlyphStyle | None = None,
                  *, use_bars: bool = True):
         self.regions = regions
         self.ocr = DigitOCR(store, "tower", style)
         self.use_bars = bool(use_bars)
+        self.placement: dict[str, tuple[float, float]] = {}
+        self.label_refs, self.label_refs_builtin = regions.label_refs()
 
     @property
     def keys_with_source(self) -> set[str]:
@@ -896,10 +983,28 @@ class TowerReader:
             keys |= {k for k, r in TOWER_BAR_REGIONS.items() if self.regions.get(r) is not None}
         return keys
 
+    def _region(self, name: str, key: str) -> Rect | None:
+        """Region `name` of tower `key`, moved by the key's placement."""
+        r = self.regions.get(name)
+        if r is None:
+            return None
+        du, dv = self.placement.get(key, (0.0, 0.0))
+        return r.shifted(du, dv)
+
+    def _crop(self, rgb: np.ndarray, name: str, key: str) -> np.ndarray | None:
+        r = self._region(name, key)
+        return None if r is None else r.crop(rgb)
+
+    def _anchor_u(self, key: str, *, placed: bool) -> float | None:
+        """The princess bar fill's start (normalised): the bar region's left edge + the margin."""
+        name = TOWER_BAR_REGIONS.get(key)
+        r = None if name is None else (self._region(name, key) if placed else self.regions.get(name))
+        return None if r is None else r.u0 + self.regions.bar_margin
+
     def read_digits(self, rgb: np.ndarray) -> dict[str, TowerRead]:
         out = {}
         for key, name in TOWER_DIGIT_REGIONS.items():
-            crop = self.regions.crop(rgb, name)
+            crop = self._crop(rgb, name, key)
             if crop is None or not self.ocr.ready:
                 out[key] = TowerRead(None, 0.0, None, "no region" if crop is None else "no tower templates")
                 continue
@@ -917,7 +1022,7 @@ class TowerReader:
             return out
         h, w = np.asarray(rgb).shape[:2]
         for key, name in TOWER_BAR_REGIONS.items():
-            crop = self.regions.crop(rgb, name)
+            crop = self._crop(rgb, name, key)
             if crop is None or crop.size == 0:
                 out[key] = None
                 continue
@@ -931,6 +1036,28 @@ class TowerReader:
                                          gap_px=max(1, _rint(2 * w / REF_SIZE[0])),
                                          min_run=max(2, _rint(10 * w / REF_SIZE[0])),
                                          min_rows=max(2, _rint(4 * h / REF_SIZE[1])))
+        return out
+
+    def find_label(self, rgb: np.ndarray, key: str) -> float | None:
+        """The pixel search for `key`'s label (tower_labels.find_label_dv from the configured,
+        unmoved bar anchor): dv px at REF_SIZE from the reference, or None."""
+        anchor, ref = self._anchor_u(key, placed=False), self.label_refs.get(key)
+        if anchor is None or ref is None:
+            return None
+        return TL.find_label_dv(np.asarray(rgb), key, anchor, ref)
+
+    def label_seen(self, rgb: np.ndarray) -> dict[str, bool | None]:
+        """TOWER_KEYS -> whether the princess tower's crown badge shows where its label is placed
+        (tower_labels.badge_seen; any HP shows it, rubble does not); None for a key without a
+        bar region or label reference (the kings)."""
+        out: dict[str, bool | None] = {k: None for k in TOWER_KEYS}
+        img = np.asarray(rgb)
+        for key in TOWER_BAR_REGIONS:
+            anchor, ref = self._anchor_u(key, placed=True), self.label_refs.get(key)
+            if anchor is None or ref is None:
+                continue
+            row = TL.ref_badge_row(key, ref) + self.placement.get(key, (0.0, 0.0))[1] * REF_SIZE[1]
+            out[key] = TL.badge_seen(img, anchor, row)
         return out
 
 
@@ -1017,6 +1144,31 @@ class TowerHpTracker:
     Before its first reading a tower is TowerHp(None, max), except a king with
     a known max, which is TowerHp(max, max) while `kings_full_until_read`: the
     game shows a king's number only once it is damaged.
+
+    Presence (update's `present`: key -> True / False / None; HudReader passes it). A tower
+    skin can move the label off the HUD's boxes, and then nothing is read and the "nothing read
+    -> 0" rule destroyed both enemy towers of the owner's 2026-10-31 friendly while the detector
+    still saw them. So:
+    * True (the detector saw the tower's label or body, or its crown badge shows): a raw zero
+      (bar 0.0, or nothing read) is not fed to the filter, and its zero run is dropped; the
+      tower keeps its last accepted HP. `holds` counts those frames per key.
+    * False (the detector ran and did not see a tower it has seen before): one more frame of
+      absence; True ends the absence, None neither adds to it nor ends it.
+    * A zero is accepted only after `absent_frames` (8) frames and `absent_seconds` (1.0 s) of
+      absence, on top of the filter's 2.5 s, for a key in `informative` (default: the keys
+      present has said True for; HudReader passes the keys its detector has seen). A key the
+      detector never saw (no detector, a detector without tower classes, a tower already rubble
+      when we joined) is destroyed by the filter alone, as before.
+    `destroyed_by` says per destroyed key whether its absence was seen ("detector") or not
+    ("hud"). revive(keys) undoes a zero (HudReader's overtime check): the key gets back its last
+    nonzero HP and is `zero_locked`, so only seen absence can destroy it again.
+
+    A lower max (`lower_max`, princess towers, unless the max is fixed): `confirm_max_reads`
+    consecutive readings with conf >= `min_digit_conf` of one legal full-tower value below the
+    max, each with the bar read full (1.0), while the tower is undamaged, make that value the
+    max and the tower full again (a Dagger Duchess at level 11 is 2768: its first readings
+    would otherwise be a fall from the 3052 prior). A frame without digits leaves the run; any
+    other reading breaks it. A Princess damaged to 2768 has a bar of 0.907, so it never does.
     """
 
     def __init__(self, max_hp: Mapping[str, int] | None = None, *, confirm_max_reads: int = 5,
@@ -1024,7 +1176,8 @@ class TowerHpTracker:
                  kings_full_until_read: bool = True,
                  legal_max_hp: Mapping[str, Iterable[int]] | None = LEGAL_TOWER_MAX_HP,
                  min_digit_conf: float = 0.8, bar_disagree: float = 0.25, recover_reads: int = 5,
-                 recover_spread: float = 0.05, recover_bar_tol: float = 0.05):
+                 recover_spread: float = 0.05, recover_bar_tol: float = 0.05,
+                 absent_frames: int = 8, absent_seconds: float = 1.0, lower_max: bool = True):
         self.known_max = {k: int(v) for k, v in (max_hp or {}).items() if k in TOWER_KEYS and v}
         self.prior_max = {k: int(v) for k, v in (prior_max_hp or {}).items() if k in TOWER_KEYS and v}
         self.confirm_max_reads = max(1, int(confirm_max_reads))
@@ -1036,6 +1189,9 @@ class TowerHpTracker:
         self.recover_reads = max(1, int(recover_reads))
         self.recover_spread = float(recover_spread)
         self.recover_bar_tol = float(recover_bar_tol)
+        self.absent_frames = max(1, int(absent_frames))
+        self.absent_seconds = float(absent_seconds)
+        self.lower_max = bool(lower_max)
         self.filter = filt or TowerHpFilter()
         self.reset()
 
@@ -1043,10 +1199,21 @@ class TowerHpTracker:
         self.filter.reset()
         self.max: dict[str, int] = {**self.prior_max, **self.known_max}
         self._cand: dict[str, tuple[int, int]] = {}
+        self._low: dict[str, tuple[int, int]] = {}
         self._recover: dict[str, list[int]] = {}
         self.frac: dict[str, float | None] = {k: None for k in TOWER_KEYS}
         self.started = False
         self.recoveries = 0
+        self.seen: set[str] = set()                    # keys present has said True for
+        self.gone_since: dict[str, float] = {}         # key -> when its absence began
+        self.gone_frames: dict[str, int] = {}          # key -> frames of absence in a row
+        self.holds: dict[str, int] = {}                # key -> raw zeros held back by presence
+        self.held_now: list[str] = []                  # the keys held on the last update
+        self.zero_locked: set[str] = set()             # revived: only seen absence destroys them
+        self.destroyed_by: dict[str, str] = {}         # key -> "detector" | "hud"
+        self.revived: list[str] = []
+        self.lowered: dict[str, int] = {}              # key -> the lower max a full reading set
+        self._last_alive: dict[str, float] = {}        # key -> its last nonzero accepted fraction
 
     def _implied_max(self, key: str, hp: int) -> int | None:
         """The max a confident reading above the current one implies; None: a misread."""
@@ -1119,30 +1286,99 @@ class TowerHpTracker:
             self._recover.pop(key, None)
             self.recoveries += 1
 
+    def _lower_max(self, key: str, hp: int | None, conf: float, bar_raw: float | None) -> None:
+        """The lower-max rule (class doc): a confident full reading below the max."""
+        if (not self.lower_max or key.endswith("king") or key in self.known_max
+                or not self._undamaged(key)):
+            self._low.pop(key, None)
+            return
+        if hp is None:
+            return                                        # no digits: the run waits
+        mx = self.max.get(key)
+        legal = None if self.legal_max is None else self.legal_max.get(key)
+        if not (mx and hp < mx and conf >= self.min_digit_conf and bar_raw is not None and bar_raw >= 1.0
+                and (legal is None or hp in legal)):
+            self._low.pop(key, None)
+            return
+        c = self._low.get(key)
+        n = c[1] + 1 if c is not None and c[0] == hp else 1
+        self._low[key] = (hp, n)
+        if n >= self.confirm_max_reads:
+            self.max[key] = hp
+            self.lowered[key] = hp
+            self._low.pop(key, None)
+            self._cand.pop(key, None)
+            self._recover.pop(key, None)
+            force = getattr(self.filter, "force", None)
+            if force is not None:
+                self.frac[key] = force(key, 1.0)
+
+    def _note_presence(self, key: str, present: bool | None, now: float) -> None:
+        if present is True:
+            self.seen.add(key)
+            self.gone_since.pop(key, None)
+            self.gone_frames[key] = 0
+        elif present is False:
+            self.gone_since.setdefault(key, now)
+            self.gone_frames[key] = self.gone_frames.get(key, 0) + 1
+
+    def gone(self, key: str, now: float) -> bool:
+        """Whether `key` has been absent `absent_frames` frames and `absent_seconds` in a row."""
+        since = self.gone_since.get(key)
+        return (since is not None and self.gone_frames.get(key, 0) >= self.absent_frames
+                and now - since >= self.absent_seconds)
+
+    def _zero_ok(self, key: str, now: float, informative: set[str]) -> bool:
+        if key in self.zero_locked or key in informative:
+            return self.gone(key, now)
+        return True
+
     def update(self, hp_reads: Mapping[str, int | None], now: float,
                bar_fracs: Mapping[str, float | None] | None = None, *,
                hp_conf: Mapping[str, float | None] | None = None,
-               clock_running: bool | None = None) -> dict[str, TowerHp]:
+               clock_running: bool | None = None,
+               present: Mapping[str, bool | None] | None = None,
+               informative: Iterable[str] | None = None) -> dict[str, TowerHp]:
         if clock_running:
             self.started = True
         live = self.started or clock_running is None
         bars = bar_fracs or {}
         confs = hp_conf or {}
+        pres = present or {}
+        now = float(now)
+        self.held_now = []
+        for key in TOWER_KEYS:
+            self._note_presence(key, pres.get(key), now)
+        inf = set(self.seen) if informative is None else set(informative)
         out: dict[str, TowerHp] = {}
         for key in TOWER_KEYS:
             if not live:
                 mx = self.max.get(key)
                 out[key] = TowerHp(mx, mx) if mx else TowerHp(None, None)
                 continue
-            out[key] = self._update_key(key, hp_reads.get(key), confs.get(key), bars.get(key), float(now))
+            out[key] = self._update_key(key, hp_reads.get(key), confs.get(key), bars.get(key), now,
+                                        present=pres.get(key), zero_ok=self._zero_ok(key, now, inf))
         return out
 
+    def _filter(self, key: str, raw: float, now: float, zero_ok: bool) -> float:
+        before = self.frac[key]
+        if zero_ok:
+            acc = self.filter.update(key, raw, now)
+        else:
+            acc = self.filter.update(key, raw, now, zero_ok=False)
+        if acc is not None and acc > TowerHpFilter.ZERO:
+            self._last_alive[key] = acc
+        elif acc is not None and (before is None or before > TowerHpFilter.ZERO):
+            self.destroyed_by[key] = "detector" if self.gone(key, now) else "hud"
+        return acc
+
     def _update_key(self, key: str, hp: int | None, conf: float | None, bar_raw: float | None,
-                    now: float) -> TowerHp:
+                    now: float, *, present: bool | None = None, zero_ok: bool = True) -> TowerHp:
         hp = None if hp is None else int(hp)
         conf = 1.0 if conf is None else float(conf)
         bar_raw = None if bar_raw is None else float(bar_raw)
         bar = bar_raw if bar_raw is not None and bar_raw > TowerHpFilter.ZERO else None   # a bar seen
+        self._lower_max(key, hp, conf, bar_raw)
         if hp is not None and conf >= self.min_digit_conf and not self._contradicted(hp, self.max.get(key), bar):
             self._learn_max(key, hp)
         mx = self.max.get(key)
@@ -1158,8 +1394,15 @@ class TowerHpTracker:
             raw = 0.0
         else:
             raw = None
+        if present is True and raw is not None and raw <= TowerHpFilter.ZERO:
+            raw = None                                   # the tower stands: not a zero
+            clear = getattr(self.filter, "clear_zero", None)
+            if clear is not None:
+                clear(key)
+            self.holds[key] = self.holds.get(key, 0) + 1
+            self.held_now.append(key)
         if raw is not None:
-            self.frac[key] = self.filter.update(key, raw, now)
+            self.frac[key] = self._filter(key, raw, now, zero_ok)
         if trusted and mx and conf >= self.min_digit_conf:
             self._recover_low(key, hp, mx, bar_raw)
         elif hp is not None:
@@ -1172,6 +1415,22 @@ class TowerHpTracker:
         if acc is None and not trusted and mx and self.kings_full_until_read and key.endswith("king"):
             return TowerHp(mx, mx)
         return TowerHp(hp if trusted else None, mx)
+
+    def revive(self, keys: Iterable[str]) -> list[str]:
+        """Undo the zero of each destroyed key in `keys`: back to its last nonzero accepted
+        fraction (1.0 if none), zero_locked from then on. Returns the keys revived."""
+        force = getattr(self.filter, "force", None)
+        out = []
+        for key in keys:
+            acc = self.frac.get(key)
+            if force is None or acc is None or acc > TowerHpFilter.ZERO:
+                continue
+            self.frac[key] = force(key, self._last_alive.get(key, 1.0))
+            self.zero_locked.add(key)
+            self.destroyed_by.pop(key, None)
+            self.revived.append(key)
+            out.append(key)
+        return out
 
     def crowns(self) -> tuple[int, int]:
         """(own, enemy) crowns from destroyed towers: a king is worth all three."""
@@ -1616,6 +1875,11 @@ class HudReport:
     tower_bars: dict[str, float | None] = field(default_factory=dict)
     tower_frac: dict[str, float | None] = field(default_factory=dict)
     towers_live: bool | None = None        # tower readings count on this frame (None: towers not run)
+    tower_shift: dict[str, list] = field(default_factory=dict)       # key -> [dx px, dy px, source]
+    tower_present: dict[str, bool | None] = field(default_factory=dict)
+    towers_held: list[str] = field(default_factory=list)            # raw zeros refused (tower seen)
+    towers_revived: list[str] = field(default_factory=list)         # the overtime check undid these
+    towers_misread: dict[str, Any] | None = None                     # what the overtime check found
     hand_restarted: bool = False           # the hand and the elixir started again on this frame
     hand_reading: HandReading | None = None
     hand: HandState | None = None
@@ -1635,11 +1899,26 @@ class HudReport:
                 "tower_reads": {k: [r.hp, round(r.conf, 3)] for k, r in self.tower_digits.items()
                                 if r.hp is not None},
                 "tower_bars": {k: v for k, v in self.tower_bars.items() if v is not None},
+                "tower_shift": {k: list(v) for k, v in self.tower_shift.items() if v[2] != TL.SOURCE_FIXED},
+                "tower_present": dict(self.tower_present),
+                **({"towers_held": list(self.towers_held)} if self.towers_held else {}),
+                **({"towers_revived": list(self.towers_revived)} if self.towers_revived else {}),
+                **({"towers_misread": dict(self.towers_misread)} if self.towers_misread else {}),
                 "hand": None if h is None else {"hand": list(h.hand), "next": h.next, "known": list(h.known),
                                                 "corrections": h.corrections, "fixes": h.fixes,
                                                 "swaps": h.swaps},
                 **({"hand_restarted": True} if self.hand_restarted else {}),
                 "errors": list(self.errors), "ms": {k: round(v, 2) for k, v in self.ms.items()}}
+
+    def towers_compact(self) -> dict[str, Any]:
+        """This frame's raw tower reads in a few bytes (vision_play records it with each frame):
+        reads (key -> [hp, conf]), bars, frac, shift (moved keys only: [dx px, dy px, source]),
+        present."""
+        return {"reads": {k: [r.hp, round(r.conf, 2)] for k, r in self.tower_digits.items() if r.hp is not None},
+                "bars": {k: v for k, v in self.tower_bars.items() if v is not None},
+                "frac": {k: None if v is None else round(v, 3) for k, v in self.tower_frac.items()},
+                "shift": {k: list(v) for k, v in self.tower_shift.items() if v[2] != TL.SOURCE_FIXED},
+                "present": {k: v for k, v in self.tower_present.items() if v is not None}}
 
 
 class HudReader:
@@ -1675,6 +1954,24 @@ class HudReader:
     the empty slots for plays and forced the next-box card into one of them.
     report.hand_restarted marks the frame. Without clock templates nothing
     restarts (as before).
+
+    Towers in two phases (tower skins; tower_labels.py). read(rgb, t, towers=False) reads the
+    clock, the elixir and the hand; read_towers(rgb, t, hud, evidence) then reads the towers
+    with the detector's evidence of the same frame (tower_evidence(detections, frame_size), or
+    None when the detector did not run). read(rgb, t) does both with no evidence.
+    * Placement (`place_labels`): each princess tower's tower_* and bar_* boxes are read moved by
+      its label's shift from the reference label (label_<key> regions): the detector's
+      tower-bar boxes (LabelPlacer), else, while it has none, the pixel search
+      (`search_labels`, TowerReader.find_label), else no shift. report.tower_shift.
+    * Presence (report.tower_present, TowerHpTracker's `present`): True when the detector saw
+      the tower's label or body, or (`label_hold`) its crown badge shows at the placed label;
+      False when the detector ran, has seen the tower since reset_towers() and neither saw it;
+      else None. A tower that is present is never read destroyed (report.towers_held).
+    * The overtime check (`overtime_check`), once per reset_towers(), on the first accepted
+      overtime clock reading: overtime only follows a tie, so unequal crowns mean the leading
+      side's tally counts towers that were misread as destroyed. Those of the losing side's
+      destroyed towers whose absence the detector did not see are revived
+      (TowerHpTracker.revive; report.towers_revived, report.towers_misread).
     """
 
     def __init__(self, store: TemplateStore | None = None, card_ids: Mapping[str, int] | None = None, *,
@@ -1683,7 +1980,9 @@ class HudReader:
                  glyph_styles: Mapping[str, GlyphStyle] | None = None, use_tower_bars: bool = True,
                  tower_prior_max_hp: Mapping[str, int] | None = LEVEL11_TOWER_MAX_HP,
                  towers_wait_for_clock: bool = True, towers_clock_reads: int = 3,
-                 hand_restarts_at_clock: bool = True, hand_clock_reads: int = 3):
+                 hand_restarts_at_clock: bool = True, hand_clock_reads: int = 3,
+                 place_labels: bool = True, search_labels: bool = True, label_hold: bool = True,
+                 overtime_check: bool = True):
         self.store = store if store is not None else TemplateStore()
         self.regions = regions if regions is not None else load_regions()
         ids = {str(k): int(v) for k, v in (card_ids or {}).items()}
@@ -1705,6 +2004,15 @@ class HudReader:
         self._hand_clock_reads = 0
         self._hand_restarted = False
         self.hand = HandTracker(deck)
+        self.place_labels = bool(place_labels)
+        self.search_labels = bool(search_labels)
+        self.label_hold = bool(label_hold)
+        self.overtime_check = bool(overtime_check)
+        self.label_refs, self.label_refs_builtin = self.regions.label_refs()
+        self.placer = TL.LabelPlacer()
+        self._det_seen: set[str] = set()               # keys the detector has seen (informative)
+        self._overtime_checked = False
+        self._frame_ok = False
         self.report = HudReport()
 
     def _hand_restart_due(self, state: ClockState | None) -> bool:
@@ -1765,9 +2073,62 @@ class HudReader:
             self.reset_towers()
 
     def reset_towers(self) -> None:
-        """Start the tower tracker (and the clock confirmation it waits for) again."""
+        """Start the tower tracker (and the clock confirmation it waits for), the label
+        placement, the detector's presence record and the overtime check again."""
         self._clock_reads = 0
         self.towers.reset()
+        self.placer.reset()
+        self._det_seen = set()
+        self._overtime_checked = False
+
+    def tower_note(self) -> str | None:
+        """A note when the regions have no label_<key> boxes (the built-in references are used,
+        moved with the table's tower_* / bar_* boxes: HudRegions.label_refs), else None."""
+        if not self.label_refs_builtin:
+            return None
+        return (f"the HUD regions {self.regions.name!r} have no label_* boxes (saved before them): the "
+                "built-in label references are used, moved with its tower_* and bar_* boxes; nothing "
+                "to do (never copy boxes from another regions file: each is at its own size)")
+
+    def tower_warning(self) -> str | None:
+        """A warning when a label_<key> box of the regions is over LABEL_ODD_PX from where the
+        table's tower_<key> / bar_<key> boxes put it (e.g. boxes copied from a file saved at
+        another size), else None. Such a label reference matches no detector box."""
+        odd = []
+        for key, name in TOWER_LABEL_REGIONS.items():
+            r = self.regions.rects.get(name)
+            if r is None:
+                continue
+            w, h = REF_SIZE
+            du, dv = self.regions._tower_boxes_offset_px(key)
+            x0, y0, x1, y1 = TL.LABEL_REF_PX[key]
+            ex, ey = (x0 + x1) / 2.0 + du, (y0 + y1) / 2.0 + dv
+            off = math.hypot((r.u0 + r.u1) * w / 2.0 - ex, (r.v0 + r.v1) * h / 2.0 - ey)
+            if off > LABEL_ODD_PX:
+                odd.append(f"{name} {off:.0f} px")
+        if not odd:
+            return None
+        return (f"the HUD regions {self.regions.name!r}: {', '.join(odd)} (at 1080x1920) from where its "
+                "tower_* and bar_* boxes put them, so tower skins are not followed; delete those "
+                "label_* entries from the file (the runner then places them from those boxes)")
+
+    def tower_evidence(self, detections: Iterable[Any], frame_size: Sequence[int]) -> TL.TowerEvidence:
+        """tower_labels.TowerEvidence of one frame's detections against this reader's label
+        references (pass it to read_towers)."""
+        return TL.TowerEvidence.from_detections(detections, frame_size, self.label_refs)
+
+    def towers_info(self) -> dict[str, Any]:
+        """The battle's tower diagnostics (vision_play's battle_end record): each princess
+        tower's label shift (px at 1080x1920) and its source, the raw zeros held back because
+        the tower was seen, the keys revived, maxima lowered by full readings."""
+        shifts = self.placer.shifts()
+        tr = self.towers
+        return {"shift_px": {k: [round(v[0], 1), round(v[1], 1)] for k, v in shifts.items()},
+                "source": {k: v[2] for k, v in shifts.items()},
+                "holds": dict(getattr(tr, "holds", {}) or {}),
+                "revived": list(getattr(tr, "revived", []) or []),
+                **({"max_lowered": dict(tr.lowered)} if getattr(tr, "lowered", None) else {}),
+                **({"destroyed_by": dict(tr.destroyed_by)} if getattr(tr, "destroyed_by", None) else {})}
 
     def _run(self, rep: HudReport, name: str, fn) -> Any:
         t0 = time.perf_counter()
@@ -1779,10 +2140,13 @@ class HudReader:
         finally:
             rep.ms[name] = (time.perf_counter() - t0) * 1000.0
 
-    def read(self, rgb: np.ndarray, t: float | None = None) -> Hud:
+    def read(self, rgb: np.ndarray, t: float | None = None, *, towers: bool = True) -> Hud:
+        """The HUD of one battle frame. towers=False leaves the towers out (hud.towers {} and
+        crowns (0, 0)) for read_towers to read with the detector's evidence (class doc)."""
         t = now() if t is None else float(t)
         rep = HudReport(t=t)
         self.report = rep
+        self._frame_ok = False
         hud = Hud()
         try:
             img = np.asarray(rgb)
@@ -1792,6 +2156,7 @@ class HudReader:
         except Exception as exc:
             rep.errors.append(f"frame: {type(exc).__name__}: {exc}")
             return hud
+        self._frame_ok = True
 
         def clock():
             cr = self.clock_reader.read(img)
@@ -1809,17 +2174,6 @@ class HudReader:
             rep.elixir = self.elixir.update(er.digit, t, er.bar_frac, hud.clock_tick)
             hud.elixir_milli = rep.elixir.milli
 
-        def towers():
-            rep.tower_digits = self.tower_reader.read_digits(img)
-            rep.tower_bars = self.tower_reader.read_bars(img)
-            running = self.towers_clock_running(rep.clock)
-            hud.towers = self.towers.update({k: r.hp for k, r in rep.tower_digits.items()}, t, rep.tower_bars,
-                                            hp_conf={k: r.conf for k, r in rep.tower_digits.items()},
-                                            clock_running=running)
-            rep.tower_frac = dict(self.towers.frac)
-            rep.towers_live = running is None or bool(self.towers.started)
-            hud.crowns = self.towers.crowns()
-
         def hand():
             hr = self.hand_reader.read(img)
             rep.hand_reading = hr
@@ -1828,8 +2182,91 @@ class HudReader:
 
         self._run(rep, "clock", clock)
         self._run(rep, "elixir", elixir)
-        self._run(rep, "towers", towers)
+        if towers:
+            self.read_towers(img, t, hud, None)
         self._run(rep, "hand", hand)
+        return hud
+
+    def _place(self, img: np.ndarray, evidence: TL.TowerEvidence | None, rep: HudReport) -> None:
+        """Set the tower reader's placement from the detector's labels or the pixel search."""
+        if self.place_labels:
+            self.placer.note(evidence)
+        find = getattr(self.tower_reader, "find_label", None)
+        if self.search_labels and callable(find):
+            for key in TL.PRINCESS_KEYS:
+                if self.placer.wants_search(key):
+                    self.placer.note_search(key, find(img, key))
+        shifts = self.placer.shifts() if (self.place_labels or self.search_labels) else {}
+        rep.tower_shift = {k: [round(du, 1), round(dv, 1), src] for k, (du, dv, src) in shifts.items()}
+        self.tower_reader.placement = {k: (du / REF_SIZE[0], dv / REF_SIZE[1])
+                                       for k, (du, dv, src) in shifts.items() if du or dv}
+
+    def _presence(self, img: np.ndarray, evidence: TL.TowerEvidence | None,
+                  rep: HudReport) -> dict[str, bool | None]:
+        seen_px: Mapping[str, bool | None] = {}
+        label_seen = getattr(self.tower_reader, "label_seen", None)
+        if self.label_hold and callable(label_seen):
+            seen_px = label_seen(img) or {}
+        present: dict[str, bool | None] = {}
+        for key in TOWER_KEYS:
+            det = evidence is not None and evidence.seen(key)
+            if det:
+                self._det_seen.add(key)
+            if det or seen_px.get(key) is True:
+                present[key] = True
+            elif evidence is not None and key in self._det_seen:
+                present[key] = False
+            else:
+                present[key] = None
+        rep.tower_present = present
+        return present
+
+    def _check_overtime(self, rep: HudReport) -> None:
+        """The overtime check (class doc), before this frame's tower update."""
+        c = rep.clock
+        if (not self.overtime_check or self._overtime_checked or c is None or c.tick is None
+                or c.phase != PHASE_OVERTIME or c.source not in ("read", "resync") or not self.towers.started):
+            return
+        self._overtime_checked = True
+        before = self.towers.crowns()
+        if before[0] == before[1]:
+            return
+        side = "enemy" if before[0] > before[1] else "own"      # whose towers the tally counts
+        keys = [k for k in TOWER_KEYS if k.startswith(side + "_") and self.towers.frac.get(k) == 0.0
+                and self.towers.destroyed_by.get(k) != "detector"]
+        revived = self.towers.revive(keys)
+        rep.towers_revived = list(revived)
+        rep.towers_misread = {"crowns_before": list(before), "revived": list(revived),
+                              "crowns_after": list(self.towers.crowns())}
+
+    def read_towers(self, rgb: np.ndarray, t: float | None, hud: Hud,
+                    evidence: TL.TowerEvidence | None = None) -> Hud:
+        """Read the towers of the frame read() just read (towers=False) into `hud` (towers and
+        crowns), with the detector's evidence of that frame (None: the detector did not run).
+        Never raises; does nothing after a frame read() refused."""
+        rep = self.report
+        if not self._frame_ok:
+            return hud
+        t = rep.t if t is None else float(t)
+        img = np.asarray(rgb)
+
+        def towers():
+            self._place(img, evidence, rep)
+            rep.tower_digits = self.tower_reader.read_digits(img)
+            rep.tower_bars = self.tower_reader.read_bars(img)
+            present = self._presence(img, evidence, rep)
+            running = self.towers_clock_running(rep.clock)
+            self._check_overtime(rep)
+            hud.towers = self.towers.update({k: r.hp for k, r in rep.tower_digits.items()}, t, rep.tower_bars,
+                                            hp_conf={k: r.conf for k, r in rep.tower_digits.items()},
+                                            clock_running=running, present=present,
+                                            informative=self._det_seen)
+            rep.towers_held = list(self.towers.held_now)
+            rep.tower_frac = dict(self.towers.frac)
+            rep.towers_live = running is None or bool(self.towers.started)
+            hud.crowns = self.towers.crowns()
+
+        self._run(rep, "towers", towers)
         return hud
 
 
@@ -1884,7 +2321,7 @@ def _cmd_overlay(args) -> int:
     for name in regions.names():
         x0, y0, x1, y1 = regions.px(name, size)
         colour = (255, 0, 255) if name.startswith("hand") or name == "next" else (
-            (0, 255, 255) if name.startswith(("tower", "bar")) else (255, 255, 0))
+            (0, 255, 255) if name.startswith(("tower", "bar", "label")) else (255, 255, 0))
         draw.rectangle([x0, y0, max(x0, x1 - 1), max(y0, y1 - 1)], outline=colour, width=2)
         draw.text((x0 + 2, max(0, y0 - 12)), name, fill=colour)
     image.save(args.out)

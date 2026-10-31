@@ -80,6 +80,42 @@
    ],
    "source": "measured on the owner's 747x1328 frames (client 160635001, 2026-10-29), scaled: the count right of the drop (x 211-235, rows 1269-1297 there), room for '10'; the drop's highlight and 'Max: 10' left out"
   },
+  "label_enemy_left": {
+   "px": [
+    176.5,
+    256.6,
+    341.1,
+    308.4
+   ],
+   "source": "the detector's median tower-bar box on the owner's 2026-10-29 friendly (default tower skin): where this tower's HP label is when its tower_* and bar_* boxes are right. HudReader reads those boxes moved by the label's shift from here (tower skins move it; scripts/vision/tower_labels.py)"
+  },
+  "label_enemy_right": {
+   "px": [
+    741.7,
+    257.1,
+    903.1,
+    308.7
+   ],
+   "source": "the detector's median tower-bar box on the owner's 2026-10-29 friendly (default tower skin): where this tower's HP label is when its tower_* and bar_* boxes are right. HudReader reads those boxes moved by the label's shift from here (tower skins move it; scripts/vision/tower_labels.py)"
+  },
+  "label_own_left": {
+   "px": [
+    174.8,
+    1179.3,
+    339.6,
+    1223
+   ],
+   "source": "the detector's median tower-bar box on the owner's 2026-10-29 friendly (default tower skin): where this tower's HP label is when its tower_* and bar_* boxes are right. HudReader reads those boxes moved by the label's shift from here (tower skins move it; scripts/vision/tower_labels.py)"
+  },
+  "label_own_right": {
+   "px": [
+    742.2,
+    1178.2,
+    906,
+    1223
+   ],
+   "source": "the detector's median tower-bar box on the owner's 2026-10-29 friendly (default tower skin): where this tower's HP label is when its tower_* and bar_* boxes are right. HudReader reads those boxes moved by the label's shift from here (tower skins move it; scripts/vision/tower_labels.py)"
+  },
   "next": {
    "px": [
     62,

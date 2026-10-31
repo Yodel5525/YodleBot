@@ -607,7 +607,7 @@ Test-Path "$REC\frames.jsonl"                                          # must pr
 - `taps       off (the source is a recording)`;
 - `decide     live; wait_keep 0.25 (wait bias 1.386); would-play every 10 ticks`. A `WARNING: no args.json` there means the trained share of waits is unknown: copy `args.json` next to `best.pt` (`--tap` refuses without it). A `_wk100` copy shows `wait_keep 1 (wait bias 0.000)`;
 - `detector   NONE (...)` until the detector is pinned. Once it is pinned: `... on cuda:0, half True, side joint, 310 classes, 0 unresolved, classes dc897910, imgsz 640`. A `WARNING` line under it means the sides are not joint or some detector names are not in the class list: send it back;
-- `hud        clock templates ok`;
+- `hud        clock templates ok`, then `towers     HP read where each princess tower's label is ...`. A `towers     note: the HUD regions ... have no label_* boxes` line means your `hud_regions_pc.json` predates the label boxes: nothing to do, the runner places them from its tower and bar boxes. Never copy boxes from `hud_regions_1080x1920.json` into it (the two files are at different pixel sizes). A `WARNING    the HUD regions ...: label_... px ... from where its tower_* and bar_* boxes put them` line means label boxes in it are wrong: delete the `label_*` entries it names from `hud_regions_pc.json`;
 - for a v2 model only: `v2 rows    opponent elixir counted from the plays seen; our taps in flight until they land (--obs-delay 24 ticks); spells in flight`. `--obs-delay 0 ticks` means the checkpoint lost its rows' delay: send it back;
 - `opp plays  guards on: an enemy unit is a play once seen for 10 ticks; a lost one may come back under another label; no play from a unit first seen over 1000 mt past the river centre where a reported one could have walked`;
 - `frame 747x1328` on the first frame. A `WARNING` after it means another frame size than the HUD was calibrated on.
@@ -615,7 +615,7 @@ Test-Path "$REC\frames.jsonl"                                          # must pr
 Then, on this recording:
 - `battle 1 started (tick 110, mode MANUAL)`, about 8 s into the recording;
 - status lines with `| would <card> -> (x, y) @<tick>`: what the bot would play now. In MANUAL it decides on nearly every tick and almost every decision is a wait, so on a wait it works this out at most every 10 ticks;
-- `battle 1 over (end screen) at tick 44..` (overtime), then `battle 1: WIN 1-0 (end screen + hud); record 1-0-0 (W-L-D)`;
+- `battle 1 over (end screen) at tick 44..` (overtime), then `battle 1: WIN 1-0 (end screen); record 1-0-0 (W-L-D)`;
 - `stopped: the frame source ended; 4414 frames, 0 taps, results {'win': 1}, errors -`.
 
 Then run it once in real time (about 6.5 minutes, the length of the recording):
@@ -785,6 +785,8 @@ With `--battles 1` it also stops by itself after the result of the first battle.
 - The first taps: the card and tile the status line names must be what lands. Taps go to device pixels (1080x1920) through one adb shell.
 - The end: the runner only taps while the battle screen is up, and it never presses OK. You press OK yourself. If a tap lands after the clock has stopped, press F8 and send it back.
 - A `battle 1 over (clock reset)` line in the middle of a battle is a misread clock: send it back.
+- Tower skins move a tower's HP label, so the runner reads each princess tower where the detector (or a search for the crown badge) finds its label, and never counts a tower destroyed while the detector still sees it; a line such as `enemy labels 36 px above calibration (tower skin; ...)` is that working. A `towers misread` line, or a result line ending in `HUD read 2-0` (the result itself comes from the end screen), means the HUD read a tower wrong: send it back.
+- A tap the game did not take (the card still in its slot 1.5 s later) prints `tap did nothing: <card> -> (x, y) at tick N ...`. The bot then keeps that card off that spot: the enemy half of that lane for the rest of the battle, or 2 tiles around it for 30 s on our side. Once such a refusal is final the status line shows `| refused 1/3`. After 3 in a battle the runner prints `REFUSED TAPS: 3 taps this battle did nothing in the game (...). Switched to MANUAL ...` and stops tapping (if you pressed F8 yourself before that, it prints `... Already MANUAL ...` instead). Play yourself, and press F8 to hand back only once the status line looks right: the hand, the elixir, and `towers them 3052 3052 us 3052 3052 crowns 0-0` (the princess towers' HP as the bot reads them, theirs then ours, left to right, and the crowns ours-theirs). A `0` there for a tower that is still standing is the misread that sends troops to the enemy side: keep playing yourself and send it back. After you hand back, the count starts again from 0. A `landed after all` line is only a slow tap. Send all of these lines back. In a dry run nothing is tapped, so these lines are not shown; instead, an AUTO dry run prints `dry run: the refused-tap guard would switch to MANUAL now ...` once per battle, which is expected.
 - Do not watch replays or spectate clan battles while the runner runs with `--tap`. Stop it first.
 
 **5. The real delay.** After the battle:
