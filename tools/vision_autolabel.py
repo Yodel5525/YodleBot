@@ -265,6 +265,53 @@ Review, mark and plays (N12)
   units (Heal, the Spirit Empress: her cost is the form's, 3 or 6); a unit its card only
   spawns is a child (BushGoblin, a curse's Goblins); a later part of the same unit (a look
   change, the same live uid, or a track found again near where it was lost) continues it.
+  Gold tracks fragment: one unit is often several parts, lost and found again later (Round 0's
+  list 1 had 60 plays for about 18). So, for unit parts (spells and the units of a spell card
+  that no card summons, Heal's spirits, keep the rules above; the Spirit Empress' forms, which
+  her variant cards summon, are troops; settings in PlayConfig, stored in plays.json
+  "config", flags --reach-gap-s, --reach-margin-tiles, --zone-y-tiles, --zone-gap-s,
+  --back-tiles, --cycle-plays, --flag-gap-s):
+    capacity  a play holds at most the units its card puts down (data/vision/spawn_children.json:
+              Guards 3, Minion Horde 6, Elite Barbarians 2, the others 1; a card with forms, no
+              limit). A part beyond that, inside the deploy window or on top of a unit still seen
+              in a full play up to 12 s old, is a second track on that unit.
+    reach     a part continues a unit of its card lost up to 12 s before when the unit could have
+              walked there: within its speed (data/royaleapi/cards_stats_characters.json Speed / 60
+              tiles a second; the Boss Bandit, newer than that table, 1.5) x 1.25 x the time lost
+              + 2 tiles of where it was last seen. While the play has room, it may also be one of
+              its units not seen since the deploy (within --radius-tiles + that walk of the
+              first unit).
+    zone      a part first seen in the defender's half (17 tiles or more from its owner's back
+              edge: y >= 17 for the opponent, y <= 15 for our o tracks; not Miner, Goblin Drill
+              or Heal's spirits) cannot have been put down there. It continues a unit of
+              its card as reach does, lost up to 20 s before, or one still seen within 2 tiles;
+              else it is a play of its own whose deploy went unseen ("deploy_unseen"), dated at
+              that first sighting, as M0's deriver dates such a play.
+  Never a continuation: a part in its owner's deploy zone more than 2 tiles behind (toward its
+  own king) where the unit was last seen, since units walk forward (Elite Barbarians put down
+  again behind the pair that died at the tower are a new play: "new_by": "behind"); nor a part
+  that would bring a deploy-unseen unit back into the deploy zone (by any rule, a live uid
+  too). The card cycle: a card comes back to the hand only after 4 other plays, so once 4
+  other plays came since its card's last play, a part is taken for a lost unit by reach, zone
+  or capacity only on a close fit, a unit seen up to 4 s before within 2 tiles of it (a
+  long-lived unit or a building whose track was lost a moment; flagged); else it is a new play
+  ("new_by": "cycle"). A champion (CHAMPION_CARDS) is alive once at a time and her card cycles
+  only once she dies, so for her the 4 plays count from her last sighting. Without those 4
+  plays (labels missed them) two plays of a card can look like one unit lost and found again;
+  so the list flags each reach, zone or capacity merge made after 3 or more other plays
+  ("cycled": one missed play, often a Zap, would make it a new play), and a track found again
+  near where it was lost (rule 1, which holds) after 4, for the owner to check.
+  Each play lists its merges: "continued" names each later part's rule (split, uid,
+  reacquired, capacity, reach, zone), "joined" the units that joined after the deploy window,
+  "gaps" how long the unit was unseen.
+  The list prints each play's merges by rule under it ("+ reach t54 3.0 s, t56 3.3 s; zone
+  t106.0 9.5 s"), and until the list is confirmed it warns of what to check: every zone merge,
+  reach merges over 4 s, the merges late in the card cycle ("cycled"), each deploy-unseen play
+  (with an earlier part of its track under another card, if any: its deploy, labelled as
+  something else?), and every play that comes fewer than 4 plays after its card's last one
+  (a play the labels missed lies between them, often a Zap: --add-play it; or it is no new
+  play: --bad-plays it). An --add-play of a deploy-unseen play's card, up to 20 s before its
+  first sighting, gives that play's deploy time and replaces it ("replaces").
   The list is printed with M0's read of each play (the scan's live plays within 1 s and 3
   tiles) and numbered p1, p2, ... as list K. Edits name list K (--list K, the latest):
   --bad-plays p3,p7 (a deletion is stored as card and time, so it holds when the list is
@@ -272,8 +319,8 @@ Review, mark and plays (N12)
   battle 2; n1234 for scan record n's time; @x,y in tiles; the card must be in the deck
   unless --off-deck), --confirm. Each run writes list K+1 to plays.json (committed, small);
   a changed final list is no longer confirmed. An edit (and --confirm) is refused when the
-  plays derived now differ from list K's (the label set, the event cards or --window-s
-  changed): the owner confirms only a list he was shown. While the gold emit left tracks
+  plays derived now differ from list K's (the label set, the event cards, --window-s or the
+  play rules changed): the owner confirms only a list he was shown. While the gold emit left tracks
   unlabelled (emit --allow-pending) their plays are missing, so --confirm also needs
   --allow-pending. plays.json also lists the children and our own units the sheet showed (o
   tracks: "own", not scored). The gate needs plays_fresh() == []: confirmed, and derived from
@@ -3090,6 +3137,24 @@ KIND_UNIT_PLAY, KIND_SPELL_PLAY = "unit", "spell"   # OppPlay.kind
 TICKS_PER_S = 20                           # vision_replay --ticks time: 20 ticks a second from the first image
 MT_PER_TILE = 1000.0
 _EPS_S = 1e-6
+#: plays' reach rule: each character's Speed in tiles a minute (60 is a tile a second), RoyaleAPI's
+#: table, keyed by the names the vision classes use (AngryBarbarian, SkeletonWarrior, Minion, ...).
+SPEEDS_PATH = ROOT / "data" / "royaleapi" / "cards_stats_characters.json"
+#: plays' capacity rule: compositions, the units one play of a card deploys (MinionHorde {"Minion": 6}).
+SPAWN_CHILDREN_PATH = ROOT / "data" / "vision" / "spawn_children.json"
+#: Speeds (tiles a second) of the classes SPEEDS_PATH lacks (the table predates them): the in-game
+#: card's Speed (Fast is 90 tiles a minute). The table wins once it has the class.
+SPEED_EXTRA = {"BossBandit": 1.5}
+SPEED_DEFAULT = 2.0                        # a class in neither: Very Fast (120 a minute), so reach errs long
+ARENA_Y_MT = 32_000.0                      # scripts/vision/geometry.HEIGHT_MT (restated: geometry needs numpy)
+#: Troop cards placed anywhere on the arena: the deploy-zone rule leaves their units out (spell
+#: cards seen as their units, Heal, are left out by their kind).
+ZONE_FREE_CARDS = frozenset({"Miner", "GoblinDrill"})
+#: Champion cards (tools/rs_presses.CHAMPIONS_BEFORE_THE_COLUMN, restated: the names classes.json
+#: uses): one is alive at a time and her card goes back to the cycle only when she dies, so plays'
+#: card-cycle rule counts the other plays since her last sighting, not since her deploy.
+CHAMPION_CARDS = frozenset({"MightyMiner", "SkeletonKing", "ArcherQueen", "GoldenKnight", "Monk", "LittlePrince",
+                            "Goblinstein", "BossBandit"})
 #: plays_fresh reasons (status words them; the gate refuses a gold session with any).
 PLAYS_MISSING = "no plays.json yet"
 PLAYS_TRACKS = "tracks.json changed since the play list"
@@ -3646,6 +3711,27 @@ class PlayConfig:
     reacquire_s: float = 1.5       # a same-card part born this soon after one ended ...
     reacquire_tiles: float = 2.5   # ... this close to where that one was last seen continues it (not a play)
     child_s: float = 10.0          # a spawned unit (BushGoblin, a curse's Goblin) joins its card's play this recent
+    # reach (module doc): a unit part born up to reach_gap_s after a same-card play's unit was last seen,
+    # within speed x reach_speed_x x the gap + reach_margin_tiles of there, continues it (reach_gap_s 0: off)
+    reach_gap_s: float = 12.0
+    reach_margin_tiles: float = 2.0
+    reach_speed_x: float = 1.25    # the table's speed times this: first-box lag, box noise, an old table
+    # zone: a unit part first seen at y >= zone_y_tiles (the river's far bank; ours: y <= 32 - it) starts no
+    # play; it continues a same-card unit as reach does, but lost up to zone_gap_s before, else it is a
+    # play of its own whose deploy went unseen ("deploy_unseen", dated at that first sighting, as M0 does;
+    # zone_y_tiles 32: off)
+    zone_y_tiles: float = 17.0
+    zone_gap_s: float = 20.0
+    # direction: a part born in its owner's deploy zone (short of the river) more than back_tiles behind
+    # (toward its king) where a unit was last seen continues no unit of it (units walk forward)
+    back_tiles: float = 2.0
+    # card cycle: a card comes back to the hand after cycle_plays other plays (8 cards, 4 in hand; a champion's
+    # after her death). Once that many other plays came since its card's last play, a part continues a unit
+    # lost before (reach, zone, capacity) only on a close fit, a unit seen up to flag_gap_s before within
+    # reach_margin_tiles of it (flagged): it may be a new play, so otherwise it is one. The list flags merges
+    # made after cycle_plays - 1 (one missed play away) and warns of a play with fewer since (0: off)
+    cycle_plays: int = 4
+    flag_gap_s: float = 4.0        # the list warns of every zone merge and of reach merges over this gap
     delete_s: float = 0.2          # a stored deletion removes a derived play of its card this close in time
     m0_s: float = 1.0              # the scan's live play matched to a gold play: this close in time ...
     m0_tiles: float = 3.0          # ... and space (plan 6.2's 1 s and 3 tiles)
@@ -3660,6 +3746,67 @@ def _dist_mt(a: Sequence[float] | None, b: Sequence[float] | None) -> float | No
     if a is None or b is None:
         return None
     return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+
+_PLAY_TABLES: dict[tuple[str, str], dict] = {}
+
+
+def load_speeds(path: str | os.PathLike | None = None) -> dict[str, float]:
+    """Walking speeds in tiles a second by vision class name, for plays' reach rule: Speed / 60
+    of each character in SPEEDS_PATH (tiles a minute; a building's 0 kept), over SPEED_EXTRA for
+    the classes it lacks. An unreadable table leaves SPEED_EXTRA (and SPEED_DEFAULT for the rest)."""
+    p = SPEEDS_PATH if path is None else Path(path)
+    key = ("speeds", str(p))
+    if key not in _PLAY_TABLES:
+        out = dict(SPEED_EXTRA)
+        try:
+            rows = _read_json(p)
+        except (OSError, ValueError):
+            rows = None
+        for r in rows if isinstance(rows, list) else ():
+            v = r.get("speed") if isinstance(r, Mapping) else None
+            if r and r.get("name") and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                out[str(r["name"])] = float(v) / 60.0
+        _PLAY_TABLES[key] = out
+    return dict(_PLAY_TABLES[key])
+
+
+def load_units_per_play(path: str | os.PathLike | None = None) -> dict[str, int]:
+    """Units one play of a card deploys, by card, for plays' capacity rule: the sum of its
+    SPAWN_CHILDREN_PATH composition (SkeletonWarriors 3, MinionHorde 6, AngryBarbarians 2,
+    HogRider 1). A card with forms (variants: the Spirit Empress) or with no composition has
+    no cap. An unreadable table gives no caps."""
+    p = SPAWN_CHILDREN_PATH if path is None else Path(path)
+    key = ("units", str(p))
+    if key not in _PLAY_TABLES:
+        out: dict[str, int] = {}
+        try:
+            doc = _read_json(p)
+        except (OSError, ValueError):
+            doc = None
+        doc = doc if isinstance(doc, Mapping) else {}
+        variants = doc.get("variants") if isinstance(doc.get("variants"), Mapping) else {}
+        comps = doc.get("compositions") if isinstance(doc.get("compositions"), Mapping) else {}
+        for card, units in comps.items():
+            if card in variants or not isinstance(units, Mapping):
+                continue
+            n = sum(int(v) for v in units.values() if isinstance(v, (int, float)) and not isinstance(v, bool))
+            if n > 0:
+                out[str(card)] = n
+        _PLAY_TABLES[key] = out
+    return dict(_PLAY_TABLES[key])
+
+
+def _seen_at(q: Any, t: float) -> tuple[tuple[float, float] | None, float]:
+    """Where the unit whose latest part is q was at time t, or last before it, and how long
+    before t: its last position and the gap once that part ended; while it still lives at t,
+    the point between its birth and last position at t (straight-line), and 0."""
+    if q.last_t <= t + _EPS_S:
+        return (q.last or q.birth), max(0.0, t - q.last_t)
+    if q.birth is None or q.last is None or q.last_t - q.first_t <= _EPS_S:
+        return (q.birth or q.last), 0.0
+    f = min(1.0, max(0.0, (t - q.first_t) / (q.last_t - q.first_t)))
+    return (q.birth[0] + f * (q.last[0] - q.birth[0]), q.birth[1] + f * (q.last[1] - q.birth[1])), 0.0
 
 
 def starts_play(label: str, deck: Sequence[str], table: Any, known: Iterable[str] = ()) -> bool:
@@ -3716,6 +3863,10 @@ class _GoldPart:
     uid: str | None
     birth: tuple[float, float] | None
     last: tuple[float, float] | None
+    speed: float = SPEED_DEFAULT              # its class's walk, tiles a second (reach)
+    # its card is a spell and no card summons its class (Heal's spirits): as a spell. The Spirit Empress'
+    # forms, summoned by her variant cards, are troops
+    spell_card: bool = False
 
 
 def _xy(v: Any) -> tuple[float, float] | None:
@@ -3728,24 +3879,74 @@ def _xy(v: Any) -> tuple[float, float] | None:
 def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table: Any, known: Iterable[str] = (), *,
                  config: PlayConfig | None = None, battles: Mapping[int, float] | None = None,
                  event_cards: Mapping[str, Any] | None = None, labels: Mapping[str, str] | None = None,
-                 t0: float | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                 t0: float | None = None, owner_top: bool = True, speeds: Mapping[str, float] | None = None,
+                 units_per_play: Mapping[str, int] | None = None,
+                 champions: Iterable[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Plays from gold parts (parts.jsonl lines with a label; labels: key -> label instead, for
     our o parts), as EventDeriver's OppPlay has them (card, t / tick, x_mt, y_mt of the first
-    unit, kind, cost) plus the units, labels and form. Walked by birth (first_t):
+    unit, kind, cost) plus the units, labels and form. owner_top: the parts' owner deploys from
+    the top (the opponent; False for our o parts); "behind" is toward the owner's king, its
+    deploy zone its half short of the river, the defender's half the other one. Walked by birth
+    (first_t):
       1. a part that continues an earlier one is the same unit, in that one's play: part >= 1
          of a harvest track after its part of the same card (a look change), the same live
          uid and card born within reacquire_s after that unit's latest part ended (never
          overlapping it: a uid may pass to a unit born where one died), or born within
          reacquire_s after a same-card part ended, within reacquire_tiles of where it was last
-         seen (a track lost and found again);
+         seen (a track lost and found again); never (uid, reacquired) a part born in its
+         owner's deploy zone for a unit of a deploy-unseen play (rule 6);
       2. a part that does not starts_play is a child: it joins the latest play of its card born
          up to child_s before it, else it is listed alone;
-      3. any other part joins the play of its card born within window_s, in its battle, within
-         radius_tiles of that play's first unit; else it starts a play.
-    Returns (plays in time order, children); a child's "derived" is its play's index."""
+      3. a spell part, or a unit of a spell card that no card summons (Heal's spirits; not the
+         Spirit Empress, whose forms her variant cards summon: rules 4-7), joins the play of its
+         card born within window_s, in its battle, within radius_tiles of that play's first
+         unit; else it starts a play;
+      4. a unit part joins, as a unit, such a play (window_s, radius_tiles) that has room: a play
+         holds at most the units its card deploys (units_per_play, load_units_per_play: Guards 3,
+         Minion Horde 6, Elite Barbarians 2, the others 1); when every such play is full, it is
+         a second track on the nearest unit of the nearest one and continues it (capacity);
+      5. else (reach) a unit part continues a unit of an earlier same-card play whose latest part
+         ended up to reach_gap_s before it, born within reach of where that unit was last seen:
+         its class's speed (speeds, load_speeds) x reach_speed_x x the gap + reach_margin_tiles.
+         Or it joins such a play as a new unit (one unseen since the deploy) while the play has
+         room and is at most reach_gap_s old, born within radius_tiles + its speed x
+         reach_speed_x x the time since the play + reach_margin_tiles of the play's first unit.
+         Or, the play full and at most reach_gap_s old, it is a second track on a unit still
+         seen there, born within reach_margin_tiles of where that unit is then (between its birth
+         and last position), and continues it (capacity). Never (the play stays new; "new_by"):
+           behind  a part born in its owner's deploy zone more than back_tiles behind where that
+                   unit was last seen (radius_tiles + back_tiles behind the play's first unit, for
+                   a new unit), and never a unit of a deploy-unseen play (rule 6);
+           cycle   once cycle_plays other plays (any card, its battle) came since its card's last
+                   play (a champion's: since her last sighting, as her card cycles once she dies;
+                   champions, CHAMPION_CARDS): the card is back in the hand, so the part may be a
+                   new play. Only a close fit holds then: a unit seen up to flag_gap_s before,
+                   within reach_margin_tiles of where it was (a long-lived unit's track lost a
+                   moment), listed in "cycled";
+         a continuation made once max(1, cycle_plays - 1) other plays came is listed in
+         "cycled" too: one play the labels missed (a Zap) would make it a new play;
+      6. else a unit part first seen in the defender's half (y >= zone_y_tiles for the top owner,
+         y <= 32 - zone_y_tiles for ours; not for ZONE_FREE_CARDS or rule 3's units), where
+         no play starts, continues a unit as rule 5 does but lost up to zone_gap_s before (zone;
+         a second track on a unit still seen there whatever its play's age), else it is a play
+         whose deploy went unseen ("deploy_unseen": dated at that first
+         sighting, as M0's deriver dates one: scripts/vision/events.py deploy_zone_mt);
+      7. else it starts a play.
+    Each play lists its continuations in "continued" (key -> split, uid, reacquired, capacity,
+    reach, zone), the units joined after the deploy window in "joined" (key -> reach, zone), and
+    in "gaps" (key -> s) how long the unit continued was unseen (0: still seen), or how old the
+    play was for a joined unit; "cycled" (key -> other plays since its card's last play) the
+    continuations made late in the card cycle: rule-1 ones (uid, reacquired) once cycle_plays
+    other plays came (rule 1 holds), rule 5-6 ones as there (the list asks the owner to look).
+    A deploy-unseen play's "earlier" names the earlier parts of its
+    tracks under another card (its deploy, labelled as something else?). Returns (plays in time
+    order, children); a child's "derived" is its play's index."""
     cfg = config or PlayConfig()
     deck = [str(c) for c in deck]
     events = load_event_cards() if event_cards is None else event_cards
+    speed_of = load_speeds() if speeds is None else speeds
+    cap_of = load_units_per_play() if units_per_play is None else units_per_play
+    champs = CHAMPION_CARDS if champions is None else frozenset(champions)
     rows: list[_GoldPart] = []
     for p in parts:
         key = str(p.get("key"))
@@ -3753,13 +3954,20 @@ def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table:
         if not label:
             continue
         lab = L.resolve_label(table, str(label))
+        cls = table.classes[lab.class_id].name if lab.class_id is not None else None
+        card = card_of_label(str(label), deck, table)
         first_t = float(p.get("first_t") or 0.0)
+        # a spell card's units keep the spell rules (rule 3) unless a card summons them: Heal's spirits do,
+        # the Spirit Empress' forms (summoned by her variant cards; walking, long-lived troops) do not
+        spell_card = bool(card) and (table.cards.get(card) or {}).get("kind") == "spell" and (
+            lab.class_id is None or not any(role == ROLE_SUMMON for _c, role in table.classes[lab.class_id].cards))
         rows.append(_GoldPart(key, int(p.get("h") if p.get("h") is not None else -1), int(p.get("part") or 0), str(label),
-                              int(lab.form or 0), lab.type == L.TYPE_SPELL, card_of_label(str(label), deck, table),
+                              int(lab.form or 0), lab.type == L.TYPE_SPELL, card,
                               None if p.get("first_n") is None else int(p["first_n"]), first_t,
                               float(p.get("last_t") if p.get("last_t") is not None else first_t),
                               None if p.get("hk") is None else int(p["hk"]), p.get("uid") or None,
-                              _xy(p.get("birth")), _xy(p.get("last"))))
+                              _xy(p.get("birth")), _xy(p.get("last")),
+                              float(speed_of.get(cls, SPEED_DEFAULT)) if cls else SPEED_DEFAULT, spell_card))
     rows.sort(key=lambda r: (r.first_t, _key_order(r.key)))
     plays: list[dict[str, Any]] = []
     children: list[dict[str, Any]] = []
@@ -3769,19 +3977,135 @@ def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table:
     by_track: dict[tuple[int, int], _GoldPart] = {}
     by_uid: dict[str, str] = {}                 # live uid -> unit
     have = set(known)
+    line = cfg.zone_y_tiles * MT_PER_TILE
+    zone_on = line < ARENA_Y_MT
+    margin = cfg.reach_margin_tiles * MT_PER_TILE
 
-    def add_to(kind: str, idx: int, r: _GoldPart, how: str) -> None:
+    def depth(xy: tuple[float, float]) -> float:
+        """How far into the arena from its owner's back edge (y for the top owner, 32 - y for ours)."""
+        return xy[1] if owner_top else ARENA_Y_MT - xy[1]
+
+    def own_zone(xy: tuple[float, float] | None) -> bool:
+        """In the owner's deploy zone: its half, short of the river (y < 32 - zone_y_tiles for the top owner)."""
+        return zone_on and xy is not None and depth(xy) < ARENA_Y_MT - line
+
+    def behind(xy: tuple[float, float] | None, ref: tuple[float, float] | None, slack_mt: float) -> bool:
+        """xy is in the owner's deploy zone more than slack behind ref (toward the owner's king)."""
+        return xy is not None and ref is not None and own_zone(xy) and depth(xy) < depth(ref) - slack_mt - 1e-6
+
+    def beyond(r: _GoldPart) -> bool:
+        """Rule 6: r's first sighting is in the defender's half and its card is not placed anywhere."""
+        if r.birth is None or not zone_on or r.card in ZONE_FREE_CARDS or r.spell_card:
+            return False
+        return depth(r.birth) >= line - 1e-6
+
+    def since(r: _GoldPart) -> int | None:
+        """Plays of other cards (r's battle) since the last play of r's card, or for a champion
+        since her last sighting (her card cycles once she dies); None: no play of it yet, or the
+        cycle rule off."""
+        if cfg.cycle_plays <= 0:
+            return None
+        last = next((i for i in range(len(plays) - 1, -1, -1)
+                     if plays[i]["hk"] == r.hk and plays[i]["card"] == r.card), None)
+        if last is None:
+            return None
+        after = None
+        if r.card in champs:
+            after = max((min(latest[u].last_t, r.first_t) for u in plays[last]["units"] if u in latest), default=None)
+        return sum(1 for pl in plays[last + 1:]
+                   if pl["hk"] == r.hk and (after is None or pl["t"] > after + _EPS_S))
+
+    def cycled(r: _GoldPart) -> bool:
+        """At least cycle_plays other plays came since r's card last could come back (since)."""
+        n = since(r)
+        return n is not None and n >= cfg.cycle_plays
+
+    def late(r: _GoldPart) -> int | None:
+        """since(r) when a continuation of r is to be listed in "cycled" (rules 5-6): at least
+        max(1, cycle_plays - 1) other plays came, so one missed play makes it a new play."""
+        n = since(r)
+        return n if n is not None and n >= max(1, cfg.cycle_plays - 1) else None
+
+    def add_to(kind: str, idx: int, r: _GoldPart, how: str, gap: float | None = None, joined: bool = False) -> None:
         tgt = plays[idx] if kind == "play" else children[idx]
         tgt["parts"].append(r.key)
         tgt["labels"][r.label] = tgt["labels"].get(r.label, 0) + 1
         tgt["forms"].append(r.form)
         if how:
-            tgt["continued"][r.key] = how
+            tgt["joined" if joined else "continued"][r.key] = how
+        if gap is not None:
+            tgt["gaps"][r.key] = round(max(0.0, gap), 2)
         if r.uid and r.uid not in tgt["uids"]:
             tgt["uids"].append(r.uid)
 
+    def follow(r: _GoldPart, gap_s: float, zone: bool = False) -> tuple[tuple[int, str | None, float] | None, str]:
+        """Rules 5 and 6: (play idx, unit, gap) of the best fit (unit None: a new unit of that
+        play) among the unit plays of r's card in its battle, units lost up to gap_s before; and
+        why a fit was refused ("behind", "cycle"; "" when none was). A lost unit found again (the
+        nearest for its reach) comes first, then a new unit of a play with room, then a second
+        track on a unit still seen in a full play (zone: in any play without room, however old,
+        as no play starts where r is). Once r's card has cycled, only a close fit (a unit seen
+        up to flag_gap_s before, within the margin of where it was) is taken."""
+        if r.birth is None or gap_s <= 0.0:
+            return None, ""
+        cap = cap_of.get(r.card) if r.card else None
+        best, close, refused = None, None, ""
+        for idx, pl in enumerate(plays):
+            if pl["card"] != r.card or pl["hk"] != r.hk or pl["kind"] != KIND_UNIT_PLAY:
+                continue
+            if pl["deploy_unseen"] and own_zone(r.birth):
+                continue                                # back from the defender's half to its deploy zone: no
+            age = r.first_t - pl["t"]
+            fresh = age <= gap_s + _EPS_S
+            room = fresh and (cap is None or len(pl["units"]) < cap)
+            for u in pl["units"]:
+                q = latest[u]
+                pos, gap = _seen_at(q, r.first_t)
+                if pos is None:
+                    continue
+                d = _dist_mt(pos, r.birth) or 0.0
+                if q.last_t > r.first_t + _EPS_S:          # still seen: r is this unit only as a second track
+                    if (fresh or zone) and not room and d <= margin + 1e-6:
+                        e = (2, d / margin if margin > 0 else 0.0, 0.0, idx, _key_order(u))
+                        if best is None or e < best[0]:
+                            best = (e, (idx, u, 0.0))
+                        if close is None or e < close[0]:
+                            close = (e, (idx, u, 0.0))
+                    continue
+                if gap > gap_s + _EPS_S:
+                    continue
+                lim = (q.speed * cfg.reach_speed_x * gap + cfg.reach_margin_tiles) * MT_PER_TILE
+                if d > lim + 1e-6:
+                    continue
+                if behind(r.birth, pos, cfg.back_tiles * MT_PER_TILE):
+                    refused = refused or "behind"
+                    continue
+                e = (0, d / lim if lim > 0 else 0.0, gap, idx, _key_order(u))
+                if best is None or e < best[0]:
+                    best = (e, (idx, u, gap))
+                if gap <= cfg.flag_gap_s + _EPS_S and d <= margin + 1e-6 and (close is None or e < close[0]):
+                    close = (e, (idx, u, gap))
+            if room and pl["_birth"] is not None:
+                # a unit of the play unseen since its deploy: within the play's spread of where it
+                # was put down, plus the walk since
+                el = max(0.0, age)
+                lim = (cfg.radius_tiles + r.speed * cfg.reach_speed_x * el + cfg.reach_margin_tiles) * MT_PER_TILE
+                d = _dist_mt(pl["_birth"], r.birth) or 0.0
+                if d <= lim + 1e-6:
+                    if behind(r.birth, pl["_birth"], (cfg.radius_tiles + cfg.back_tiles) * MT_PER_TILE):
+                        refused = refused or "behind"
+                    else:
+                        e = (1, d / lim if lim > 0 else 0.0, el, idx, ())
+                        if best is None or e < best[0]:
+                            best = (e, (idx, None, el))
+        if best is not None and cycled(r):
+            # the card is back in the hand: a new play, unless the fit is close (a long-lived unit, a tower
+            # or building, whose track was lost a moment)
+            return (None, "cycle") if close is None else (close[1], "")
+        return (None if best is None else best[1]), refused
+
     for r in rows:
-        prev, how = None, ""
+        prev, how, gap0 = None, "", None
         if r.part >= 1:
             q = by_track.get((r.h, r.part - 1))
             if q is not None and q.card == r.card:
@@ -3790,8 +4114,10 @@ def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table:
             # the same live uid, born after that unit's latest part ended and soon after: the
             # tracker may keep a uid for a unit of the same class born where one died
             q = latest[by_uid[r.uid]]
-            if q.card == r.card and q.hk == r.hk and -_EPS_S <= r.first_t - q.last_t <= cfg.reacquire_s:
-                prev, how = q, "uid"
+            ukind, uidx = where[by_uid[r.uid]]
+            back = ukind == "play" and plays[uidx]["deploy_unseen"] and own_zone(r.birth)   # never back into the zone
+            if q.card == r.card and q.hk == r.hk and -_EPS_S <= r.first_t - q.last_t <= cfg.reacquire_s and not back:
+                prev, how, gap0 = q, "uid", r.first_t - q.last_t
         if prev is None and r.birth is not None:
             near = []
             for unit, q in latest.items():
@@ -3799,55 +4125,100 @@ def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table:
                 gap = r.first_t - q.last_t
                 if (q.card == r.card and q.hk == r.hk and d is not None and -_EPS_S <= gap <= cfg.reacquire_s
                         and d <= cfg.reacquire_tiles * MT_PER_TILE):
+                    kind, idx = where[unit]
+                    if kind == "play" and plays[idx]["deploy_unseen"] and own_zone(r.birth):
+                        continue                         # never back into the deploy zone (rule 5)
                     near.append((gap, d, _key_order(unit), q))
             if near:
-                prev, how = min(near, key=lambda e: e[:3])[3], "reacquired"
+                gap0, _d, _o, prev = min(near, key=lambda e: e[:3])
+                how = "reacquired"
+        unit = r.key
         if prev is not None:
             unit = unit_of[prev.key]
             kind, idx = where[unit]
             where[r.key] = (kind, idx)
-            add_to(kind, idx, r, how)
+            add_to(kind, idx, r, how, gap0)
+            if how in ("uid", "reacquired") and kind == "play" and cycled(r):
+                plays[idx]["cycled"][r.key] = since(r)  # rule 1 holds, but the list asks the owner to look
         elif not starts_play(r.label, deck, table, have):
-            unit = r.key
             cands = [i for i, pl in enumerate(plays) if pl["card"] == r.card and pl["hk"] == r.hk
                      and -_EPS_S <= r.first_t - pl["t"] <= cfg.child_s]
             idx = max(cands, key=lambda i: (plays[i]["t"], i)) if cands else None
             children.append({"key": r.key, "label": r.label, "card": r.card, "t": round(r.first_t, 4), "hk": r.hk,
                              "x_mt": None if r.birth is None else round(r.birth[0], 1),
                              "y_mt": None if r.birth is None else round(r.birth[1], 1), "derived": idx,
-                             "parts": [], "labels": {}, "forms": [], "continued": {}, "uids": []})
+                             "parts": [], "labels": {}, "forms": [], "continued": {}, "gaps": {}, "uids": []})
             where[r.key] = ("child", len(children) - 1)
             add_to("child", len(children) - 1, r, "")
             if idx is not None:
                 plays[idx]["children"].append(r.key)
         else:
-            unit = r.key
-            cands = []
+            as_spell = r.spell or r.spell_card
+            cap = None if as_spell else cap_of.get(r.card) if r.card else None
+            cands, full = [], []
             for i, pl in enumerate(plays):
                 if pl["card"] != r.card or pl["hk"] != r.hk or not -_EPS_S <= r.first_t - pl["t"] <= cfg.window_s:
                     continue
                 d = _dist_mt(pl["_birth"], r.birth)
                 if d is not None and d > cfg.radius_tiles * MT_PER_TILE:
                     continue
-                cands.append((r.first_t - pl["t"], d or 0.0, i))
+                e = (r.first_t - pl["t"], d or 0.0, i)
+                (full if cap is not None and len(pl["units"]) >= cap else cands).append(e)
+            hit, why, rule, n_late = None, "", "", None
+            if not cands and full:
+                # capacity: the deploy is full, so this is a second track on its nearest unit
+                idx = min(full)[2]
+                seen = []
+                for u in plays[idx]["units"]:
+                    pos, gap = _seen_at(latest[u], r.first_t)
+                    seen.append((_dist_mt(pos, r.birth) or 0.0, _key_order(u), u, gap))
+                _d, _o, u, gap = min(seen)
+                hit, rule = (idx, u, gap), "capacity"
+            elif not cands and not as_spell:
+                hit, why = follow(r, cfg.reach_gap_s)
+                rule = "reach"
+                if hit is None and beyond(r):
+                    # (after a cycle refusal too: zone may still find a close fit, a unit still seen)
+                    hit, why2 = follow(r, cfg.zone_gap_s, zone=True)
+                    rule, why = "zone", "cycle" if "cycle" in (why, why2) else (why or why2)
+                n_late = late(r) if hit is not None else None
             if cands:
                 idx = min(cands)[2]
                 plays[idx]["units"].append(r.key)
+                where[r.key] = ("play", idx)
+                add_to("play", idx, r, "")
+            elif hit is not None:
+                idx, u, gap = hit
+                if u is not None:                          # a later part of unit u
+                    unit = u
+                    if rule != "capacity" and latest[u].last_t > r.first_t + _EPS_S:
+                        rule = "capacity"                  # a second track on a unit still seen
+                    where[r.key] = ("play", idx)
+                    add_to("play", idx, r, rule, gap)
+                else:                                      # a new unit of that play (it has room)
+                    plays[idx]["units"].append(r.key)
+                    where[r.key] = ("play", idx)
+                    add_to("play", idx, r, rule, gap, joined=True)
+                if n_late is not None:                     # late in the cycle: the list asks the owner to look
+                    plays[idx]["cycled"][r.key] = n_late
             else:
                 idx = len(plays)
                 plays.append({"t": round(r.first_t, 4), "hk": r.hk, "card": r.card,
                               "kind": KIND_SPELL_PLAY if r.spell else KIND_UNIT_PLAY,
                               "x_mt": None if r.birth is None else round(r.birth[0], 1),
                               "y_mt": None if r.birth is None else round(r.birth[1], 1), "n": r.first_n,
-                              "units": [r.key], "parts": [], "labels": {}, "forms": [], "continued": {}, "uids": [],
-                              "children": [], "source": PLAY_DERIVED, "_birth": r.birth})
-            where[r.key] = ("play", idx)
-            add_to("play", idx, r, "")
+                              "units": [r.key], "parts": [], "labels": {}, "forms": [], "continued": {}, "joined": {},
+                              "gaps": {}, "cycled": {}, "uids": [], "children": [], "source": PLAY_DERIVED,
+                              "deploy_unseen": not as_spell and beyond(r), "new_by": why or None, "_birth": r.birth})
+                where[r.key] = ("play", idx)
+                add_to("play", idx, r, "")
         unit_of[r.key] = unit
-        latest[unit] = r
+        if unit not in latest or r.last_t >= latest[unit].last_t:
+            latest[unit] = r
         by_track[(r.h, r.part)] = r
         if r.uid:
             by_uid[r.uid] = unit
+    row_of = {r.key: r for r in rows}
     for i, pl in enumerate(plays):
         pl.pop("_birth", None)
         pl["derived"] = i
@@ -3857,6 +4228,18 @@ def derive_plays(parts: Iterable[Mapping[str, Any]], deck: Sequence[str], table:
         pl["t_rel"] = None if not battles or hk not in battles else round(pl["t"] - float(battles[hk]), 4)
         pl["tick"] = None if t0 is None else int(round((pl["t"] - float(t0)) * TICKS_PER_S))
         pl["off_deck"] = pl["card"] not in deck
+        if pl["deploy_unseen"]:
+            # the earlier parts of its tracks under another card: its deploy, labelled as something else?
+            seen = set(pl["parts"])
+            earlier = []
+            for k in pl["parts"]:
+                q = row_of[k]
+                for j in range(q.part):
+                    e = by_track.get((q.h, j))
+                    if e is not None and e.key not in seen and e.card != pl["card"]:
+                        seen.add(e.key)
+                        earlier.append({"key": e.key, "label": e.label, "t": round(e.first_t, 4)})
+            pl["earlier"] = earlier
     for c in children:
         c["form"] = max(c.pop("forms") or [FORM_BASE])
     return plays, children
@@ -3924,29 +4307,108 @@ def assemble_plays(derived: Sequence[Mapping[str, Any]], children: Sequence[Mapp
                    config: PlayConfig | None = None) -> tuple[list[dict], list[dict], list[dict]]:
     """The final list: the derived plays no deletion covers (same card, within delete_s) and the
     added ones, in time order, numbered p1, p2, ...; the children with the id of their play
-    (None when it was deleted); and the deletions that covered nothing (stale)."""
+    (None when it was deleted); and the deletions that covered nothing (stale). An added play of
+    a deploy-unseen play's card and battle, up to zone_gap_s before its first sighting (the
+    nearest), gives that play's deploy time: it replaces the derived one ("replaces": its t and
+    units), which then counts once."""
     cfg = config or PlayConfig()
     used: set[int] = set()
     keep = []
+    added = [dict(a) for a in added]
+    took: dict[int, int] = {}                     # added index -> the deploy-unseen derived play it replaces
     for j, d in enumerate(derived):
         hit = next((k for k, x in enumerate(deleted) if k not in used and x.get("card") == d.get("card")
                     and abs(float(x.get("t", 0.0)) - float(d["t"])) <= cfg.delete_s + _EPS_S), None)
         if hit is not None:
             used.add(hit)
             continue
+        if d.get("deploy_unseen"):
+            t = float(d["t"])
+            near = [(t - float(a["t"]), k) for k, a in enumerate(added)
+                    if k not in took and a.get("card") == d.get("card") and a.get("hk") == d.get("hk")
+                    and -cfg.delete_s - _EPS_S <= t - float(a["t"]) <= cfg.zone_gap_s + _EPS_S]
+            if near:
+                k = min(near, key=lambda e: (abs(e[0]), e[1]))[1]
+                took[k] = j
+                added[k]["replaces"] = {"t": d["t"], "units": list(d.get("units") or ()), "x_mt": d.get("x_mt"),
+                                        "y_mt": d.get("y_mt")}
+                continue
         keep.append((float(d["t"]), str(d.get("card")), 0, j, dict(d)))
-    keep += [(float(a["t"]), str(a.get("card")), 1, k, dict(a)) for k, a in enumerate(added)]
+    keep += [(float(a["t"]), str(a.get("card")), 1, k, a) for k, a in enumerate(added)]
     keep.sort(key=lambda e: e[:4])
     final, ids = [], {}
     for idx, (_t, _c, src, j, p) in enumerate(keep, 1):
         p["id"] = f"p{idx}"
         if src == 0:
             ids[j] = p["id"]
+        elif j in took:
+            ids[took[j]] = p["id"]                # the replaced play's children are the added one's
         final.append(p)
     kids = [dict(c, play=None if c.get("derived") is None else ids.get(int(c["derived"]))) for c in children]
     for p in final:
         p["children"] = [c["key"] for c in kids if c["play"] is not None and c["play"] == p["id"]]
     return final, kids, [dict(x) for k, x in enumerate(deleted) if k not in used]
+
+
+def cycle_since(plays: Sequence[Mapping[str, Any]]) -> list[tuple[int, int] | None]:
+    """Per play (a list in time order): (other plays since the previous play of its card in its
+    battle, that play's index), or None for its card's first play. The card cycle needs 4: a card
+    comes back to the hand after 4 other plays (8 cards, 4 in hand)."""
+    out: list[tuple[int, int] | None] = []
+    last: dict[tuple[Any, Any], int] = {}
+    count: dict[Any, int] = {}                    # battle -> plays so far
+    at: dict[int, int] = {}                       # play index -> its battle's count before it
+    for i, p in enumerate(plays):
+        hk = p.get("hk")
+        n = count.get(hk, 0)
+        at[i] = n
+        j = last.get((hk, p.get("card")))
+        out.append(None if j is None else (n - at[j] - 1, j))
+        last[(hk, p.get("card"))] = i
+        count[hk] = n + 1
+    return out
+
+
+def _gap_text(s: Any) -> str:
+    return "" if s is None else f" {float(s):.1f} s"
+
+
+def merges_text(p: Mapping[str, Any]) -> str:
+    """A play's merged parts by rule, for the list: "reach t54 3.0 s, t56 3.3 s; zone t106.0 9.5 s;
+    unit by reach t21 11.4 s; capacity t197; split t30.1" (the gap: how long the unit continued was
+    unseen, or how old the play was for a unit joined later)."""
+    gaps = p.get("gaps") or {}
+    by: dict[str, list[str]] = {}
+    for k, rule in (p.get("continued") or {}).items():
+        by.setdefault(str(rule), []).append(f"t{k}" + (_gap_text(gaps.get(k)) if rule in ("reach", "zone") else ""))
+    for k, rule in (p.get("joined") or {}).items():
+        by.setdefault(f"unit by {rule}", []).append(f"t{k}" + _gap_text(gaps.get(k)))
+    order = ["reach", "zone", "unit by reach", "unit by zone", "capacity", "reacquired", "uid", "split"]
+    return "; ".join(f"{rule} {', '.join(ks)}" for rule, ks in sorted(by.items(), key=lambda e: (
+        order.index(e[0]) if e[0] in order else len(order), e[0])))
+
+
+def flagged_merges(p: Mapping[str, Any], config: PlayConfig | None = None) -> list[tuple[str, str, float | None]]:
+    """The merges of a play the owner should look at: every zone one (a part first seen in the
+    defender's half taken for a unit of this play), reach ones over flag_gap_s, and the ones
+    made late in the card cycle ("cycled": after its card had cycled, or one play short of it, so
+    a play the labels missed would make the part a new play): (key, rule, gap)."""
+    cfg = config or PlayConfig()
+    gaps = p.get("gaps") or {}
+    cyc = p.get("cycled") or {}
+    cyc = {str(k): v for k, v in cyc.items()} if isinstance(cyc, Mapping) else {str(k): None for k in cyc}
+    out = []
+    for src in ("continued", "joined"):
+        for k, rule in (p.get(src) or {}).items():
+            g = gaps.get(k)
+            name = ("unit by " if src == "joined" else "") + str(rule)
+            if str(k) in cyc:
+                n = cyc[str(k)]
+                out.append((str(k), f"{name} after its card had cycled" if n is None or int(n) >= cfg.cycle_plays
+                            else f"{name} after {int(n)} other plays", g))
+            elif rule == "zone" or (rule == "reach" and g is not None and float(g) > cfg.flag_gap_s + _EPS_S):
+                out.append((str(k), name, g))
+    return out
 
 
 def _play_sig(plays: Iterable[Mapping[str, Any]]) -> list[tuple]:
@@ -4130,6 +4592,54 @@ def plays_fresh(paths: SessionPaths) -> list[str]:
     return reasons
 
 
+def _play_checks(final: Sequence[Mapping[str, Any]], battles: Mapping[int, float], cfg: PlayConfig) -> list[str]:
+    """What the owner should check before --confirm: deploy-unseen plays, merges from afar
+    (flagged_merges) and plays the card cycle says need a play the labels missed (cycle_since)."""
+    out: list[tuple[int, int, str]] = []         # (play index, order, text): by play
+
+    def when(p: Mapping[str, Any]) -> tuple[str, str]:
+        hk = p.get("hk")
+        rel = None if hk not in battles else float(p["t"]) - float(battles[hk])
+        pre = f"b{hk}/" if len(battles) > 1 and hk is not None else ""
+        return pre, clock_text(rel)
+
+    for i, p in enumerate(final):
+        if p.get("source") != PLAY_DERIVED:
+            continue
+        pid, card = p["id"], p["card"]
+        if p.get("deploy_unseen"):
+            pre, at_t = when(p)
+            at = "" if p.get("x_mt") is None else f" at ({p['x_mt'] / MT_PER_TILE:.1f}, {p['y_mt'] / MT_PER_TILE:.1f})"
+            earlier = ", ".join(f"t{e['key']} ({e['label']})" for e in p.get("earlier") or ())
+            why = (f"where an earlier {card} unit could have walked, but {int(cfg.cycle_plays)} or more other plays came "
+                   f"since its card's last play, so it is taken for a new play" if p.get("new_by") == "cycle" else
+                   f"with no earlier {card} unit that could have walked there")
+            out.append((i, 0, f"{pid} {card} is a play whose deploy went unseen: first seen {pre}{at_t}{at}, in "
+                        f"Yodle2's half, {why}; it is dated at that first sighting, as M0 dates one. "
+                        + (f"Its track began earlier as {earlier}: if that is its deploy, label it {card} "
+                           "(label --force). " if earlier else "")
+                        + f'--add-play "{pre}m:ss={card}" with the deploy time replaces it; --bad-plays {pid} if it '
+                        "is no play"))
+        far = flagged_merges(p, cfg)
+        if far:
+            cyc = {str(k) for k in p.get("cycled") or ()}
+            out.append((i, 1, f"{pid} {card}: check the parts taken for its units: "
+                        + ", ".join(f"t{k} ({rule}," + (f"{_gap_text(g)} after the deploy)" if rule.startswith("unit")
+                                                       else f"{_gap_text(g)} unseen)") for k, rule, g in far)
+                        + f"; if one is a new {card} play, --add-play it"
+                        + (f" (a card is back in the hand after {int(cfg.cycle_plays)} other plays: a part merged after "
+                           "that may be a new play, and so may one merged a play short of it when the labels missed a "
+                           "play between, such as a Zap)" if any(k in cyc for k, _r, _g in far) else "")))
+    for i, (p, c) in enumerate(zip(final, cycle_since(final))):
+        if c is None or cfg.cycle_plays <= 0 or c[0] >= cfg.cycle_plays:
+            continue
+        q = final[c[1]]
+        out.append((i, 2, f"{p['id']} {p['card']} comes only {c[0]} play(s) after {q['id']} {q['card']}: a card is "
+                    f"back in the hand after {int(cfg.cycle_plays)} others, so a play the labels missed lies between "
+                    f"them (--add-play it), or {p['id']} is no new play (--bad-plays {p['id']})"))
+    return [text for _i, _o, text in sorted(out, key=lambda e: e[:2])]
+
+
 @dataclass
 class PlaysResult:
     sid: str
@@ -4232,9 +4742,9 @@ def plays_session(sid: str, *, list_no: int | None = None, bad_plays: str | None
     derived, children = derive_plays(label_parts, deck_names, table, known, config=cfg, battles=battles,
                                      event_cards=events, t0=t0)
     if edits and old is not None and _play_sig(derived) != _play_sig(old.get("derived") or ()):
-        raise LabelError(f"the plays derived now differ from list {old_list}'s (the label set, the event cards or "
-                         f"--window-s / --radius-tiles changed since): run plays {sid} without edits, check the new "
-                         "list, then edit or confirm that one", EXIT_CHECK)
+        raise LabelError(f"the plays derived now differ from list {old_list}'s (the label set, the event cards, "
+                         "--window-s / --radius-tiles or another play rule changed since): run plays "
+                         f"{sid} without edits, check the new list, then edit or confirm that one", EXIT_CHECK)
     # our own units the sheet showed (o): their ally label is gold.jsonl's, the deck Yodle2's
     own_votes: dict[str, Counter] = {}
     for r in gold_rows:
@@ -4244,7 +4754,7 @@ def plays_session(sid: str, *, list_no: int | None = None, bad_plays: str | None
     own_labels = {k: min(v, key=lambda lb: (-v[lb], lb)) for k, v in own_votes.items()}
     own_parts = [p for p in parts.values() if p.get("decision") == PART_OURS]
     own, _own_children = derive_plays(own_parts, list(OUR_DECK), table, known, config=cfg, battles=battles,
-                                      event_cards=events, labels=own_labels, t0=t0)
+                                      event_cards=events, labels=own_labels, t0=t0, owner_top=False)
     now = datetime.fromtimestamp(clock()).isoformat(timespec="seconds")
     deleted = [dict(d) for d in (old or {}).get("deleted") or () if isinstance(d, Mapping)]
     added = [dict(a) for a in (old or {}).get("added") or () if isinstance(a, Mapping)]
@@ -4304,6 +4814,8 @@ def plays_session(sid: str, *, list_no: int | None = None, bad_plays: str | None
         confirmed, confirmed_at = False, None
         if old and old.get("confirmed"):
             warnings.append(f"the play list changed since list {old_list} was confirmed: check it and --confirm again")
+    if not confirmed:
+        warnings += _play_checks(final, battles, cfg)
     history = list((old or {}).get("history") or [])
     history.append({"at": now, "list": old_list + 1, "bad_plays": bad_plays or None, "add_plays": list(add_plays) or None,
                     "confirm": bool(confirm), "plays": len(final)})
@@ -5315,7 +5827,10 @@ def _cmd_plays(args) -> int:
     try:
         table = load_table(args.classes)
         registry = Registry.load(args.registry) if args.registry else None
-        cfg = PlayConfig(window_s=args.window_s, radius_tiles=args.radius_tiles)
+        cfg = PlayConfig(window_s=args.window_s, radius_tiles=args.radius_tiles, reach_gap_s=args.reach_gap_s,
+                         reach_margin_tiles=args.reach_margin_tiles, zone_y_tiles=args.zone_y_tiles,
+                         zone_gap_s=args.zone_gap_s, back_tiles=args.back_tiles, cycle_plays=args.cycle_plays,
+                         flag_gap_s=args.flag_gap_s)
     except (RegistryError, OSError, ValueError) as exc:
         print(f"error: {exc}")
         return EXIT_INPUT
@@ -5328,6 +5843,7 @@ def _cmd_plays(args) -> int:
         _print_problems("plays refused, nothing stored:", exc.problems)
         return exc.code
     d, sid = res.doc, res.sid
+    res_cfg = cfg
     state = "confirmed" if d["confirmed"] else "not confirmed"
     print(f"{sid} play list {res.list_no}{' (dry run: not stored)' if not res.written else ''}: {len(res.plays)} "
           f"play(s), {state}; {len(d['derived'])} derived, {len(d['deleted'])} deleted, {len(d['added'])} added")
@@ -5338,8 +5854,20 @@ def _cmd_plays(args) -> int:
         units = " ".join("t" + k for k in p.get("units") or ())
         what = f"{len(p.get('units') or ())} unit(s)" if p.get("source") == PLAY_DERIVED else f"added ({p.get('spec')})"
         kids = " ".join("t" + k for k in p.get("children") or ())
+        rep = p.get("replaces") or {}
+        tags = [t for t, on in (("deploy unseen", p.get("deploy_unseen")),
+                                ("new: its card had cycled", p.get("new_by") == "cycle"),
+                                ("new: behind the last one's units", p.get("new_by") == "behind"),
+                                (f"replaces the deploy unseen at t {rep.get('t')}", bool(rep)))
+                if on]
         print(f"  {p['id']:>4}  {clock_text(p.get('t_rel')):>7}  {str(p['card']) + form:26s} {what:16s}{at}{m0}"
-              + (f"  [{units}]" if units else "") + (f"  children {kids}" if kids else ""))
+              + (f"  [{units}]" if units else "") + (f"  children {kids}" if kids else "")
+              + "".join(f"  ({t})" for t in tags))
+        merged = merges_text(p)
+        if merged:
+            far = {k for k, _rule, _g in flagged_merges(p, res_cfg)}
+            print(f"          + {merged}" + (f"   <- check {' '.join('t' + k for k in sorted(far, key=_key_order))}"
+                                             if far else ""))
     alone = [c for c in res.children if c.get("play") is None]
     if alone:
         print(f"  {len(alone)} spawned unit(s) with no play of their card (not plays): "
@@ -5574,8 +6102,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-pending", action="store_true",
                    help="confirm although the gold emit left tracks unlabelled (emit --allow-pending): their plays "
                         "are missing from the list")
-    p.add_argument("--window-s", type=float, default=1.0, help="units of one card born this close in time are one play")
-    p.add_argument("--radius-tiles", type=float, default=3.0, help="... and this close to its first unit")
+    play_defaults = PlayConfig()
+    p.add_argument("--window-s", type=float, default=play_defaults.window_s,
+                   help="units of one card born this close in time are one play")
+    p.add_argument("--radius-tiles", type=float, default=play_defaults.radius_tiles,
+                   help="... and this close to its first unit")
+    p.add_argument("--reach-gap-s", type=float, default=play_defaults.reach_gap_s,
+                   help="reach: a unit lost up to this long before is found again within its walk (0: off)")
+    p.add_argument("--reach-margin-tiles", type=float, default=play_defaults.reach_margin_tiles,
+                   help="reach: the walk's slack in tiles (and how near a second track is to a unit still seen)")
+    p.add_argument("--zone-y-tiles", type=float, default=play_defaults.zone_y_tiles,
+                   help="deploy zone: a unit first seen this far into the arena (the opponent's y; ours 32 - y) is in "
+                        "the defender's half, where no play starts (32: off)")
+    p.add_argument("--zone-gap-s", type=float, default=play_defaults.zone_gap_s,
+                   help="zone: such a unit continues one of its card lost up to this long before, within its walk")
+    p.add_argument("--back-tiles", type=float, default=play_defaults.back_tiles,
+                   help="a part in its owner's deploy zone this far behind a unit's last sighting is not that unit")
+    p.add_argument("--cycle-plays", type=int, default=play_defaults.cycle_plays,
+                   help="card cycle: after this many other plays a card may be played again, so a part continues no "
+                        "unit lost before (0: off)")
+    p.add_argument("--flag-gap-s", type=float, default=play_defaults.flag_gap_s,
+                   help="the list warns of reach merges over this gap (and of every zone merge)")
     p.add_argument("--dry-run", action="store_true", help="show the list, store nothing")
     p.set_defaults(func=_cmd_plays)
 

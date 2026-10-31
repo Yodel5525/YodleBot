@@ -16,7 +16,24 @@ docs/NEW_CARDS_PLAN.md 5 and N12. Checked:
   additions by list, confirmation, and the freshness the gate checks; a live uid passed on to a
   later unit, or shared by two at once, joins no play; M0 at the play's own tick; a dry run's
   next step; tracks left unlabelled (emit --allow-pending) and a changed derivation refuse a
-  confirmation; review numbers go on after the review folder is deleted.
+  confirmation; review numbers go on after the review folder is deleted;
+* fragmented gold tracks as Round 0's list 1 had them, each one play under the capacity, reach and
+  deploy-zone rules (and several under the old ones): Guards found again at their spot 4 s on and
+  down the lane, a Minion Horde seen as six plays, an Elite Barbarian pair walking down a lane, three
+  Hog Rider parts in 7 s; a new play of the card 20 s later stays separate; the speed and unit
+  tables, and the river pinned to scripts/vision/geometry;
+* the review's breaks, each refused: a part past the river joins only a unit that could have walked
+  there (or one still seen within the margin); a part in its deploy zone behind a lost unit, or once
+  its card has cycled (4 other plays), is a new play, unless it is a close fit (a long-lived unit's
+  track lost 3 s, flagged); a champion cycles from her last sighting; a merge one missed play short
+  of the cycle is flagged; a part past the river no unit explains is a play whose deploy went
+  unseen, which a part back in the deploy zone never continues (rule 1, a live uid or reach); a
+  second track leaves a unit's latest part alone; spell cards' units that no card summons (Heal)
+  keep the spell rules, the Spirit Empress' forms are troops; a capacity overflow in the deploy window
+  joins the deploy; a deploy-unseen play's earlier parts under another card; the
+  two sides' deploy zones mirror each other; the list prints each play's merges by rule and warns
+  of zone merges, long reach gaps and cycle gaps until confirmed, and an --add-play replaces a
+  deploy-unseen play; the CLI's rule flags.
 Synthetic fixtures only (npy images): no image codec, GPU, engine or emulator. The plays and
 mark-parsing tests need no numpy.
 """
@@ -295,21 +312,22 @@ def gold_part(key, label, t, xy, *, last_t=None, last=None, uid=None, h=None, pa
             "birth": list(xy), "last": list(last or xy), "skipped": 0, "boxes": []}
 
 
-R0_PARTS = [gold_part("10", "SkeletonWarrior", 20.0, (9000, 20000), uid="1:10"),       # Guards: 3 units
-            gold_part("11", "SkeletonWarrior", 20.1, (9500, 20300), uid="1:11"),
-            gold_part("12", "SkeletonWarrior", 20.3, (8600, 20400), uid="1:12"),
-            gold_part("20", "AngryBarbarian", 30.0, (4000, 22000)),                      # Elite Barbarians: 2
-            gold_part("21", "AngryBarbarian", 30.05, (4800, 22000)),
+# the opponent deploys in the top half (y < 15 tiles; the river is y 15-17), we in the bottom one
+R0_PARTS = [gold_part("10", "SkeletonWarrior", 20.0, (9000, 12000), uid="1:10"),       # Guards: 3 units
+            gold_part("11", "SkeletonWarrior", 20.1, (9500, 11700), uid="1:11"),
+            gold_part("12", "SkeletonWarrior", 20.3, (8600, 11600), uid="1:12"),
+            gold_part("20", "AngryBarbarian", 30.0, (4000, 10000)),                      # Elite Barbarians: 2
+            gold_part("21", "AngryBarbarian", 30.05, (4800, 10000)),
             # Boss Bandit: a look change (part 1 of h30), then a new harvest track of the same live uid
-            gold_part("30.0", "BossBandit", 40.0, (14000, 24000), last_t=43.0, last=(14000, 20000), uid="1:30", h=30),
-            gold_part("30.1", "BossBandit", 43.05, (14000, 19900), last_t=44.0, last=(14000, 18000), h=30, part=1),
+            gold_part("30.0", "BossBandit", 40.0, (14000, 8000), last_t=43.0, last=(14000, 12000), uid="1:30", h=30),
+            gold_part("30.1", "BossBandit", 43.05, (14000, 12100), last_t=44.0, last=(14000, 14000), h=30, part=1),
             gold_part("31", "BossBandit", 45.0, (14000, 15000), last_t=50.0, uid="1:30"),
             *[gold_part(str(40 + j), "Minion" if j < 3 else "MinionHorde_EV1", 50.0 + 0.05 * j,
                         (9000 + 300 * j, 14000 + 200 * j), uid=f"1:{40 + j}") for j in range(6)],   # the evo Horde
             gold_part("50", "zap", 60.0, (9000, 12000)),
-            gold_part("59", "SuspiciousBush", 65.0, (5000, 20000)),                     # off the declared deck
-            gold_part("60", "BushGoblin", 70.0, (5100, 20100)),                         # its child
-            gold_part("70", None, 40.0, (3000, 6000), decision="ours", n=300)]          # one of ours (o)
+            gold_part("59", "SuspiciousBush", 65.0, (5000, 12000)),                     # off the declared deck
+            gold_part("60", "BushGoblin", 70.0, (5100, 12100)),                         # its child
+            gold_part("70", None, 40.0, (3000, 26000), decision="ours", n=300)]         # one of ours (o)
 
 
 def hand_gold(tmp_path, keys, parts=R0_PARTS):
@@ -340,7 +358,7 @@ def hand_gold(tmp_path, keys, parts=R0_PARTS):
     paths.scan_dir.mkdir(parents=True)
     live = [{"n": 0, "t": 10.0, "plays": []},
             {"n": 303, "t": 40.3, "plays": [{"card": 12, "card_name": "GoldenKnight", "tick": 606, "x_mt": 14100,
-                                             "y_mt": 23900, "kind": "unit"}]},
+                                             "y_mt": 8100, "kind": "unit"}]},
             {"n": 502, "t": 60.2, "plays": [{"card": 40, "card_name": "Zap", "tick": 1004, "x_mt": 9000, "y_mt": 12000,
                                              "kind": "spell"}]},
             {"n": 700, "t": 80.0, "plays": [{"card": 7, "card_name": "Minions", "tick": 1400, "x_mt": 3000,
@@ -376,11 +394,12 @@ def test_plays_from_hand_made_gold_tracks(tmp_path, keys, capsys):
     # comparable with EventDeriver's OppPlay: absolute t (the capture clock), the first unit's position,
     # the time tick vision_replay --ticks time would give (20 a second from the first image)
     assert (boss["t"], boss["t_rel"], boss["x_mt"], boss["y_mt"], boss["tick"], boss["n"], boss["i"]) == (
-        40.0, 30.0, 14000.0, 24000.0, 600, 300, 1500)
+        40.0, 30.0, 14000.0, 8000.0, 600, 300, 1500)
     assert res.plays[3]["labels"] == {"Minion": 3, "MinionHorde_EV1": 3}
     assert res.plays[5]["off_deck"] and res.plays[5]["children"] == ["60"]
     assert [(c["key"], c["play"]) for c in res.children] == [("60", "p6")]
-    assert [(p["card"], p["units"]) for p in res.own] == [("HogRider", ["70"])]
+    # ours at y 26 is in our own deploy zone (the bottom one): no deploy-unseen play
+    assert [(p["card"], p["units"], p["deploy_unseen"]) for p in res.own] == [("HogRider", ["70"], False)]
     assert res.doc["m0"] == {"matched": 1, "read": 2, "of": 6, "live": 3, "phantoms": 1}
     assert any("p6 SuspiciousBush is not in the declared deck" in w for w in res.warnings)
     assert res.list_no == 1 and not res.doc["confirmed"] and VA.plays_fresh(paths) == [VA.PLAYS_UNCONFIRMED]
@@ -479,9 +498,9 @@ def test_a_live_uid_alone_does_not_merge_plays(keys):
     deck = [c.card for c in VA.parse_deck(R0_DECK, VA.CardResolver(TABLE, keys, EVENTS))]
     # Guards at 20.0; 16 s later a new Guards play whose first unit got the uid 1:10 back (the tracker
     # keeps a uid for a unit of the class born where one died): two plays, the second whole
-    later = [gold_part("80", "SkeletonWarrior", 36.1, (9000, 20000), uid="1:10"),
-             gold_part("81", "SkeletonWarrior", 36.2, (9400, 20200), uid="1:81"),
-             gold_part("82", "SkeletonWarrior", 36.3, (8700, 20300), uid="1:82")]
+    later = [gold_part("80", "SkeletonWarrior", 36.1, (9000, 12000), uid="1:10"),
+             gold_part("81", "SkeletonWarrior", 36.2, (9400, 11800), uid="1:81"),
+             gold_part("82", "SkeletonWarrior", 36.3, (8700, 11700), uid="1:82")]
     plays, _kids = VA.derive_plays(R0_PARTS[:3] + later, deck, TABLE, event_cards=EVENTS)
     assert [(p["card"], p["t"], p["units"]) for p in plays] == [("SkeletonWarriors", 20.0, ["10", "11", "12"]),
                                                                ("SkeletonWarriors", 36.1, ["80", "81", "82"])]
@@ -494,9 +513,466 @@ def test_a_live_uid_alone_does_not_merge_plays(keys):
     # the same uid born soon after the unit's last part ended continues it (Boss Bandit 30.1 -> 31: 1.0 s)
     plays, _kids = VA.derive_plays(R0_PARTS[5:8], deck, TABLE, event_cards=EVENTS)
     assert len(plays) == 1 and plays[0]["continued"] == {"30.1": "split", "31": "uid"}
-    late = dict(R0_PARTS[7], first_t=45.6, last_t=50.0)                  # 1.6 s after 30.1 ended: a new play
+    # 1.6 s after 30.1 ended (past reacquire_s), 11 tiles from where it was (past its reach): the uid alone
+    # joins nothing, a new play
+    late = dict(R0_PARTS[7], first_t=45.6, last_t=50.0, birth=[3000, 12000], last=[3000, 12000])
     plays, _kids = VA.derive_plays(R0_PARTS[5:7] + [late], deck, TABLE, event_cards=EVENTS)
     assert [p["units"] for p in plays] == [["30.0"], ["31"]]
+    # the same 1.6 s later 1 tile on (within its reach: 1.5 tiles/s x 1.25 x 1.6 s + 2): the unit found again
+    late = dict(R0_PARTS[7], first_t=45.6, last_t=50.0)
+    plays, _kids = VA.derive_plays(R0_PARTS[5:7] + [late], deck, TABLE, event_cards=EVENTS)
+    assert [p["units"] for p in plays] == [["30.0"]] and plays[0]["continued"] == {"30.1": "split", "31": "reach"}
+
+
+# Round 0's play list 1 (60 derived plays for about 18) over-counted fragmented tracks; the tests below
+# rebuild its patterns (keys as on that list). OLD_RULES: no reach and no deploy-zone rule, as before.
+OLD_RULES = VA.PlayConfig(reach_gap_s=0.0, zone_y_tiles=32.0)
+
+
+def r0_cards(keys):
+    return [c.card for c in VA.parse_deck(R0_DECK, VA.CardResolver(TABLE, keys, EVENTS))]
+
+
+def test_play_tables_and_the_river():
+    speeds = VA.load_speeds()
+    # RoyaleAPI's Speed / 60 (tiles a second); the Boss Bandit from SPEED_EXTRA
+    assert {c: speeds[c] for c in ("SkeletonWarrior", "Minion", "AngryBarbarian", "HogRider", "AxeMan", "BossBandit")} == {
+        "SkeletonWarrior": 1.5, "Minion": 1.5, "AngryBarbarian": 1.5, "HogRider": 2.0, "AxeMan": 1.0, "BossBandit": 1.5}
+    units = VA.load_units_per_play()
+    assert {c: units.get(c) for c in ("SkeletonWarriors", "MinionHorde", "AngryBarbarians", "HogRider", "AxeMan",
+                                      "BossBandit", "Zap", "MergeMaiden")} == {
+        "SkeletonWarriors": 3, "MinionHorde": 6, "AngryBarbarians": 2, "HogRider": 1, "AxeMan": 1, "BossBandit": 1,
+        "Zap": None, "MergeMaiden": None}                     # a spell, and a card with forms: no cap
+    assert VA.load_speeds("no/such/table.json") == VA.SPEED_EXTRA and VA.load_units_per_play("no/such.json") == {}
+    pytest.importorskip("numpy")
+    from scripts.vision import geometry as G
+    assert VA.ARENA_Y_MT == G.HEIGHT_MT and VA.PlayConfig().zone_y_tiles * VA.MT_PER_TILE == G.RIVER_Y_MT[1]
+
+
+def test_a_guards_play_fragmented_at_its_spot_is_one_play(keys):
+    deck = r0_cards(keys)
+    # two guards put down at the right princess tower and lost at 21.0; 3.0 and 3.3 s later (past reacquire_s)
+    # two parts near where they were lost; then one 11 tiles down the lane, in Yodle2's half (p1, p3, p4, p7)
+    parts = [gold_part("36", "SkeletonWarrior", 20.0, (14400, 8700), last_t=21.0, last=(14500, 8800)),
+             gold_part("38.0", "SkeletonWarrior", 20.1, (15000, 8500), last_t=21.0, last=(15100, 8600), h=38),
+             gold_part("54", "SkeletonWarrior", 24.0, (16500, 7700), last_t=26.0),
+             gold_part("56", "SkeletonWarrior", 24.3, (13500, 9000), last_t=26.0, last=(13600, 12000)),
+             gold_part("106.0", "SkeletonWarrior", 31.9, (14100, 20300), h=106)]
+    plays, kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS)
+    assert kids == [] and [(p["card"], p["t"], p["units"]) for p in plays] == [("SkeletonWarriors", 20.0, ["36", "38.0"])]
+    # each a lost guard found again within 1.5 tiles/s x 1.25 x the gap + 2 tiles of where it was last seen
+    assert plays[0]["continued"] == {"54": "reach", "56": "reach", "106.0": "reach"}
+    assert plays[0]["parts"] == ["36", "38.0", "54", "56", "106.0"]
+    old, _kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS, config=OLD_RULES)
+    assert [p["units"] for p in old] == [["36", "38.0"], ["54"], ["56"], ["106.0"]]          # list 1's p1 p3 p4 p7
+
+
+def test_a_minion_horde_seen_as_six_plays_is_one(keys):
+    deck = r0_cards(keys)
+
+    def walk(key, t, xy, last_t, dy, **kw):
+        return gold_part(key, "Minion", t, xy, last_t=last_t, last=(xy[0], xy[1] + dy), **kw)
+    # 3 minions boxed at 39.7, 3 more 1.2 s and 3 tiles off (past window_s and radius_tiles), then 7 parts more
+    # of the same 6 (p10-p15 of list 1): one of them a second track on a minion while all 6 are seen
+    parts = [walk("169.0", 39.7, (15900, 6700), 42.0, 3000, h=169), walk("171.0", 39.75, (16400, 6900), 42.0, 3000, h=171),
+             walk("174.1", 39.8, (15400, 6900), 42.0, 3000, h=174, part=1),
+             walk("178.0", 40.9, (13900, 9000), 42.2, 1500, h=178), walk("177.1", 40.95, (14400, 9200), 42.2, 1500, h=177,
+                                                                          part=1),
+             walk("196", 41.0, (13400, 9200), 42.2, 1500),
+             gold_part("197", "Minion", 41.1, (13950, 9150), last_t=41.6),            # on top of 178.0, which is seen
+             gold_part("198", "Minion", 42.5, (14600, 10300)), gold_part("199.0", "Minion", 42.55, (15300, 10500), h=199),
+             gold_part("202", "Minion", 44.1, (14600, 9800)),
+             gold_part("221.0", "Minion", 47.9, (13200, 14200), h=221), gold_part("224", "Minion", 47.95, (14000, 14000)),
+             gold_part("237", "Minion", 50.6, (14800, 19900))]
+    plays, kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS)
+    assert kids == [] and len(plays) == 1
+    p = plays[0]
+    # six units (MinionHorde deploys 6: capacity); the second three join as units unseen since the deploy
+    assert p["units"] == ["169.0", "171.0", "174.1", "178.0", "177.1", "196"] and len(p["parts"]) == 13
+    # 197 is a second track on 178.0, seen while the play is full (capacity)
+    assert p["continued"] == {"197": "capacity", "198": "reacquired", "199.0": "reacquired", "202": "reach",
+                              "221.0": "reach", "224": "reach", "237": "reach"}
+    assert p["joined"] == {"178.0": "reach", "177.1": "reach", "196": "reach"} and p["gaps"]["178.0"] == 1.2
+    old, _kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS, config=OLD_RULES)
+    assert [q["t"] for q in old] == [39.7, 40.9, 44.1, 47.9, 50.6]
+
+
+def test_an_elite_barbarian_pair_walking_down_a_lane_is_one_play(keys):
+    deck = r0_cards(keys)
+    # put down behind the king tower (1.1 s apart: past window_s), a second track on the right one while both are
+    # seen, then the left one found again three times down the left lane and the right one once, in Yodle2's
+    # half (p16-p22)
+    parts = [gold_part("246", "AngryBarbarian", 57.9, (7800, 300), last_t=60.0, last=(6800, 3500)),
+             gold_part("248", "AngryBarbarian", 59.0, (9800, 1300), last_t=61.0, last=(11000, 4800)),
+             gold_part("247.1", "AngryBarbarian", 59.05, (9900, 1400), last_t=59.6, h=247, part=1),
+             gold_part("252", "AngryBarbarian", 63.5, (4900, 9700), last_t=64.5, last=(4300, 11500)),
+             gold_part("226.1", "AngryBarbarian", 67.9, (3800, 16900), last_t=69.0, last=(4500, 18500), h=226, part=1),
+             gold_part("280", "AngryBarbarian", 69.3, (14300, 18800)),
+             gold_part("283", "AngryBarbarian", 70.6, (6000, 18600))]
+    plays, kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS)
+    assert kids == [] and [(p["t"], p["units"], p["cost"]) for p in plays] == [(57.9, ["246", "248"], 6)]
+    assert plays[0]["continued"] == {"247.1": "capacity", "252": "reach", "226.1": "reach", "280": "reach",
+                                     "283": "reach"}
+    old, _kids = VA.derive_plays(parts, deck, TABLE, event_cards=EVENTS, config=OLD_RULES)
+    assert [q["units"] for q in old] == [["246"], ["248", "247.1"], ["252"], ["226.1"], ["280"], ["283"]]
+
+
+def test_three_hog_rider_parts_in_7_s_are_one_play(keys):
+    deck = r0_cards(keys)
+    # put down at the right bridge, lost over the river, found in Yodle2's half 1.8 s later, then again 2.9 s
+    # later where the Cannon pulled it (p6, p8, p9: three plays on list 1, and a Hog Rider costs 4)
+    hog = [gold_part("100", "HogRider", 22.0, (14300, 14300), last_t=23.0, last=(14300, 18300)),
+           gold_part("72.1", "HogRider", 24.8, (14600, 19900), last_t=26.0, last=(14000, 21500), h=72, part=1),
+           gold_part("120.1", "HogRider", 28.9, (12900, 22100), h=120, part=1)]
+    plays, kids = VA.derive_plays(hog, deck, TABLE, event_cards=EVENTS)
+    assert kids == [] and [(p["t"], p["units"], p["cost"]) for p in plays] == [(22.0, ["100"], 4)]
+    assert plays[0]["continued"] == {"72.1": "reach", "120.1": "reach"}
+    # without the reach rule the deploy zone still holds them: neither starts in Yodle2's half, and the play
+    # is full (1 unit), so both continue its unit
+    plays, _kids = VA.derive_plays(hog, deck, TABLE, event_cards=EVENTS, config=VA.PlayConfig(reach_gap_s=0.0))
+    assert len(plays) == 1 and plays[0]["continued"] == {"72.1": "zone", "120.1": "zone"}
+    assert len(VA.derive_plays(hog, deck, TABLE, event_cards=EVENTS, config=OLD_RULES)[0]) == 3
+    # its deploy unlabelled: the first part seen is in Yodle2's half, where no play starts, and no earlier Hog
+    # Rider could have walked there: a play whose deploy went unseen, dated at that first sighting (as M0
+    # dates one), and the next part continues it
+    plays, kids = VA.derive_plays(hog[1:], deck, TABLE, event_cards=EVENTS)
+    assert kids == [] and [(p["t"], p["units"], p["parts"], p["continued"], p["deploy_unseen"], p["earlier"])
+                           for p in plays] == [(24.8, ["72.1"], ["72.1", "120.1"], {"120.1": "reach"}, True, [])]
+    # its track began as another card's part (the deploy, labelled Boss Bandit?): named for the owner to check
+    boss = gold_part("72.0", "BossBandit", 21.9, (14300, 14000), last_t=24.7, last=(14500, 19500), h=72)
+    plays, _kids = VA.derive_plays([boss] + hog[1:], deck, TABLE, event_cards=EVENTS)
+    assert [(p["card"], p["deploy_unseen"]) for p in plays] == [("BossBandit", False), ("HogRider", True)]
+    assert plays[1]["earlier"] == [{"key": "72.0", "label": "BossBandit", "t": 21.9}]
+    # our own units deploy in the bottom half: the defender's half is the top one (71: 28 s after 70 was last
+    # seen, past zone_gap_s)
+    ours = [dict(gold_part("70", None, 40.0, (3000, 26000), decision="ours")),
+            dict(gold_part("71", None, 70.0, (3000, 6000), decision="ours"))]
+    own, kids = VA.derive_plays(ours, list(VA.OUR_DECK), TABLE, event_cards=EVENTS,
+                                labels={"70": "HogRider", "71": "HogRider"}, owner_top=False)
+    assert kids == [] and [(p["units"], p["deploy_unseen"]) for p in own] == [(["70"], False), (["71"], True)]
+    # the two deploy zones mirror each other: ours ends at y 17 where the opponent's defender half begins
+    for y, past in ((14900, True), (15000, True), (15100, False), (17000, False)):
+        own, _ = VA.derive_plays([gold_part("70", None, 0.0, (3000, y), decision="ours")], list(VA.OUR_DECK), TABLE,
+                                 event_cards=EVENTS, labels={"70": "HogRider"}, owner_top=False)
+        opp, _ = VA.derive_plays([gold_part("70", "HogRider", 0.0, (3000, 32000 - y))], deck, TABLE, event_cards=EVENTS)
+        assert own[0]["deploy_unseen"] is past and opp[0]["deploy_unseen"] is past, y
+
+
+def test_a_new_play_of_the_card_20_s_later_stays_separate(keys):
+    deck = r0_cards(keys)
+
+    def guards(k0, t, last_t, last_y):
+        return [gold_part(str(k0 + j), "SkeletonWarrior", t + 0.1 * j, (14400 + 500 * j, 8700), last_t=last_t,
+                          last=(14200 + 500 * j, last_y)) for j in range(3)]
+    # walked to the bridge and last seen 14 s before the next Guards at the same tower (past reach_gap_s)
+    plays, kids = VA.derive_plays(guards(10, 20.0, 26.0, 14000) + guards(20, 40.0, 46.0, 14000), deck, TABLE,
+                                  event_cards=EVENTS)
+    assert kids == [] and [(p["t"], p["units"]) for p in plays] == [(20.0, ["10", "11", "12"]), (40.0, ["20", "21", "22"])]
+    assert all(not p["continued"] for p in plays)
+    # still held at the tower when the next ones land: a seen unit is no unit found again, and the full play is
+    # more than reach_gap_s old, so the new parts are no second tracks on it either
+    plays, kids = VA.derive_plays(guards(10, 20.0, 45.0, 9000) + guards(20, 40.0, 46.0, 14000), deck, TABLE,
+                                  event_cards=EVENTS)
+    assert [(p["t"], p["units"]) for p in plays] == [(20.0, ["10", "11", "12"]), (40.0, ["20", "21", "22"])]
+    assert all(not p["continued"] for p in plays)
+
+
+def derive(parts, keys, **kw):
+    return VA.derive_plays(parts, r0_cards(keys), TABLE, event_cards=EVENTS, **kw)
+
+
+def describe(plays):
+    return [(p["t"], p["card"], p["units"], p["continued"], p["deploy_unseen"], p["new_by"]) for p in plays]
+
+
+def test_a_part_past_the_river_joins_only_a_unit_that_could_have_walked_there(keys):
+    # an Executioner lost at 10 s in the right lane; 15 s later (past reach_gap_s, within zone_gap_s) one first
+    # seen past the river 8 tiles down that lane: within its walk (1.0 tile/s x 1.25 x 15 s + 2 = 20.75), the
+    # unit found again (zone); one 22.6 tiles off in the other lane is not, so its deploy went unseen
+    exe = gold_part("10", "AxeMan", 0.0, (14000, 8000), last_t=10.0, last=(14000, 10000))
+    near = gold_part("20", "AxeMan", 25.0, (14000, 18000), last_t=27.0)
+    far = gold_part("20", "AxeMan", 25.0, (3500, 30000), last_t=27.0)
+    plays, kids = derive([exe, near], keys)
+    assert kids == [] and describe(plays) == [(0.0, "AxeMan", ["10"], {"20": "zone"}, False, None)]
+    assert plays[0]["gaps"] == {"20": 15.0} and VA.flagged_merges(plays[0]) == [("20", "zone", 15.0)]
+    assert describe(derive([exe, far], keys)[0]) == [(0.0, "AxeMan", ["10"], {}, False, None),
+                                                     (25.0, "AxeMan", ["20"], {}, True, None)]
+    # Elite Barbarians still seen at Yodle2's right tower: a pair first seen past the river in the other lane is a
+    # play whose deploy went unseen; a part on top of one of them (within reach_margin_tiles) is a second track
+    pair = [gold_part("10", "AngryBarbarian", 0.0, (14000, 9000), last_t=35.0, last=(14000, 26000)),
+            gold_part("11", "AngryBarbarian", 0.05, (14800, 9000), last_t=35.0, last=(14800, 26000))]
+    other = [gold_part("20", "AngryBarbarian", 30.0, (3500, 17200), last_t=34.0, last=(3500, 24000)),
+             gold_part("21", "AngryBarbarian", 30.05, (4300, 17200), last_t=34.0, last=(4300, 24000))]
+    on_top = gold_part("30", "AngryBarbarian", 31.0, (14000, 23500), last_t=32.0)
+    plays, _kids = derive(pair + other + [on_top], keys)
+    assert describe(plays) == [(0.0, "AngryBarbarians", ["10", "11"], {"30": "capacity"}, False, None),
+                               (30.0, "AngryBarbarians", ["20", "21"], {}, True, None)]
+
+
+def others(t0, t1, skip, n=4):
+    """One play each of n other cards between t0 and t1 (4: what the card cycle needs before a card comes back)."""
+    labels = [lab for card, lab in (("Zap", "zap"), ("HogRider", "HogRider"), ("BossBandit", "BossBandit"),
+                                    ("AxeMan", "AxeMan"), ("MinionHorde", "MinionHorde_EV1")) if card != skip][:n]
+    return [gold_part(str(900 + j), lab, t0 + (t1 - t0) * (j + 1) / (n + 1.0), (2000 + 4000 * j, 6000), last_t=t0 + 1.0)
+            for j, lab in enumerate(labels)]
+
+
+def test_a_new_play_behind_the_last_units_or_after_a_cycle_is_new(keys):
+    def ebarbs(k0, t, xy, last_t, last):
+        return [gold_part(str(k0), "AngryBarbarian", t, xy, last_t=last_t, last=last),
+                gold_part(str(k0 + 1), "AngryBarbarian", t + 0.05, (xy[0] + 800, xy[1]), last_t=last_t,
+                          last=(last[0] + 800, last[1]))]
+    # the first pair died at Yodle2's tower (y 26) 10 s before the next is put down at y 9: within their walk
+    # (20.75 tiles), but 17 tiles behind where they were last seen, in the deploy zone: a new play
+    pairs = ebarbs(10, 0.0, (4000, 9000), 15.0, (4000, 26000)) + ebarbs(20, 25.0, (4000, 9000), 30.0, (4000, 20000))
+    plays, _kids = derive(pairs, keys)
+    assert describe(plays) == [(0.0, "AngryBarbarians", ["10", "11"], {}, False, None),
+                               (25.0, "AngryBarbarians", ["20", "21"], {}, False, "behind")]
+    # an Executioner replaced 6 s after the old one was lost, 2 tiles behind (not more than back_tiles): alone,
+    # nothing tells them apart, so it continues the old one, and the list flags the 6 s gap (flag_gap_s 4)
+    exe = [gold_part("10", "AxeMan", 0.0, (9000, 6000), last_t=30.0, last=(9000, 8000)),
+           gold_part("20", "AxeMan", 36.0, (9000, 6000), last_t=45.0, last=(9000, 12000))]
+    plays, _kids = derive(exe, keys)
+    assert describe(plays) == [(0.0, "AxeMan", ["10"], {"20": "reach"}, False, None)]
+    assert VA.flagged_merges(plays[0]) == [("20", "reach", 6.0)]
+    # with the 4 other plays a game has between two plays of a card, the card is back in the hand: a new play
+    plays, _kids = derive(exe + others(0.5, 35.5, "AxeMan"), keys)
+    assert [(p["t"], p["card"], p["units"], p["continued"], p["new_by"]) for p in plays if p["card"] == "AxeMan"] == [
+        (0.0, "AxeMan", ["10"], {}, None), (36.0, "AxeMan", ["20"], {}, "cycle")]
+    plays, _kids = derive(exe + others(0.5, 35.5, "AxeMan"), keys, config=VA.PlayConfig(cycle_plays=0))   # off
+    assert [p["units"] for p in plays if p["card"] == "AxeMan"] == [["10"]]
+    # a guard found again 1 s after its track ended (rule 1) still continues it once the card has cycled, but the
+    # list asks the owner to look
+    g = [gold_part("10", "SkeletonWarrior", 20.0, (14400, 8700), last_t=39.0, last=(14400, 9000)),
+         gold_part("20", "SkeletonWarrior", 40.0, (14400, 8700), last_t=46.0, last=(14400, 12000))]
+    plays, _kids = derive(g + others(20.5, 39.5, "SkeletonWarriors"), keys)
+    guards = [p for p in plays if p["card"] == "SkeletonWarriors"]
+    assert [(p["units"], p["continued"], p["cycled"]) for p in guards] == [(["10"], {"20": "reacquired"}, {"20": 4})]
+    assert VA.flagged_merges(guards[0]) == [("20", "reacquired after its card had cycled", 1.0)]
+    # the cycle over a final list: other plays since the previous play of the card, per battle
+    final = [{"card": "A", "hk": 1}, {"card": "B", "hk": 1}, {"card": "A", "hk": 2}, {"card": "C", "hk": 1},
+             {"card": "A", "hk": 1}, {"card": "B", "hk": 1}]
+    assert VA.cycle_since(final) == [None, None, None, None, (2, 0), (2, 1)]
+
+
+def test_spell_cards_seen_as_units_and_a_full_deploy_window(keys):
+    # Heal's spirits are a spell's units (no card summons HealSpirit): no reach, capacity or zone rule, so two Heals
+    # 8 s apart are two plays though the second is ahead of the first's last position, within its walk (the patch
+    # merged them by reach), and one first seen past the river, 21 s on, is no deploy unseen
+    deck = [c.card for c in VA.parse_deck("heal-spirit,hog-rider,musketeer,cannon,ice-golem,skeletons,fireball,the-log",
+                                          VA.CardResolver(TABLE, keys, EVENTS))]
+    known = VA.known_labels(TABLE, None)
+    heal = [gold_part("10", "HealSpirit", 10.0, (9000, 10000), last_t=11.0, last=(9000, 13000)),
+            gold_part("20", "HealSpirit", 18.0, (9000, 14000), last_t=19.0, last=(12000, 13000)),
+            gold_part("30", "HealSpirit", 40.0, (12000, 20000), last_t=41.0)]
+    plays, _kids = VA.derive_plays(heal, deck, TABLE, known, event_cards=EVENTS)
+    assert [(p["t"], p["card"], p["units"], p["continued"], p["deploy_unseen"]) for p in plays] == [
+        (10.0, "Heal", ["10"], {}, False), (18.0, "Heal", ["20"], {}, False), (40.0, "Heal", ["30"], {}, False)]
+    # the Spirit Empress' forms are troops her variant cards summon (MergeMaiden is kind spell only for its variant
+    # cost): one walking Empress lost 2 s and 2.5 s is one play, in either form; one first seen past the river with
+    # no earlier unit is a play whose deploy went unseen
+    sdeck = [c.card for c in VA.parse_deck("spirit-empress,hog-rider,musketeer,cannon,ice-golem,skeletons,fireball,"
+                                           "the-log", VA.CardResolver(TABLE, keys, EVENTS))]
+    for lab, cost in (("MergeMaiden_Normal", 3), ("MergeMaiden_Mounted", 6)):
+        se = [gold_part("10", lab, 10.0, (9000, 10000), last_t=12.0, last=(9000, 13000)),
+              gold_part("11", lab, 14.0, (9000, 15500), last_t=16.0, last=(9000, 18000)),
+              gold_part("12", lab, 18.5, (9000, 21000), last_t=20.0),
+              gold_part("20", lab, 60.0, (3500, 20000), last_t=62.0)]
+        plays, _kids = VA.derive_plays(se, sdeck, TABLE, known, event_cards=EVENTS)
+        assert [(p["t"], p["card"], p["kind"], p["cost"], p["units"], p["continued"], p["deploy_unseen"])
+                for p in plays] == [(10.0, "MergeMaiden", "unit", cost, ["10"], {"11": "reach", "12": "reach"}, False),
+                                    (60.0, "MergeMaiden", "unit", cost, ["20"], {}, True)], lab
+    # a 4th Guards part 0.4 s into a full deploy, 2.5 tiles off (within radius_tiles of its first unit, past
+    # reach_margin_tiles of any guard): a second track on the nearest guard, not a play
+    g = [gold_part(str(10 + j), "SkeletonWarrior", 20.0 + 0.1 * j, (9000 + 500 * j, 12000), last_t=25.0,
+                   last=(9000 + 500 * j, 14000)) for j in range(3)]
+    plays, _kids = derive(g + [gold_part("13", "SkeletonWarrior", 20.4, (6500, 12000), last_t=21.0)], keys)
+    assert describe(plays) == [(20.0, "SkeletonWarriors", ["10", "11", "12"], {"13": "capacity"}, False, None)]
+
+
+def test_a_close_fit_holds_after_the_cycle_and_late_merges_are_flagged(keys):
+    cfg = VA.PlayConfig()
+    # an Executioner tanking 20 s while 4 other plays came: its track lost 3 s and found 0.4 tiles on is the same
+    # unit (a close fit: seen up to flag_gap_s before, within reach_margin_tiles), flagged since the card had cycled
+    exe = [gold_part("10", "AxeMan", 0.0, (9000, 5000), last_t=20.0, last=(9000, 9000)),
+           gold_part("11", "AxeMan", 23.0, (9100, 9400), last_t=30.0, last=(9100, 10000))]
+    plays, kids = derive(exe + others(1.0, 19.0, "AxeMan"), keys)
+    axe = [p for p in plays if p["card"] == "AxeMan"]
+    assert [(p["units"], p["continued"], p["cycled"]) for p in axe] == [(["10"], {"11": "reach"}, {"11": 4})]
+    assert VA.flagged_merges(axe[0]) == [("11", "reach after its card had cycled", 3.0)]
+    final, _k, _s = VA.assemble_plays(plays, kids, [], [], cfg)
+    checks = VA._play_checks(final, {1: 0.0}, cfg)
+    assert checks == [
+        "p1 AxeMan: check the parts taken for its units: t11 (reach after its card had cycled, 3.0 s unseen); if one "
+        "is a new AxeMan play, --add-play it (a card is back in the hand after 4 other plays: a part merged after that "
+        "may be a new play, and so may one merged a play short of it when the labels missed a play between, such as a "
+        "Zap)"]
+    # not close (6 s unseen; past the river, 6 tiles on): a new play, and past the river one whose deploy went
+    # unseen, though a unit could have walked there: the warning says why
+    hog = [gold_part("10", "HogRider", 0.0, (14500, 9000), last_t=10.0, last=(14500, 14000)),
+           gold_part("11", "HogRider", 13.0, (14500, 20000), last_t=15.0)]
+    plays, kids = derive(hog + others(0.5, 9.5, "HogRider"), keys)
+    assert [(p["units"], p["deploy_unseen"], p["new_by"]) for p in plays if p["card"] == "HogRider"] == [
+        (["10"], False, None), (["11"], True, "cycle")]
+    final, _k, _s = VA.assemble_plays(plays, kids, [], [], cfg)
+    assert [w for w in VA._play_checks(final, {1: 0.0}, cfg) if w.startswith("p6 ")] == [
+        "p6 HogRider is a play whose deploy went unseen: first seen 0:13.0 at (14.5, 20.0), in Yodle2's half, where an "
+        "earlier HogRider unit could have walked, but 4 or more other plays came since its card's last play, so it is "
+        "taken for a new play; it is dated at that first sighting, as M0 dates one. --add-play \"m:ss=HogRider\" with "
+        "the deploy time replaces it; --bad-plays p6 if it is no play"]
+    # a new Executioner 3 s after the old one was last seen, 2 tiles on, with 3 labelled plays between: one missed
+    # play (a Zap) would make it a new play, so the merge is flagged; with 2 between it is not
+    s14 = [gold_part("10", "AxeMan", 0.0, (9000, 4000), last_t=25.0, last=(9000, 5000)),
+           gold_part("20", "AxeMan", 28.0, (9000, 7000), last_t=40.0, last=(9000, 12000))]
+    plays, _kids = derive(s14 + others(0.5, 27.5, "AxeMan", n=3), keys)
+    axe = [p for p in plays if p["card"] == "AxeMan"]
+    assert [(p["continued"], p["cycled"]) for p in axe] == [({"20": "reach"}, {"20": 3})]
+    assert VA.flagged_merges(axe[0]) == [("20", "reach after 3 other plays", 3.0)]
+    plays, _kids = derive(s14 + others(0.5, 27.5, "AxeMan", n=2), keys)
+    axe = [p for p in plays if p["card"] == "AxeMan"]
+    assert [(p["continued"], p["cycled"]) for p in axe] == [({"20": "reach"}, {})] and VA.flagged_merges(axe[0]) == []
+    # Guards replaced at the left bridge 3 s after the old ones were last seen, 3 labelled plays between: flagged
+    g = [gold_part(str(10 + j), "SkeletonWarrior", 20.0 + 0.1 * j, (3500 + 500 * j, 12000), last_t=40.0,
+                   last=(3500 + 500 * j, 14500)) for j in range(3)]
+    g2 = [gold_part(str(20 + j), "SkeletonWarrior", 43.0 + 0.1 * j, (3500 + 500 * j, 13000), last_t=50.0) for j in range(3)]
+    plays, _kids = derive(g + g2 + others(20.5, 42.5, "SkeletonWarriors", n=3), keys)
+    guards = [p for p in plays if p["card"] == "SkeletonWarriors"]
+    assert [p["cycled"] for p in guards] == [{"20": 3, "21": 3, "22": 3}]
+    # 16 s after a Guards deploy and 4 other plays, a part past the river 0.2 tiles from a guard still seen there
+    # (the reach rule, refused by the cycle, found only guards lost 2 s and 11 s before, 3 and 7 tiles off): the
+    # zone rule's close fit, a second track on that guard, flagged
+    g = [gold_part("10", "SkeletonWarrior", 0.0, (9000, 12000), last_t=20.0, last=(9000, 22000)),
+         gold_part("11", "SkeletonWarrior", 0.1, (9500, 12000), last_t=14.0, last=(9500, 17000)),
+         gold_part("12", "SkeletonWarrior", 0.2, (8600, 12000), last_t=5.0, last=(8600, 13000)),
+         gold_part("13", "SkeletonWarrior", 16.0, (9200, 20000), last_t=17.0)]
+    plays, _kids = derive(g + others(1.0, 13.0, "SkeletonWarriors"), keys)
+    guards = [p for p in plays if p["card"] == "SkeletonWarriors"]
+    assert [(p["units"], p["continued"], p["cycled"]) for p in guards] == [
+        (["10", "11", "12"], {"13": "capacity"}, {"13": 4})]
+    assert VA.flagged_merges(guards[0]) == [("13", "capacity after its card had cycled", 0.0)]
+
+
+def test_a_champion_cycles_from_her_last_sighting():
+    deck = ["BossBandit", "AngryBarbarians", "AxeMan", "Freeze", "SkeletonWarriors", "HogRider", "MinionHorde", "Zap"]
+    known = VA.known_labels(TABLE, None)
+    assert VA.CHAMPION_CARDS == __import__("rs_presses").CHAMPIONS_BEFORE_THE_COLUMN       # the restated names
+    assert all(c in TABLE.cards for c in VA.CHAMPION_CARDS)                                # as classes.json has them
+    # the Boss Bandit alive 18 s while 4 other plays came, lost 5 s (her dash) and found 1.5 tiles on: no new Boss
+    # Bandit can be put down while she lives, and none came since she was last seen, so it is her (the 5 s gap is
+    # flagged, as any reach over flag_gap_s). Counted from her deploy instead (no champions), the card had cycled
+    bb = [gold_part("10", "BossBandit", 0.0, (14000, 8000), last_t=18.0, last=(14000, 12000)),
+          gold_part("11", "BossBandit", 23.0, (14000, 13500), last_t=26.0)]
+    between = others(1.0, 17.0, "BossBandit")
+    plays, _kids = VA.derive_plays(bb + between, deck, TABLE, known, event_cards=EVENTS)
+    boss = [p for p in plays if p["card"] == "BossBandit"]
+    assert [(p["units"], p["continued"], p["cycled"]) for p in boss] == [(["10"], {"11": "reach"}, {})]
+    assert VA.flagged_merges(boss[0]) == [("11", "reach", 5.0)]
+    plays, _kids = VA.derive_plays(bb + between, deck, TABLE, known, event_cards=EVENTS, champions=())
+    assert [(p["units"], p["new_by"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], None), (["11"], "cycle")]
+    # dead at 18 s, then 4 other plays: her card is back, so a Boss Bandit 11 s later a tile on is a new play
+    again = [bb[0], gold_part("11", "BossBandit", 29.0, (14000, 13000), last_t=33.0)]
+    plays, _kids = VA.derive_plays(again + others(18.5, 28.5, "BossBandit"), deck, TABLE, known, event_cards=EVENTS)
+    assert [(p["units"], p["new_by"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], None), (["11"], "cycle")]
+
+
+def test_parts_the_rules_must_keep_apart(keys):
+    # a deploy-unseen Hog Rider whose track came back to y 14 (its owner's deploy zone): a Hog there 1 s later,
+    # 0.5 tiles off, is a new play, neither found again (rule 1) nor reached (rule 5); nor 2 s later
+    unseen = gold_part("10", "HogRider", 10.0, (14500, 17500), last_t=11.0, last=(14500, 14000))
+    for t in (12.0, 13.0):
+        plays, _kids = derive([unseen, gold_part("20", "HogRider", t, (14500, 13500), last_t=t + 3.0)], keys)
+        assert [(p["units"], p["deploy_unseen"]) for p in plays] == [(["10"], True), (["20"], False)], t
+    # the same live uid handed on to a new Hog at the bridge 1 s after a deploy-unseen one was last seen
+    uid = [gold_part("10", "HogRider", 10.0, (14500, 17500), last_t=11.0, last=(14500, 17200), uid="1:5"),
+           gold_part("20", "HogRider", 12.0, (14500, 14000), last_t=15.0, last=(14500, 22000), uid="1:5")]
+    plays, _kids = derive(uid, keys)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["10"], {}), (["20"], {})]
+    # an Elite Barbarian seen alone at the bridge: a second pair put down 7 tiles behind 5 s later is a new play,
+    # not the unit of the first one not seen since its deploy
+    eb = [gold_part("10", "AngryBarbarian", 0.0, (9000, 12000), last_t=10.0, last=(9000, 13000)),
+          gold_part("20", "AngryBarbarian", 5.0, (9000, 5000), last_t=8.0)]
+    plays, _kids = derive(eb, keys)
+    assert [(p["units"], p["joined"], p["new_by"]) for p in plays] == [(["10"], {}, None), (["20"], {}, "behind")]
+    # a second track on an Executioner for 1 s (capacity) leaves the unit's latest part the long one, so the unit
+    # found again 1 s after that one ended continues it
+    exe = [gold_part("10", "AxeMan", 0.0, (9000, 6000), last_t=20.0, last=(9000, 9000)),
+           gold_part("11", "AxeMan", 5.0, (9000, 6800), last_t=6.0, last=(9000, 7000)),
+           gold_part("12", "AxeMan", 21.0, (9000, 9200), last_t=25.0)]
+    plays, _kids = derive(exe, keys)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["10"], {"11": "capacity", "12": "reacquired"})]
+    # a deploy-unseen play's "earlier" names the earlier parts of its track under another card only (the Hog
+    # part 80.0 is a play of its own)
+    track = [gold_part("80.0", "HogRider", 0.0, (14500, 10000), last_t=2.0, last=(14500, 12000), h=80),
+             gold_part("80.1", "AxeMan", 2.2, (14500, 12500), last_t=3.0, last=(14500, 13000), h=80, part=1),
+             gold_part("80.2", "HogRider", 3.2, (14500, 20000), last_t=5.0, h=80, part=2)]
+    plays, _kids = derive(track, keys)
+    assert [(p["card"], p["units"], p["deploy_unseen"], p.get("earlier")) for p in plays] == [
+        ("HogRider", ["80.0"], False, None), ("AxeMan", ["80.1"], False, None),
+        ("HogRider", ["80.2"], True, [{"key": "80.1", "label": "AxeMan", "t": 2.2}])]
+    # an added play that replaces a deploy-unseen one takes its children too
+    derived = [{"t": 20.0, "card": "Witch", "hk": 1, "deploy_unseen": True, "units": ["90"], "x_mt": 9000.0,
+                "y_mt": 20000.0}]
+    final, kids, _stale = VA.assemble_plays(derived, [{"key": "95", "derived": 0}], [], [{"t": 18.0, "card": "Witch",
+                                                                                           "hk": 1}])
+    assert [(p["id"], p["replaces"]["t"], p["children"]) for p in final] == [("p1", 20.0, ["95"])]
+    assert [c["play"] for c in kids] == ["p1"]
+
+
+def test_a_deploy_unseen_play_is_listed_checked_and_replaced_by_an_added_play(tmp_path, keys, capsys):
+    # a guard lost 5.5 s (reach, past flag_gap_s), a Hog Rider first seen past the river (its deploy unlabelled)
+    # and found again 13 s after it was lost, deep in Yodle2's half (zone)
+    extra = [gold_part("83", "SkeletonWarrior", 27.5, (9200, 14500)),
+             gold_part("90", "HogRider", 75.0, (14300, 20300)), gold_part("91", "HogRider", 90.0, (14000, 27000))]
+    paths = hand_gold(tmp_path, keys, parts=R0_PARTS + extra)
+    kw = dict(labels_root=tmp_path / "labels", store=tmp_path / "store", table=TABLE, key_map=keys, event_cards=EVENTS)
+    res = VA.plays_session(R0_SID, **kw)
+    assert [(p["id"], p["card"], p["t"], p.get("deploy_unseen")) for p in res.plays][::6] == [
+        ("p1", "SkeletonWarriors", 20.0, False), ("p7", "HogRider", 75.0, True)]
+    assert res.plays[6]["continued"] == {"91": "zone"}
+    assert [(c["key"], c["play"]) for c in res.children] == [("60", "p6")]
+    checks = [w for w in res.warnings if w.startswith(("p1 ", "p7 "))]
+    assert checks == [
+        "p1 SkeletonWarriors: check the parts taken for its units: t83 (reach, 5.5 s unseen); if one is a "
+        "new SkeletonWarriors play, --add-play it",
+        "p7 HogRider is a play whose deploy went unseen: first seen 1:05.0 at (14.3, 20.3), in Yodle2's half, with no "
+        "earlier HogRider unit that could have walked there; it is dated at that first sighting, as M0 dates one. "
+        '--add-play "m:ss=HogRider" with the deploy time replaces it; --bad-plays p7 if it is no play',
+        "p7 HogRider: check the parts taken for its units: t91 (zone, 13.0 s unseen); if one is a new "
+        "HogRider play, --add-play it"]
+    assert json.loads(paths.plays_file.read_text(encoding="utf-8"))["plays"][6]["deploy_unseen"] is True
+    # the list shows each play's merges by rule, and marks the ones to check
+    assert cli(tmp_path, "plays", R0_SID, "--dry-run") == VA.EXIT_OK
+    out = capsys.readouterr().out
+    assert "1:05.0  HogRider" in out and "(deploy unseen)" in out and "orphan" not in out
+    assert "+ reach t83 5.5 s   <- check t83" in out and "+ zone t91 13.0 s   <- check t91" in out
+    assert "+ uid t31; split t30.1\n" in out                          # nothing to check there
+    # the deploy time given: the added play replaces the deploy-unseen one (one Hog Rider play) and its warning goes
+    added = VA.plays_session(R0_SID, list_no=1, add_plays=["1:03.0=HogRider"], **kw)
+    hogs = [(p["id"], p["source"], p["t"], p.get("replaces")) for p in added.plays if p["card"] == "HogRider"]
+    assert hogs == [("p7", "added", 73.0, {"t": 75.0, "units": ["90"], "x_mt": 14300.0, "y_mt": 20300.0})]
+    assert not any("deploy went unseen" in w or "already on the list" in w for w in added.warnings)
+    # confirmed: the checks are the owner's to have done, no longer warned of
+    ok = VA.plays_session(R0_SID, list_no=2, confirm=True, **kw)
+    assert ok.doc["confirmed"] and not any("check the parts" in w for w in ok.warnings)
+    # the rule flags reach PlayConfig and plays.json's config: reach and zone off, the guard part is its own play,
+    # and so is each Hog Rider part, none a deploy-unseen play the added one would replace
+    flags = ["--reach-gap-s", "0", "--zone-y-tiles", "32", "--cycle-plays", "0", "--flag-gap-s", "2.5", "--back-tiles", "1",
+             "--zone-gap-s", "9", "--reach-margin-tiles", "1.5"]
+    assert cli(tmp_path, "plays", R0_SID, *flags) == VA.EXIT_OK
+    out = capsys.readouterr().out
+    doc = json.loads(paths.plays_file.read_text(encoding="utf-8"))
+    assert {k: doc["config"][k] for k in ("reach_gap_s", "zone_y_tiles", "cycle_plays", "flag_gap_s", "back_tiles",
+                                          "zone_gap_s", "reach_margin_tiles")} == {
+        "reach_gap_s": 0.0, "zone_y_tiles": 32.0, "cycle_plays": 0, "flag_gap_s": 2.5, "back_tiles": 1.0,
+        "zone_gap_s": 9.0, "reach_margin_tiles": 1.5}
+    assert [p["card"] for p in doc["plays"]].count("SkeletonWarriors") == 2 and "(deploy unseen)" not in out
+    assert [(p["source"], p["t"]) for p in doc["plays"] if p["card"] == "HogRider"] == [
+        ("added", 73.0), ("derived", 75.0), ("derived", 90.0)]
+    assert not any("comes only" in w for w in doc["warnings"])          # --cycle-plays 0: no cycle check either
+    defaults = VA.build_parser().parse_args(["plays", R0_SID])
+    assert all(getattr(defaults, k) == getattr(VA.PlayConfig(), k) for k in (
+        "window_s", "radius_tiles", "reach_gap_s", "reach_margin_tiles", "zone_y_tiles", "zone_gap_s", "back_tiles",
+        "cycle_plays", "flag_gap_s"))
 
 
 def test_m0_dates_a_live_play_by_its_own_tick(tmp_path):
@@ -539,9 +1015,9 @@ def test_pending_tracks_and_a_changed_derivation_refuse_a_confirmation(tmp_path,
     assert "--allow-pending" in capsys.readouterr().out
     ok = VA.plays_session(R0_SID, list_no=2, confirm=True, allow_pending=True, **kw)
     assert ok.doc["confirmed"] and ok.list_no == 3
-    # other settings derive other plays (Guards, Elite Barbarians and the Horde split at a 0.01 s window): no edit and no
-    # confirmation of list 3 then; a plain run shows the new list first
-    narrow = VA.PlayConfig(window_s=0.01)
+    # other settings derive other plays (Guards, Elite Barbarians and the Horde split at a 0.01 s window without the
+    # reach rule): no edit and no confirmation of list 3 then; a plain run shows the new list first
+    narrow = VA.PlayConfig(window_s=0.01, reach_gap_s=0.0)
     with pytest.raises(VA.LabelError, match="differ from list 3") as err:
         VA.plays_session(R0_SID, list_no=3, confirm=True, allow_pending=True, config=narrow, **kw)
     assert err.value.code == VA.EXIT_CHECK

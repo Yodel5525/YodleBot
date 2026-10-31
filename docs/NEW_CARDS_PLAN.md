@@ -376,6 +376,16 @@ $SID = '20261029_R0_1'
 
 - **Every track is labelled.** A gold emit is refused while a track is unlabelled (`--allow-pending` makes such tracks ignore regions; their plays are then missing, so `plays --confirm` needs `--allow-pending` too) or while a label is auto-accepted.
 - **Edits name the latest list** (`--list K`, printed by `plays`). An edit or `--confirm` is refused when the plays derived now differ from list K's: run `plays $SID` again and check the new list first.
+- **How the list is derived.** One unit is often several gold tracks, lost and found again later: Round 0's first list had 60 plays for about 18. So `plays` joins a part to an earlier unit of its card when the unit could have walked there in the time it was lost (its speed × 1.25 + 2 tiles, up to 12 s). A play holds no more units than its card puts down (Guards 3, Minion Horde 6, Elite Barbarians 2). A part first seen past the river cannot have been put down there: it joins a unit of its card that could have walked there (up to 20 s), or else it is a play whose deploy nobody saw, dated when it was first seen, as the live bot dates one ("deploy unseen" on the list). Three rules keep a new play new:
+  - a part put down more than 2 tiles behind where the last unit was seen (toward the opponent's king);
+  - once 4 other plays came since the card's last play (the card is back in the hand), unless the part is within 2 tiles of where a unit of the card was seen up to 4 s before (a long-lived unit or a building whose track was lost a moment; this merge is flagged). A champion's card comes back only after she dies, so for her the 4 plays count from when she was last seen;
+  - a part back in the deploy zone never joins a deploy-unseen unit.
+- **What to check before `--confirm`.** Under each play the list prints the parts it merged and by which rule (`+ reach t54 3.0 s; zone t106.0 9.5 s`). Until the list is confirmed it warns of:
+  - every zone merge, and reach merges over 4 s;
+  - every merge made after 3 or more other plays: one play the labels missed, such as a Zap, would make the part a new play;
+  - each deploy-unseen play (label its deploy if a track shows it, or `--add-play "m:ss=card"` with the deploy time, which replaces it);
+  - every play that comes fewer than 4 plays after its card's last play. Then a play the labels missed lies between them (Round 0: a Zap, and a second Boss Bandit, have no gold track): `--add-play` it, or `--bad-plays` the play if it is a unit found again.
+  - The flags `--reach-gap-s`, `--reach-margin-tiles`, `--zone-y-tiles`, `--zone-gap-s`, `--back-tiles`, `--cycle-plays` and `--flag-gap-s` change the rules; plays.json records them.
 - `& $BB tools\vision_autolabel.py status` says what is left: an unlabelled track, a stale emit, a review not recorded, plays not confirmed.
 - Keep the gold raws: the gate replays them through the live chain.
 
@@ -805,7 +815,7 @@ Before the first fine-tune (N13, N14):
 - Page B shows 24 random emitted frames, half from birth windows.
 - More than 2 bad frames in 24 names the clusters to recheck.
 
-**Gold battles.** Review every track, then confirm the derived play list. Delete wrong plays with `--bad-plays`, and add missed ones with `--add-play "1:52=Vines"`, naming the list the ids come from (`--list K`).
+**Gold battles.** Review every track, then confirm the derived play list. Delete wrong plays with `--bad-plays`, and add missed ones with `--add-play "1:52=Vines"`, naming the list the ids come from (`--list K`). The list joins the tracks of one unit lost and found again, counts a unit first seen past the river with no unit before it as a play whose deploy went unseen, and warns of the merges to look at and of plays the card cycle says were missed (4.3, Round 0).
 
 **Owner time per battle (estimates):**
 
