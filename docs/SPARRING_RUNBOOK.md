@@ -709,6 +709,7 @@ What to look for:
 - Under `zero`, every destroyed tower has evidence `label`. On `$R0` and `$DRY` no tower falls during the battle, so `zero` shows `-` for all six: both were won by an enemy tower that fell in overtime as the battle ended, with its label still showing on the last battle frame, and the HUD never counts the tower that ends a battle (it would need its label gone for 2.5 s). No king reads 0 before the end screen.
 - `crowns`: the HUD's crowns against the end screen's. On `$R0` and `$DRY`: `crowns: HUD 0-0, end screen 1-0 (... frames): explained (own crowns: the battle ended as enemy_left or enemy_right fell)`. The end screen may be ahead of the HUD only by the tower that ended the battle (3 crowns for a king). `DIFFER` means the HUD missed or invented a fall: send it back. On `$A1` and `$A2`, `agree` or `explained`.
 - The last command ends with `check calib: PASS`, `check destroy: PASS`, `check king: PASS` and `check crowns: PASS`, and `$LASTEXITCODE` prints `0`. `1` means a check failed: send back the whole audit output.
+- Under `boxes`, each tower starts with `body NN% (first N.Ns/NNf NN%)`: the share of frames with a tower box at that tower by the tap gate's own rule, over the battle and over the frames the gate decides on (`first`: from the battle's start until all four labels are calibrated and, in a `vision_play` session, the mode verdict is in; at least 1.5 s and 10 frames). On `$R0` and `$DRY` both are 100% for all six towers; under 50% in that window is what turns the tap gate off. The share after `any` counts every box there, units too, so it can be higher. A `vision_play` session also shows its `tap gate:` line (open or closed, and the shares it decided on); when the two differ, the `tap gate:` line is what the gate saw.
 - The sheets are PNG files in `reports\vision\replays\skin\sheets`. Open a few: the boxes must sit on the towers' HP labels (green while the tower stands). Send any sheet where they do not.
 
 Then rehearse the whole runner on the same four recordings. It never taps on a recording; this shows what the tap gate would do:
@@ -832,7 +833,7 @@ It starts in **MANUAL**: it watches and suggests, but does not tap.
 
 **The tap gate.** At the start of every battle the bot does not tap, even in AUTO, until three checks pass:
 - it has found the HP labels of all four princess towers (tower skins move them);
-- the detector boxes all six towers where the arena puts them;
+- the detector boxes all six towers where the arena puts them (it looks at where each tower's box is centred, so a skin that makes a tower taller or lower still passes; it counts every frame until the other two checks are done, at least 1.5 s);
 - the battle is a classic 1v1: the clock started at 3:00 (its first reading shows 2:50-3:00) and your elixir fills at one every 2.8 s.
 
 This takes about 3 s. Until then the status line shows `| gate wait` and a play the bot decides is not sent (`[skipped]`). Normally the gate then opens without a line, and the bot plays. If a check fails, the runner prints one line and switches to MANUAL:
@@ -840,7 +841,7 @@ This takes about 3 s. Until then the status line shows `| gate wait` and a play 
 | Line | What it means |
 |---|---|
 | `towers not calibrated (enemy_left, enemy_right): tapping off this battle; play yourself (switched to MANUAL; F8 hands back to the bot anyway, for this battle only)` | the bot could not find those towers' HP labels (a skin it cannot read), so it would not know when they fall |
-| `towers not boxed by the detector (enemy_king 20% of 31 frames): ...` | the detector did not see that tower in its place often enough: a skin it does not know, or another arena layout |
+| `towers not boxed by the detector (enemy_king 20% of 31 frames): ...` | the detector did not see that tower in its place on half the frames from the battle's start until the labels and the mode were checked (about 2-3 s; at least 1.5 s and 10 frames): a skin it does not box at all, or another arena layout. `tools\tower_audit.py` on that session shows the gate's view: its `tap gate:` line, and `body NN% (first N.Ns/NNf NN%)` under `boxes` for each tower |
 | `mode unknown (regen 1.4 s): ...` | your elixir filled faster than classic (double elixir 1.4 s, triple 0.9 s): another game mode |
 | `mode unknown (first clock 2:00 (tick 1210), not 2:5x-3:00): ...` | the clock did not start at 3:00: another mode, or the runner was started in the middle of the battle |
 

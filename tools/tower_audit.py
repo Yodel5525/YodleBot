@@ -59,8 +59,19 @@ per tower:
             the tower), body (a body box only), badge (neither: the crown badge's pixels);
             body-only: the longest run of body-only holds (s); body after label: how long body
             boxes stayed after the tower's last label box
-  boxes     battle frames the detector ran on, the share with a box at the tower (its grown
-            reference body, or its label's window), and the classes of those boxes
+  boxes     the tap gate's body share (scripts/vision/tap_gate.py, the same rule:
+            tower_labels.body_keys at BODY_GATE_GROW: a tower body class whose box's centre lies
+            in the tower's reference body shrunk 20% a side) over the battle frames the detector
+            ran on, and over the gate's board frames (board_window: from the battle's first frame
+            until the four labels are calibrated, the mode verdict is in (vision_play's game_mode
+            record; a replay has none), at least BODY_MIN_S s and BODY_MIN_FRAMES frames, or
+            DEADLINE_S); then the share with any box at the tower (its reference body grown 25% a
+            side, or its label's window, any class) and the classes of those boxes. E.g. "body 98%
+            (first 2.4s/52f 100%); any 99%: KingTower 4410, king-tower-bar 4402". A vision_play
+            session records no frame the detector ran on without a box, so both shares leave
+            those frames out (the gate counts them, with no box)
+  tap gate  vision_play's tap_gate record of the battle, when logged: open / closed, when, why,
+            and the body shares the gate decided on (per battle)
   overlay   frames flagged (skipped), per battle, and why (tap, mirror, median) when recorded
   crowns    the HUD's crowns on the battle's last battle frame, the end screen's (per slot the
             most over its frames, as vision_play's ResultBook), whether the battle's end explains
@@ -102,6 +113,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:                    # scripts.vision
     sys.path.insert(0, str(ROOT))
 
+from scripts.vision import tap_gate as TG  # noqa: E402
 from scripts.vision import tower_calib as TC  # noqa: E402
 from scripts.vision import tower_labels as TL  # noqa: E402
 
@@ -411,6 +423,40 @@ def boxes_at(view: FrameView, label_refs: Mapping[str, Sequence[float]] | None =
     return out
 
 
+def bodies_at(view: FrameView) -> set[str]:
+    """The towers a body box stands on by the tap gate's rule (tower_labels.body_keys at
+    BODY_GATE_GROW, as tap_gate.body_positions counts them)."""
+    if "bodies" not in view._cache:
+        view._cache["bodies"] = TL.body_keys([_Det(c, b) for c, b in view.detections], view.frame_size or TL.REF_SIZE,
+                                             grow=TL.BODY_GATE_GROW)
+    return view._cache["bodies"]
+
+
+def board_window(battle: Sequence[FrameView], t0: float, mode_t: float | None = None
+                 ) -> tuple[list[FrameView], float | None]:
+    """The tap gate's board frames (scripts/vision/tap_gate.py, TowerCheck): the battle frames the
+    detector ran on from the battle's start until the gate's board decides, and when that was (s
+    after t0; None: the battle ended first, all of them). It decides on the first battle frame with
+    the four princess labels calibrated (when the frames record calib), the mode decided (mode_t:
+    the frame time of vision_play's game_mode record, when logged), at least BODY_MIN_S s and
+    BODY_MIN_FRAMES detector frames in; or DEADLINE_S s in, on whatever came."""
+    calib = any(f.calib is not None for f in battle)
+    det: list[FrameView] = []
+    for f in battle:
+        if f.det_ran:
+            det.append(f)
+        dt = f.t - t0
+        if dt >= TG.DEADLINE_S:
+            return det, dt
+        if calib and not all(f.calibrated(k) for k in PRINCESS):
+            continue
+        if mode_t is not None and f.t < mode_t - 1e-6:
+            continue
+        if len(det) >= TG.BODY_MIN_FRAMES and dt >= TG.BODY_MIN_S - 1e-6:
+            return det, dt
+    return det, None
+
+
 def evidence_of(view: FrameView, label_refs: Mapping[str, Sequence[float]] | None = None) -> TL.TowerEvidence:
     """The frame's detector evidence per tower (tower_labels.TowerEvidence: labels, bodies)."""
     ck = ("ev", id(label_refs))
@@ -505,7 +551,7 @@ def _calib(key: str, frames: list[FrameView], t0: float, clock3_t: float | None)
 
 
 def _tower(key: str, frames: list[FrameView], t0: float, clock3_t: float | None, end_log: dict | None,
-           label_refs: Mapping[str, Sequence[float]] | None) -> dict[str, Any]:
+           label_refs: Mapping[str, Sequence[float]] | None, mode_t: float | None = None) -> dict[str, Any]:
     battle = [f for f in frames if f.screen == SCREEN_BATTLE and f.fields]
     out: dict[str, Any] = {"calib": _calib(key, frames, t0, clock3_t) if key in PRINCESS else None}
     digits = sum(1 for f in battle if key in f.reads)
@@ -568,20 +614,27 @@ def _tower(key: str, frames: list[FrameView], t0: float, clock3_t: float | None,
     det = [f for f in battle if f.det_ran]
     if det:
         classes: Counter = Counter()
-        with_box = 0
+        with_box = with_body = 0
         last_label = last_body = None
         for f in det:
             here = boxes_at(f, label_refs).get(key)
             if here:
                 with_box += 1
                 classes.update(here)
+            with_body += key in bodies_at(f)
             ev = evidence_of(f, label_refs)
             if key in ev.labels:
                 last_label = f.t
             if key in ev.bodies:
                 last_body = f.t
+        win, win_s = board_window(battle, t0, mode_t)          # the gate's board frames
+        first = sum(1 for f in win if key in bodies_at(f))
         out["boxes"] = {"frames": len(det), "with_box": with_box, "share": _round(with_box / len(det), 3),
-                        "classes": dict(classes.most_common())}
+                        "classes": dict(classes.most_common()),
+                        "body": {"with_body": with_body, "share": _round(with_body / len(det), 3),
+                                 "first_frames": len(win),
+                                 "first_s": _round(win[-1].t - t0 if win_s is None else win_s),
+                                 "first_share": _round(first / len(win), 3) if win else None}}
         out["body_after_label_s"] = (None if last_label is None or last_body is None or last_body <= last_label
                                      else _round(last_body - last_label))
     else:
@@ -605,7 +658,8 @@ def audit_battle(session: Session, number: int, frames: list[FrameView], end: li
     clock3_t = reads[2].t if len(reads) >= 3 else None
     ticks = [f.tick for f in battle if f.tick is not None]
     end_log = _log_for(session, "battle_end", number)
-    towers = {k: _tower(k, frames, t0, clock3_t, end_log, label_refs) for k in TOWER_KEYS}
+    mode_t = _num((_log_for(session, "game_mode", number) or {}).get("t"))
+    towers = {k: _tower(k, frames, t0, clock3_t, end_log, label_refs, mode_t) for k in TOWER_KEYS}
     flagged = [f for f in battle if f.overlay]
     overlay = None if all(f.overlay is None for f in battle) else {
         "frames": len(flagged), "names": [_frame_name(f) for f in flagged],
@@ -619,6 +673,11 @@ def audit_battle(session: Session, number: int, frames: list[FrameView], end: li
     if end:
         end_crowns = [max(f.crowns[0] for f in end), max(f.crowns[1] for f in end)]
     result = _log_for(session, "result", number)
+    gate_log = _log_for(session, "tap_gate", number)
+    gate = None if gate_log is None else {
+        "state": gate_log.get("state"), "reasons": list(gate_log.get("reasons") or []),
+        "decided_s": gate_log.get("decided_s"), "det_frames": (gate_log.get("towers") or {}).get("det_frames"),
+        "bodies": (gate_log.get("towers") or {}).get("bodies")}
     crowns = {"hud": hud_crowns, "end": end_crowns, "end_frames": len(end),
               "agree": None if end_crowns is None else hud_crowns == end_crowns}
     if end_crowns is not None and hud_crowns != end_crowns:
@@ -632,7 +691,7 @@ def audit_battle(session: Session, number: int, frames: list[FrameView], end: li
             "frames": len(frames), "battle_frames": len(battle), "first_tick": ticks[0] if ticks else None,
             "last_tick": ticks[-1] if ticks else None,
             "clock3_t": None if clock3_t is None else _round(clock3_t - t0),
-            "towers": towers, "overlay": overlay, "crowns": crowns,
+            "towers": towers, "overlay": overlay, "crowns": crowns, "gate": gate,
             "recorded": {"calib": any(f.calib is not None for f in frames),
                          "evidence": any(f.evidence is not None for f in frames),
                          "overlay": overlay is not None,
@@ -787,8 +846,14 @@ def format_report(report: Mapping[str, Any]) -> list[str]:
                 htext = "n/a" if h is None else f"{h['label']}/{h['body']}/{h['badge']}"
                 body = "-" if h is None else f"{t.get('body_only_s') or 0:.1f}"
                 bx = t["boxes"]
+                bd = None if bx is None else bx.get("body")
                 btext = "n/a" if bx is None else (
-                    f"{100 * bx['share']:.0f}% "
+                    ("" if bd is None else f"body {100 * bd['share']:.0f}% (first {bd['first_s']:.1f}s/"
+                                           f"{bd['first_frames']}f "
+                                           + ("-" if bd["first_share"] is None else f"{100 * bd['first_share']:.0f}%")
+                                           + "); any ")
+                    + f"{100 * bx['share']:.0f}%"
+                    + (": " if bx["classes"] else "")
                     + ", ".join(f"{c} {n}" for c, n in list(bx["classes"].items())[:3]))
                 if t.get("body_after_label_s"):
                     btext += f"; body {t['body_after_label_s']:.1f}s after the label"
@@ -797,6 +862,13 @@ def format_report(report: Mapping[str, Any]) -> list[str]:
                 rtext = f"{r['digits']}/{r['bars']}/{r['none']}"
                 lines.append(f"    {k:12s} {_calib_text(t['calib']):44s} {rtext:14s} "
                              f"{_when(t['first_damage']):12s} {ztext:36s} {htext:16s} {body:7s} {btext}".rstrip())
+            g = b.get("gate")
+            if g is not None:
+                lines.append(f"    tap gate: {g['state']} at {g['decided_s']} s"
+                             + (f" ({'; '.join(g['reasons'])})" if g["reasons"] else "")
+                             + ("" if not g.get("bodies") else f"; bodies on {g['det_frames']} frames: "
+                                + ", ".join(f"{k} {'-' if v is None else f'{100 * v:.0f}%'}"
+                                            for k, v in g["bodies"].items())))
             ov = b["overlay"]
             lines.append("    overlay: not recorded" if ov is None else
                          f"    overlay: {ov['frames']} frames skipped"

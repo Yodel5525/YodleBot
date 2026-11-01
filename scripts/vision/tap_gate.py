@@ -10,13 +10,33 @@ needs all of:
   from the badge and the outlined bar). A tower whose calibration window ended without a lock
   ("expired") or whose lock was removed ("unlatched"), or one still not locked DEADLINE_S (20) s
   after the battle started, fails it.
-* THE BOARD (only with a detector running): a tower body box (tower_labels.BODY_CLASSES) within
-  NEAR_TILES (0.5) tile of each of the six tower positions on >= BODY_SHARE (50%) of the
-  calibration frames: the frames the detector ran on from the battle's start until the labels
-  were calibrated, at least BODY_MIN_FRAMES (3) of them. A position is the bottom centre (the
-  ground point) of the median body box of the 2026-10-29 friendly (TOWER_BODY_REF_PX); a box's
-  distance is in tiles of the default geometry (51 x 41.4 px at 1080x1920). This checks the
-  board's geometry in a new arena or mode, and that the detector sees this battle's towers.
+* THE BOARD (only with a detector running): a tower body box at each of the six towers on
+  >= BODY_SHARE (50%) of the board frames. A box is at a tower when its class is a tower body's
+  (tower_labels.BODY_CLASSES) and its centre lies in the tower's reference body box (the median
+  body box of the 2026-10-29 friendly, TOWER_BODY_REF_PX) grown BODY_GROW (-0.2: shrunk 20%) a
+  side: tower_labels.body_keys, the rule tools/tower_audit.py's body share uses too. The window
+  is +-0.9-1.1 tile across and +-1.2-1.7 tiles down (a tile is 51 x 41.4 px at 1080x1920): a
+  box 2 tiles straight across or down from a tower counts for none of them (diagonally, the
+  enemy king's corner is 2.07 tiles out), and a board shifted more than 0.9 tile across or 1.24
+  down fails at a princess tower (any shift of 1.53 tiles or more). A tower skin's box counts:
+  the owner picks a random tower skin each battle, clanmates use many, and a skin moves its box's
+  top or bottom far more than its centre (measured: every body box centre within 12 px across
+  and 30 px down of its reference, default and chicken skins). The old rule (the box's bottom
+  centre within half a tile, decided on the first 3 frames) closed the gate on a 2026-11-01 king
+  skin at "0% of 3 frames" although the audit's any-class share at the king was 92% (KingTower
+  boxes on 89% of the battle): on the owner's sheet its base sits an estimated 24 px below the
+  reference (past the half tile), its centre ~12 px; whether its first frames also lacked the
+  box is not known.
+  The board frames are the frames the detector ran on from the battle's start until the board
+  decides, which is when the gate could otherwise decide: on the first frame with the labels
+  calibrated and the mode decided (TapGate passes hold while the mode check is pending), at least
+  BODY_MIN_S (1.5) s into the battle and at least BODY_MIN_FRAMES (10) board frames; or at
+  DEADLINE_S on whatever came. Live (20-25 frames a second: the labels lock ~0.5 s in, the mode
+  decides at ~1.8-3 s) that is the mode verdict, so a tower unboxed on fewer than half of those
+  frames (the battle's first ~0.9-1.5 s) still passes, and the gate opens when it did before; on
+  a sparse replay (an image every 0.8 s: the 10-31 dry run's mode verdict at 7.2 s) it is the
+  later of the mode verdict and the 10th frame. This checks the board's geometry in a new arena
+  or mode, and that the detector sees this battle's towers.
 * THE MODE: classic 1v1 (mode.ModeCheck: the first clock reading 2:5x-3:00, the elixir at 1x).
 
 Any of them failing CLOSES the gate for the battle. vision_play then prints one line, e.g.
@@ -44,7 +64,6 @@ summary() is the battle_end record's "tap_gate". Imports numpy only (through mod
 """
 from __future__ import annotations
 
-import math
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import mode as MD
@@ -57,9 +76,11 @@ PRINCESS_KEYS = TL.PRINCESS_KEYS
 BODY_KEYS = ("enemy_left", "enemy_king", "enemy_right", "own_left", "own_king", "own_right")
 #: px per tile at 1080x1920 (the default geometry: 0.051 px/mt across, 0.0414 down)
 TILE_PX = (DEFAULT_HOMOGRAPHY_PX[0][0] * 1000.0, DEFAULT_HOMOGRAPHY_PX[1][1] * 1000.0)
-NEAR_TILES = 0.5
+#: a body box's centre in its tower's reference body grown this a side (-0.2: its middle 60%)
+BODY_GROW = TL.BODY_GATE_GROW
 BODY_SHARE = 0.5
-BODY_MIN_FRAMES = 3
+BODY_MIN_FRAMES = 10
+BODY_MIN_S = 1.5
 DEADLINE_S = 20.0
 #: tower_calib statuses of a tower without a lock whose calibration is over
 CALIB_FAILED = ("expired", "unlatched")
@@ -68,34 +89,12 @@ PENDING, OPEN, CLOSED = "pending", "open", "closed"
 SOURCE_TOWERS, SOURCE_MODE = "towers", "game mode"
 
 
-def _ground(box: Sequence[float]) -> tuple[float, float]:
-    return (float(box[0]) + float(box[2])) / 2.0, float(box[3])
-
-
-#: key -> the ground point (bottom centre, px at 1080x1920) of its reference body box
-POSITIONS_PX = {k: _ground(TL.TOWER_BODY_REF_PX[k]) for k in BODY_KEYS}
-
-
 def body_positions(detections: Iterable[Any], frame_size: Sequence[int] | None, *,
-                   near_tiles: float = NEAR_TILES) -> set[str]:
-    """The tower keys with a body box (BODY_CLASSES) whose ground point is within `near_tiles`
-    of the key's position. detections: objects with .cls and .box (x0, y0, x1, y1 in frame
-    pixels of `frame_size` (w, h))."""
-    if not frame_size or float(frame_size[0]) <= 0 or float(frame_size[1]) <= 0:
-        return set()
-    sx, sy = REF_SIZE[0] / float(frame_size[0]), REF_SIZE[1] / float(frame_size[1])
-    out: set[str] = set()
-    for d in detections or ():
-        if str(getattr(d, "cls", "")) not in TL.BODY_CLASSES:
-            continue
-        b = getattr(d, "box", None)
-        if b is None or len(b) < 4:
-            continue
-        gx, gy = _ground((b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy))
-        for key, (px, py) in POSITIONS_PX.items():
-            if math.hypot((gx - px) / TILE_PX[0], (gy - py) / TILE_PX[1]) <= near_tiles:
-                out.add(key)
-    return out
+                   grow: float = BODY_GROW) -> set[str]:
+    """The tower keys with a body box (BODY_CLASSES) whose centre lies in the key's reference body
+    grown `grow` a side (tower_labels.body_keys, module doc). detections: objects with .cls and
+    .box (x0, y0, x1, y1 in frame pixels of `frame_size` (w, h))."""
+    return {k for k in TL.body_keys(detections, frame_size, grow=grow) if k in BODY_KEYS}
 
 
 def calib_status(hud_reader: Any) -> dict[str, tuple[str, bool]] | None:
@@ -119,11 +118,13 @@ class TowerCheck:
     """The labels and the board of one battle (module doc). start(t) at the battle start; note()
     every battle frame; verdict: None while undecided, else (ok, reasons)."""
 
-    def __init__(self, *, near_tiles: float = NEAR_TILES, body_share: float = BODY_SHARE,
-                 body_min_frames: int = BODY_MIN_FRAMES, deadline_s: float = DEADLINE_S):
-        self.near_tiles = float(near_tiles)
+    def __init__(self, *, grow: float = BODY_GROW, body_share: float = BODY_SHARE,
+                 body_min_frames: int = BODY_MIN_FRAMES, body_min_s: float = BODY_MIN_S,
+                 deadline_s: float = DEADLINE_S):
+        self.grow = float(grow)
         self.body_share = float(body_share)
         self.body_min_frames = max(1, int(body_min_frames))
+        self.body_min_s = max(0.0, float(body_min_s))
         self.deadline_s = float(deadline_s)
         self.reset()
 
@@ -147,10 +148,12 @@ class TowerCheck:
         return {k: round(self.hits[k] / self.det_frames, 3) for k in BODY_KEYS}
 
     def note(self, t: float, calib: Mapping[str, tuple[str, bool]] | None, *, detector: bool = False,
-             detections: Iterable[Any] | None = None, frame_size: Sequence[int] | None = None
-             ) -> tuple[bool, list[str]] | None:
+             detections: Iterable[Any] | None = None, frame_size: Sequence[int] | None = None,
+             hold: bool = False) -> tuple[bool, list[str]] | None:
         """One battle frame: the labels' (status, calibrated); detector: one runs (configured);
-        detections: this frame's boxes, None when it did not run on this frame."""
+        detections: this frame's boxes, None when it did not run on this frame; hold: the gate
+        cannot open on this frame anyway (TapGate: its mode check is pending), so the board keeps
+        counting instead of deciding (until DEADLINE_S; the labels still fail at once)."""
         if self.verdict is not None or self.t0 is None:
             return self.verdict
         t = float(t)
@@ -159,7 +162,7 @@ class TowerCheck:
         self.calib = None if calib is None else dict(calib)
         if detector and detections is not None:
             self.det_frames += 1
-            for key in body_positions(detections, frame_size, near_tiles=self.near_tiles):
+            for key in body_positions(detections, frame_size, grow=self.grow):
                 self.hits[key] += 1
         late = t - self.t0 >= self.deadline_s
         if self.calib is None:
@@ -172,7 +175,9 @@ class TowerCheck:
         if waiting:
             return None
         if self.detector:
-            if self.det_frames < self.body_min_frames and not late:
+            early = (hold or self.det_frames < self.body_min_frames
+                     or t - self.t0 < self.body_min_s - 1e-6)
+            if early and not late:                     # the board frames: module doc
                 return None
             shares = self.shares()
             low = [k for k in BODY_KEYS if shares[k] is None or shares[k] < self.body_share]
@@ -271,7 +276,8 @@ class TapGate:
         if verdict is not None and not self._mode_said:
             self._mode_said = True
             out.append(("game_mode", verdict.to_dict()))
-        towers = self.towers.note(t, calib, detector=detector, detections=detections, frame_size=frame_size)
+        towers = self.towers.note(t, calib, detector=detector, detections=detections, frame_size=frame_size,
+                                  hold=verdict is None)  # the board counts until the gate could open
         if self.state != PENDING:
             if self.state == CLOSED:                   # what failed later is recorded too
                 extra = [r for r in self._reasons(towers, verdict) if r not in self.reasons]

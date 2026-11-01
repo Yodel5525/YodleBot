@@ -382,6 +382,115 @@ def test_a_vision_play_session(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# the body share: the tap gate's rule
+# ---------------------------------------------------------------------------
+def moved(key: str, *, dy: float = 0.0, top: float = 0.0, cls: str | None = None):
+    """A body box at `key`'s reference body, dy px lower and its top `top` px higher (px at 1080)."""
+    x0, y0, x1, y1 = TL.TOWER_BODY_REF_PX[key]
+    return S.det(cls or ("KingTower" if key.endswith("king") else "PrincessTower"), (x0, y0 + dy - top, x1, y1 + dy))
+
+
+def gate_session(root: Path, kind: str = "replay", gate_log: dict | None = None, *, lock_at: float | None = None,
+                 mode_at: float | None = None) -> tuple[Path, list[list]]:
+    """40 battle frames, 10 a second, every tower's body boxed, but the enemy king's: none on the
+    first 3 frames, then a skin's box (40 px lower, its top 80 px higher: same centre) until frame
+    19, then a box 2 tiles lower (another board); a HogRider stands at it on every frame. lock_at:
+    calib records, the four labels calibrated from that many s in; mode_at: a game_mode record
+    (vision_play's) of a verdict that many s in. Returns the session and each frame's detections."""
+    w = Writer(root, "gate", kind)
+    every = []
+    for i in range(40):
+        t = T0 + 0.1 * i
+        dets = [moved(k) for k in VT.TOWER_KEYS if k != "enemy_king"] + [moved("enemy_king", cls="HogRider")]
+        if 3 <= i < 20:
+            dets.append(moved("enemy_king", dy=40.0, top=80.0))
+        elif i >= 20:
+            dets.append(moved("enemy_king", dy=2 * 41.4))
+        every.append(dets)
+        cal = None if lock_at is None else {"calib": {
+            k: {"calibrated": 0.1 * i >= lock_at - 1e-9, "du": 0.0, "dv": 0.0, "source": "calib"}
+            for k in TL.PRINCESS_KEYS}}
+        hud = (summary(t, tick=100 + 2 * i, extra=cal) if kind == "replay"
+               else {**compact(tick=100 + 2 * i), **(cal or {})})
+        w.frame(t, tick=100 + 2 * i, hud=hud, dets=dets)
+    if mode_at is not None:
+        w.log("game_mode", battle=1, mode="classic", why="first clock 2:59, elixir every 2.8 s",
+              t=round(T0 + mode_at, 3), tick=100 + round(20 * mode_at))
+    if gate_log is not None:
+        w.log("tap_gate", battle=1, **gate_log)
+    return w.close(), every
+
+
+def test_the_body_share_is_the_tap_gates_rule(tmp_path):
+    """boxes.body counts what scripts/vision/tap_gate.py counts (tower_labels.body_keys at
+    BODY_GATE_GROW): the skin's king box counts, the HogRider and the box 2 tiles off do not (the
+    old any-class share counts both: 100%). Over the gate's board window (1.5 s, 16 frames) the
+    share is the one a TowerCheck fed the same boxes decides on (no calib or mode records here)."""
+    from scripts.vision import tap_gate as TG
+    path, every = gate_session(tmp_path / "replays")
+    code, rep, lines = audit(path)
+    king = rep["sessions"][0]["battles"][0]["towers"]["enemy_king"]["boxes"]
+    assert king["share"] == 1.0 and king["classes"]["HogRider"] == 40
+    assert king["body"] == {"with_body": 17, "share": 0.425, "first_frames": 16, "first_s": 1.5, "first_share": 0.812}
+    own = rep["sessions"][0]["battles"][0]["towers"]["own_king"]["boxes"]["body"]
+    assert own["share"] == 1.0 and own["first_share"] == 1.0
+    tc = TG.TowerCheck()
+    tc.start(T0)
+    locked = {k: ("locked", True) for k in TL.PRINCESS_KEYS}
+    verdict = None
+    for i, dets in enumerate(every):
+        verdict = verdict or tc.note(T0 + 0.1 * i, locked, detector=True, detections=dets_of(dets), frame_size=SIZE)
+    assert verdict == (True, []) and tc.det_frames == 16
+    assert tc.summary()["bodies"]["enemy_king"] == king["body"]["first_share"]
+    [row] = [x for x in lines if x.lstrip().startswith("enemy_king")]
+    assert "body 42% (first 1.5s/16f 81%); any 100%: " in row
+
+
+def test_the_body_share_window_follows_the_label_lock_and_the_mode_verdict(tmp_path):
+    """The gate's board decides once the labels are calibrated and the mode verdict is in, not
+    before BODY_MIN_S and BODY_MIN_FRAMES (the review's P1, and its P2: the audit's window ignored
+    the lock): the audit's "first" window is the same. A vision_play session whose labels lock at
+    0.6 s and whose game_mode record came 2.4 s in: the first 25 frames, the king boxed on 17 of
+    them, what a TowerCheck held until the mode verdict decides on. A replay (no mode record) whose
+    labels lock 1.9 s in: 20 frames, 17 of them (85%)."""
+    from scripts.vision import tap_gate as TG
+    path, every = gate_session(tmp_path / "play", kind="play", lock_at=0.6, mode_at=2.4)
+    code, rep, lines = audit(path)
+    king = rep["sessions"][0]["battles"][0]["towers"]["enemy_king"]["boxes"]["body"]
+    assert (king["first_frames"], king["first_s"], king["first_share"]) == (25, 2.4, 0.68)
+    tc = TG.TowerCheck()
+    tc.start(T0)
+    verdict = None
+    for i, dets in enumerate(every):
+        cal = {k: ("locked", True) if 0.1 * i >= 0.6 - 1e-9 else ("searching", False) for k in TL.PRINCESS_KEYS}
+        verdict = verdict or tc.note(T0 + 0.1 * i, cal, detector=True, detections=dets_of(dets), frame_size=SIZE,
+                                     hold=0.1 * i < 2.4 - 1e-9)
+    assert verdict == (True, []) and tc.det_frames == 25 and tc.summary()["bodies"]["enemy_king"] == 0.68
+    [row] = [x for x in lines if x.lstrip().startswith("enemy_king")]
+    assert "body 42% (first 2.4s/25f 68%); any 100%: " in row
+    path, _ = gate_session(tmp_path / "replay", lock_at=1.9)
+    code, rep, lines = audit(path)
+    king = rep["sessions"][0]["battles"][0]["towers"]["enemy_king"]["boxes"]["body"]
+    assert (king["first_frames"], king["first_s"], king["first_share"]) == (20, 1.9, 0.85)
+
+
+def test_a_vision_play_session_shows_its_tap_gate(tmp_path):
+    """vision_play's tap_gate record: the audit shows the verdict and the shares it decided on."""
+    rec = {"state": "closed", "reasons": ["towers not boxed by the detector (enemy_king 0% of 3 frames)"],
+           "decided_s": 0.5, "tick": 120, "towers": {"det_frames": 3, "bodies": {
+               "enemy_left": 1.0, "enemy_king": 0.0, "enemy_right": 1.0, "own_left": 1.0, "own_king": 1.0,
+               "own_right": 1.0}}}
+    path, _ = gate_session(tmp_path / "play", kind="play", gate_log=rec)
+    code, rep, lines = audit(path)
+    b = rep["sessions"][0]["battles"][0]
+    assert b["gate"]["state"] == "closed" and b["gate"]["det_frames"] == 3
+    assert ("    tap gate: closed at 0.5 s (towers not boxed by the detector (enemy_king 0% of 3 frames)); bodies on "
+            "3 frames: enemy_left 100%, enemy_king 0%, enemy_right 100%, own_left 100%, own_king 100%, own_right 100%"
+            ) in lines
+    assert rep["sessions"][0]["battles"][0]["towers"]["enemy_king"]["boxes"]["body"]["first_share"] == 0.812
+
+
+# ---------------------------------------------------------------------------
 # finding sessions, bad input, no battle
 # ---------------------------------------------------------------------------
 def test_sessions_under_a_root(tmp_path):

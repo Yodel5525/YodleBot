@@ -15,6 +15,13 @@ tower troops, so nothing here depends on one layout:
   present only BODY_BRIDGE_S after the tower's label was last seen, skin audit P1-1). A label of
   the reference size close to the reference also gives the shift to read that tower's HP at
   (placement).
+* body_keys: the one rule for "a body box at a tower": a BODY_CLASSES box whose centre lies in
+  the tower's reference body box grown by a fraction of its size a side. TowerEvidence grows it
+  BODY_GROW (0.25: presence, generous); the tap gate's board check (tap_gate.py) and
+  tools/tower_audit.py's body share use BODY_GATE_GROW (-0.2: the reference body's middle 60%),
+  so that a box two tiles straight across or down from a tower counts for none while a tower
+  skin's box still counts (a skin moves its box's top or bottom, 40 px or more; its centre moves
+  far less).
 * LabelPlacer: the shift per princess tower, the per-axis median of the last 15 placement votes
   once there are 5 (a 3 px dead band keeps a default-skin tower on its calibrated boxes), else
   the pixel search's result once 3 searches agree within 3 px, else no shift.
@@ -80,6 +87,14 @@ PLACE_DU_PX = 24.0                     # a label gives a placement vote within t
 PLACE_DV_PX = (-90.0, 40.0)            # ... this dy ...
 PLACE_SIZE_TOL = 0.25                  # ... and with its width and height within +-25% of the reference
 BODY_GROW = 0.25                       # a body box's centre in the reference body grown 25% a side
+#: The tap gate's board check (and tower_audit's body share): a body box's centre in the reference
+#: body shrunk 20% a side, its middle 60%. That is +-0.9 tile across and +-1.24 tile (51 px) down
+#: at a princess tower, +-1.1 and +-1.7 tile (72 px) at the enemy king, +-1.1 and +-1.6 (65 px) at
+#: ours (a tile: 51 x 41.4 px at 1080x1920): a box 2 tiles (102 / 83 px) straight across or down
+#: counts for no tower (diagonally the enemy king's corner is 2.07 tiles out), a whole box 40 px
+#: higher or lower still counts. Measured on the owner's 10-29 / 10-31 battles (default skin; the
+#: chicken skin): every body box's centre within 12 px across and 30 px down of its reference's.
+BODY_GATE_GROW = -0.2
 BODY_BRIDGE_S = 3.0                    # a body box alone keeps a tower present this long after its label (P1-1)
 
 SEARCH_UP_PX, SEARCH_DOWN_PX = 60.0, 25.0     # the search window around the reference badge row
@@ -110,6 +125,36 @@ def _grown(box: Sequence[float], frac: float) -> tuple[float, float, float, floa
     x0, y0, x1, y1 = (float(c) for c in box)
     gx, gy = (x1 - x0) * frac, (y1 - y0) * frac
     return x0 - gx, y0 - gy, x1 + gx, y1 + gy
+
+
+def body_keys_at(box: Sequence[float], grow: float = BODY_GROW) -> set[str]:
+    """The tower keys whose reference body box (TOWER_BODY_REF_PX) grown by `grow` of its width
+    and height a side (negative: shrunk) holds the centre of `box` (x0, y0, x1, y1 px at 1080x1920)."""
+    cx, cy = _centre(box)
+    out: set[str] = set()
+    for key, ref in TOWER_BODY_REF_PX.items():
+        x0, y0, x1, y1 = _grown(ref, grow)
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            out.add(key)
+    return out
+
+
+def body_keys(detections: Iterable[Any], frame_size: Sequence[int] | None, *,
+              grow: float = BODY_GROW) -> set[str]:
+    """The tower keys a body box stands on (module doc: body_keys): a box of BODY_CLASSES whose
+    centre lies in the key's reference body grown by `grow` a side. detections: objects with .cls
+    and .box (x0, y0, x1, y1 in pixels of `frame_size` (w, h)); no frame size: none."""
+    if not frame_size or float(frame_size[0]) <= 0 or float(frame_size[1]) <= 0:
+        return set()
+    out: set[str] = set()
+    for d in detections or ():
+        if str(getattr(d, "cls", "")) not in BODY_CLASSES:
+            continue
+        b = getattr(d, "box", None)
+        if b is None or len(b) < 4:
+            continue
+        out |= body_keys_at(_to_ref(b, frame_size), grow)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +199,7 @@ class TowerEvidence:
             cx, cy = _centre(box)
             conf = float(getattr(d, "conf", 0.0) or 0.0)
             if name in BODY_CLASSES:
-                for key, ref in TOWER_BODY_REF_PX.items():
-                    x0, y0, x1, y1 = _grown(ref, BODY_GROW)
-                    if x0 <= cx <= x1 and y0 <= cy <= y1:
-                        ev.bodies.add(key)
+                ev.bodies |= body_keys_at(box, BODY_GROW)
                 continue
             for key, ref in refs.items():
                 rx, ry = _centre(ref)
@@ -353,7 +395,8 @@ def badge_seen(rgb: np.ndarray, anchor_u: float, row_px: float, *, tol_px: float
 
 
 __all__ = [
-    "BADGE_DV_PX", "BODY_BRIDGE_S", "BODY_CLASSES", "KING_KEYS", "LABEL_CLASSES", "LABEL_REF_PX", "LabelPlacer",
-    "PRINCESS_KEYS", "SOURCE_DETECTOR", "SOURCE_FIXED", "SOURCE_SEARCH", "TOWER_BODY_REF_PX",
-    "TowerEvidence", "badge_seen", "find_label_dv", "gold_mask", "ref_badge_row",
+    "BADGE_DV_PX", "BODY_BRIDGE_S", "BODY_CLASSES", "BODY_GATE_GROW", "BODY_GROW", "KING_KEYS", "LABEL_CLASSES",
+    "LABEL_REF_PX", "LabelPlacer", "PRINCESS_KEYS", "SOURCE_DETECTOR", "SOURCE_FIXED", "SOURCE_SEARCH",
+    "TOWER_BODY_REF_PX", "TowerEvidence", "badge_seen", "body_keys", "body_keys_at", "find_label_dv", "gold_mask",
+    "ref_badge_row",
 ]

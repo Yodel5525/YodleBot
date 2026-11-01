@@ -4,7 +4,8 @@
 Before the gate, nothing stopped the bot from tapping in a battle it could not read: the refused-tap
 guard reacts only after 3 taps that did nothing. Now every battle's AUTO taps wait until all four
 princess labels are calibrated (tower_calib), the detector boxes a tower body at each of the six
-tower positions on half the calibration frames, and the mode check (mode.py) says classic. When a
+towers (its box centred there, any skin) on half the frames until the gate could open, and the mode
+check (mode.py) says classic. When a
 check fails the runner prints one line and switches AUTO to MANUAL (mode source "towers"); the
 owner's F8 overrides that for the rest of the battle; a dry run only says what the gate would do.
 
@@ -217,18 +218,35 @@ def play_actions(res) -> list[tuple[int, str, str]]:
 # where the towers are
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("size", S.SIZES)
-def test_a_body_box_counts_within_half_a_tile_of_its_tower(size):
-    """The six reference bodies are found; a box 0.4 tile off is still its tower's, one 0.6 tile
-    off is not; a taller tower skin (the box's top 40 px higher) stands on the same ground; a unit
-    class at the tower is no body."""
+def test_a_body_box_counts_where_its_centre_is_at_its_tower(size):
+    """The six reference bodies are found. A tower skin moves its box's top or bottom: a whole box
+    40 px higher or lower, a taller one (top 40 px up), 0.8 tile across, and at a king a different
+    shape (its bottom 40 px higher and its top 80 px higher; or 40 px lower and 40 px higher) all
+    count for their tower; the old rule (the box's bottom centre within half a tile) refused the
+    40 px ones. A box 2 tiles off, across or down, counts for no tower (the geometry check); a
+    unit class at the tower is no body."""
     assert TG.body_positions(bodies(size=size), size) == set(TG.BODY_KEYS)
     tile_x, tile_y = TG.TILE_PX
-    assert TG.body_positions([body("enemy_left", dx=0.4 * tile_x, size=size)], size) == {"enemy_left"}
-    assert TG.body_positions([body("enemy_left", dx=0.6 * tile_x, size=size)], size) == set()
-    assert TG.body_positions([body("own_king", dy=0.6 * tile_y, size=size)], size) == set()
+    for key in TG.BODY_KEYS:
+        shapes = ({"dy": -40.0, "top": 40.0}, {"dy": 40.0, "top": 80.0}) if key.endswith("king") else ()
+        for kw in ({"dy": -40.0}, {"dy": 40.0}, {"top": 40.0}, {"dx": 0.8 * tile_x}, {"dx": -0.8 * tile_x}, *shapes):
+            assert TG.body_positions([body(key, size=size, **kw)], size) == {key}, (key, kw)
+        for kw in ({"dx": 2 * tile_x}, {"dx": -2 * tile_x}, {"dy": 2 * tile_y}, {"dy": -2 * tile_y}):
+            assert TG.body_positions([body(key, size=size, **kw)], size) == set(), (key, kw)
     assert TG.body_positions([body("enemy_right", top=40.0, size=size, cls="Cannoneer")], size) == {"enemy_right"}
     assert TG.body_positions([body("own_left", cls="Knight", size=size)], size) == set()
     assert TG.body_positions(bodies(), None) == set()
+
+
+def test_the_gate_and_the_audit_share_one_body_rule():
+    """tap_gate.body_positions is tower_labels.body_keys at the gate's margin (tools/tower_audit.py
+    counts its body share with it too); TowerEvidence's presence keeps the wider BODY_GROW."""
+    tile_y = TG.TILE_PX[1]
+    far = [body("enemy_king", dy=2 * tile_y)]
+    assert TG.BODY_GROW == TL.BODY_GATE_GROW < 0 < TL.BODY_GROW
+    assert TL.body_keys(far, SIZE, grow=TL.BODY_GATE_GROW) == TG.body_positions(far, SIZE) == set()
+    assert TL.TowerEvidence.from_detections(far, SIZE).bodies == {"enemy_king"}       # presence: wider
+    assert TL.body_keys(bodies(), SIZE, grow=TL.BODY_GATE_GROW) == set(TG.BODY_KEYS)
 
 
 def test_the_calibration_states_come_from_the_hud_reader():
@@ -244,13 +262,37 @@ def test_the_calibration_states_come_from_the_hud_reader():
 # ---------------------------------------------------------------------------
 # the towers check
 # ---------------------------------------------------------------------------
-def test_the_towers_pass_once_calibrated_and_boxed_on_enough_frames():
+def board(tc, times, boxes, calib=None):
+    """Battle frames at `times` into TowerCheck `tc`: boxes(i) -> frame i's detections (None: the
+    detector did not run on it), calib(i) -> its labels (default: all locked). Returns
+    [(t, verdict)] of every frame."""
+    out = []
+    for i, t in enumerate(times):
+        out.append((t, tc.note(t, locked() if calib is None else calib(i), detector=True, detections=boxes(i),
+                               frame_size=SIZE)))
+    return out
+
+
+def without(key: str) -> list[Detection]:
+    return bodies([k for k in TG.BODY_KEYS if k != key])
+
+
+def test_the_towers_pass_once_calibrated_and_boxed_over_the_board_window():
+    """10 frames a second, the labels locked from the second frame: the board waits for BODY_MIN_S
+    (1.5 s; 15 frames) and decides then (the old gate decided on its 3rd frame, 0.3 s in). At 25
+    frames a second it is the same 1.5 s (38 frames); 10 frames alone (0.4 s) are not enough."""
     tc = TG.TowerCheck()
     tc.start(0.0)
-    assert tc.note(0.1, locked(searching=["enemy_left"]), detector=True, detections=bodies(), frame_size=SIZE) is None
-    assert tc.note(0.2, locked(), detector=True, detections=bodies(), frame_size=SIZE) is None   # 2 frames
-    assert tc.note(0.3, locked(), detector=True, detections=bodies(), frame_size=SIZE) == (True, [])
-    assert tc.summary()["bodies"] == {k: 1.0 for k in TG.BODY_KEYS} and tc.summary()["det_frames"] == 3
+    times = [round(0.1 * i, 3) for i in range(1, 16)]
+    res = board(tc, times, lambda i: bodies(), calib=lambda i: locked(searching=["enemy_left"]) if i == 0 else locked())
+    assert [v for _, v in res[:-1]] == [None] * 14 and res[-1] == (1.5, (True, []))
+    assert tc.summary()["bodies"] == {k: 1.0 for k in TG.BODY_KEYS} and tc.summary()["det_frames"] == 15
+    assert tc.summary()["decided_s"] == 1.5
+    tc = TG.TowerCheck()
+    tc.start(100.0)
+    res = board(tc, [round(100.0 + 0.04 * i, 3) for i in range(60)], lambda i: bodies())
+    decided = [(t, v) for t, v in res if v is not None]
+    assert decided[0][1] == (True, []) and decided[0][0] == pytest.approx(101.52) and tc.det_frames == 39
 
 
 def test_a_tower_whose_calibration_expired_fails():
@@ -261,14 +303,69 @@ def test_a_tower_whose_calibration_expired_fails():
 
 
 def test_a_tower_the_detector_boxes_on_too_few_frames_fails():
-    """The enemy king boxed on 1 of the first 3 calibration frames: the board is not as expected."""
+    """The enemy king boxed on 3 of the 15 board frames: the board is not as expected."""
     tc = TG.TowerCheck()
     tc.start(0.0)
-    tc.note(0.1, locked(), detector=True, detections=bodies(), frame_size=SIZE)
-    tc.note(0.2, locked(), detector=True, detections=bodies([k for k in TG.BODY_KEYS if k != "enemy_king"]),
-            frame_size=SIZE)
-    assert tc.note(0.3, locked(), detector=True, detections=bodies([k for k in TG.BODY_KEYS if k != "enemy_king"]),
-                   frame_size=SIZE) == (False, ["towers not boxed by the detector (enemy_king 33% of 3 frames)"])
+    res = board(tc, [round(0.1 * i, 3) for i in range(1, 16)], lambda i: bodies() if i < 3 else without("enemy_king"))
+    assert res[-1][1] == (False, ["towers not boxed by the detector (enemy_king 20% of 15 frames)"])
+
+
+def test_a_king_unboxed_on_the_first_frames_and_moved_by_its_skin_passes():
+    """The 11-01 battle: the enemy king's box missing on the first 3 frames (the old gate decided on
+    exactly those, 0%), then a different shape: the box standing 40 px lower, its top 40 px
+    higher. 12 of the 15 board frames have it: the board passes."""
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    skin = without("enemy_king") + [body("enemy_king", dy=40.0, top=80.0)]
+    res = board(tc, [round(0.1 * i, 3) for i in range(1, 16)], lambda i: without("enemy_king") if i < 3 else skin)
+    assert res[-1] == (1.5, (True, [])) and tc.summary()["bodies"]["enemy_king"] == 0.8
+
+
+def test_a_board_two_tiles_off_and_a_tower_never_boxed_fail_with_their_names():
+    """Every body box 2 tiles lower than its tower (another geometry): all six fail. The detector
+    never boxing the own king: it fails alone, named with its share."""
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    shifted = [body(k, dy=2 * TG.TILE_PX[1]) for k in TG.BODY_KEYS]
+    res = board(tc, [round(0.1 * i, 3) for i in range(1, 16)], lambda i: shifted)
+    assert res[-1][1] == (False, ["towers not boxed by the detector (enemy_left 0%, enemy_king 0%, enemy_right 0%, "
+                                  "own_left 0%, own_king 0%, own_right 0% of 15 frames)"])
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    res = board(tc, [round(0.1 * i, 3) for i in range(1, 16)], lambda i: without("own_king"))
+    assert res[-1][1] == (False, ["towers not boxed by the detector (own_king 0% of 15 frames)"])
+
+
+def test_sparse_frames_decide_on_ten_frames_before_the_deadline():
+    """A replay with an image every 0.8 s (the 10-31 dry run's): the board decides on its 10th
+    frame, 7.2 s in (that replay's mode verdict came at 7.23 s), the king missing on the first 3 of
+    them still passes. A detector that ran on only 5 frames by the deadline decides there, on those."""
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    res = board(tc, [round(0.8 * i, 3) for i in range(30)], lambda i: without("enemy_king") if i < 3 else bodies(),
+                calib=lambda i: locked(searching=["own_left"]) if i < 2 else locked())
+    decided = [(t, v) for t, v in res if v is not None]
+    assert decided[0] == (7.2, (True, [])) and tc.det_frames == 10 and tc.summary()["bodies"]["enemy_king"] == 0.7
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    res = board(tc, [round(0.5 * i, 3) for i in range(41)], lambda i: bodies() if i % 10 == 0 else None)
+    decided = [(t, v) for t, v in res if v is not None]
+    assert decided[0] == (20.0, (True, [])) and tc.det_frames == 5
+
+
+def test_a_held_board_keeps_counting_until_the_deadline():
+    """hold (TapGate: the mode check is pending): the board neither passes nor fails, however many
+    frames came, and decides at DEADLINE_S on all of them. The labels still fail at once."""
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    res = [(t, tc.note(t, locked(), detector=True, detections=without("enemy_king") if t < 5.0 else bodies(),
+                       frame_size=SIZE, hold=True)) for t in [round(0.1 * i, 3) for i in range(1, 201)]]
+    assert [v for _, v in res[:-1]] == [None] * 199 and res[-1] == (20.0, (True, []))
+    assert tc.det_frames == 200 and tc.summary()["bodies"]["enemy_king"] == 0.755
+    tc = TG.TowerCheck()
+    tc.start(0.0)
+    assert tc.note(3.0, locked(expired=["own_right"]), detector=True, detections=bodies(), frame_size=SIZE,
+                   hold=True) == (False, ["towers not calibrated (own_right)"])
 
 
 def test_without_a_detector_only_the_labels_count():
@@ -295,17 +392,19 @@ def test_labels_still_searching_at_the_deadline_fail_and_so_does_a_silent_detect
 # ---------------------------------------------------------------------------
 # the gate
 # ---------------------------------------------------------------------------
-def feed(gate, *, seconds=4.0, first_tick=30, calib=None, period=M.REGEN_S_1X, detector=True, boxes=None):
-    """Battle frames at 10 a second into a fresh gate; returns every record it gave."""
+def feed(gate, *, seconds=4.0, first_tick=30, calib=None, period=M.REGEN_S_1X, detector=True, boxes=None,
+         every=0.1):
+    """Battle frames `every` s apart (10 a second) into a fresh gate; returns every record it gave.
+    boxes: the detections, or boxes(t) -> them."""
     gate.new_battle(1, first_tick, 0.0)
     out = []
-    for i in range(int(seconds * 10) + 1):
-        t = i / 10.0
-        tick = first_tick + 2 * i
+    for i in range(int(round(seconds / every)) + 1):
+        t = round(i * every, 3)
+        tick = first_tick + round(20 * t)
         e = elixir_at(tick, period)
+        dets = bodies() if boxes is None else boxes(t) if callable(boxes) else boxes
         out += gate.observe(t, tick, calib=locked() if calib is None else calib(t), detector=detector,
-                            detections=bodies() if boxes is None else boxes, frame_size=SIZE,
-                            elixir=(int(e), e / 10.0))
+                            detections=dets, frame_size=SIZE, elixir=(int(e), e / 10.0))
     return out
 
 
@@ -323,6 +422,38 @@ def test_the_gate_opens_only_when_the_towers_and_the_mode_pass():
     assert rec["state"] == TG.OPEN and rec["reasons"] == [] and rec["towers"]["ok"] is True
     assert g.allows() and g.hold_reason() is None and g.status() is None
     assert 1.5 <= rec["decided_s"] <= 3.0                        # the mode check: the first count change
+
+
+def test_the_board_counts_until_the_mode_verdict():
+    """The review's P1: the board waited only for 1.5 s and 10 frames, so a tower unboxed for the
+    battle's first 0.9 s closed the gate (7 of 16 frames, 44%) before the mode check, 0.9 s
+    later, would have let it open (16 of 25, 64%). Now the board decides on the mode verdict's
+    frame, on every frame till then: the king missing for 0.9 s passes; never boxed, it still
+    closes the gate, at the mode verdict, and the line names it."""
+    g = TG.TapGate()
+    recs = dict(feed(g, boxes=lambda t: without("enemy_king") if t < 0.9 else bodies()))
+    mode, gate = recs["game_mode"], recs["tap_gate"]
+    assert mode["mode"] == "classic" and mode["t"] == pytest.approx(2.4)
+    assert gate["state"] == TG.OPEN and gate["decided_s"] == gate["towers"]["decided_s"] == 2.4
+    assert gate["towers"]["det_frames"] == 25 and gate["towers"]["bodies"]["enemy_king"] == 0.64
+    tc = TG.TowerCheck()                                     # the old window: 1.5 s, 16 frames
+    tc.start(0.0)
+    old = board(tc, [round(0.1 * i, 3) for i in range(16)], lambda i: without("enemy_king") if i < 9 else bodies())
+    assert old[-1] == (1.5, (False, ["towers not boxed by the detector (enemy_king 44% of 16 frames)"]))
+    g = TG.TapGate()
+    recs = dict(feed(g, boxes=lambda t: without("enemy_king")))
+    assert recs["tap_gate"]["state"] == TG.CLOSED and recs["tap_gate"]["decided_s"] == 2.4
+    assert g.reasons == ["towers not boxed by the detector (enemy_king 0% of 25 frames)"]
+
+
+def test_sparse_frames_open_the_gate_with_the_mode_or_the_tenth_frame():
+    """A replay with an image every 0.8 s through the gate: the board decides on the later of the
+    mode verdict and its 10th frame, well before DEADLINE_S, and the gate opens there."""
+    g = TG.TapGate()
+    recs = dict(feed(g, seconds=19.2, every=0.8, boxes=lambda t: without("enemy_king") if t < 2.0 else bodies()))
+    mode, gate = recs["game_mode"], recs["tap_gate"]
+    assert gate["state"] == TG.OPEN and gate["towers"]["det_frames"] >= TG.BODY_MIN_FRAMES
+    assert gate["decided_s"] == gate["towers"]["decided_s"] == max(mode["t"], 0.8 * (TG.BODY_MIN_FRAMES - 1)) < 10.0
 
 
 def test_the_gate_closes_on_any_failed_check_and_keeps_what_failed_later():
@@ -525,14 +656,32 @@ def test_a_clock_that_starts_at_2_00_turns_tapping_off_at_once(tmp_path):
 
 
 def test_towers_the_detector_does_not_box_turn_tapping_off(tmp_path):
-    """A king skin the detector misses (no box at the enemy king): the board check fails."""
+    """A king skin the detector misses (no box at the enemy king): the board check fails on its
+    18 frames (until the mode verdict, 1.7 s at 10 a second), and the line names the king."""
     script = gate_script(260)
-    perception = GatePerception(script, boxes=lambda tick: bodies([k for k in TG.BODY_KEYS if k != "enemy_king"]))
+    perception = GatePerception(script, boxes=lambda tick: without("enemy_king"))
     res = run_gate(tmp_path, script, perception=perception, play_ticks=(100, 200))
     assert res.tapper.calls == []
     [line] = gate_lines(res)
-    assert line.startswith("towers not boxed by the detector (enemy_king 0% of 3 frames): tapping off this battle")
+    assert line.startswith("towers not boxed by the detector (enemy_king 0% of 18 frames): tapping off this battle")
     assert res.records["mode"][0]["source"] == "towers"
+    [gate] = res.records["tap_gate"]
+    assert gate["towers"]["bodies"]["enemy_king"] == 0.0 and gate["towers"]["det_frames"] == 18
+    assert gate["towers"]["decided_s"] == gate["decided_s"] and gate["mode"]["mode"] == "classic"
+
+
+def test_a_new_king_skin_keeps_tapping(tmp_path):
+    """The 11-01 friendly end to end: the enemy king's box missing on the battle's first 3 frames
+    (the runner's battle starts at tick 20), then standing 40 px lower with its top 40 px higher.
+    The gate opens (no line, AUTO stays) and the plays are tapped as in a default-skin battle."""
+    script = gate_script(260)
+    skin = without("enemy_king") + [body("enemy_king", dy=40.0, top=80.0)]
+    perception = GatePerception(script, boxes=lambda tick: without("enemy_king") if tick < 26 else skin)
+    res = run_gate(tmp_path, script, perception=perception, play_ticks=(100, 200))
+    assert [t["tick"] for t in res.records["tap"]] == [100, 200]
+    assert gate_lines(res) == [] and res.control.mode == CT.AUTO
+    [gate] = res.records["tap_gate"]
+    assert gate["state"] == TG.OPEN and gate["towers"]["bodies"]["enemy_king"] == pytest.approx(15 / 18, abs=1e-3)
 
 
 def test_taps_wait_while_the_labels_calibrate(tmp_path):

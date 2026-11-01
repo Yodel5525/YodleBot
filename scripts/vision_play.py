@@ -44,8 +44,10 @@ tapped, the legality and the decisions stay exactly as without it.
 
 THE TAP GATE (scripts/vision/tap_gate.py and mode.py, skin audit P0-4 and P1-12). Every battle starts
 with no AUTO tap allowed until its gate opens: all four princess labels calibrated (tower skins),
-with a detector, a tower body boxed at each of the six tower positions on half the calibration
-frames, and classic 1v1 (the first clock reading 2:5x-3:00, our elixir filling at one per 2.8 s).
+with a detector, a tower body boxed at each of the six towers (its box centred there, so a skin
+that moves the box's top or bottom still counts) on half the detector frames from the battle's
+start until the labels and the mode are checked (at least 1.5 s and 10 frames), and classic 1v1
+(the first clock reading 2:5x-3:00, our elixir filling at one per 2.8 s).
 An AUTO tap decided before that is held ("skipped", why "not tapped: tap gate: ..."). When a check
 fails the gate closes for the battle: one console line ("towers not calibrated (enemy_left, ...):
 tapping off this battle; play yourself ...") and AUTO switches to MANUAL (mode source "towers",
