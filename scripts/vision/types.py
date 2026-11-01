@@ -307,20 +307,44 @@ class OwnLanding:
 
 
 @dataclass(slots=True)
-class Events:
-    """Events derived on this frame (not cumulative)."""
-    opp_plays: list[OppPlay] = field(default_factory=list)
-    own_landings: list[OwnLanding] = field(default_factory=list)
+class OppAmend:
+    """A correction of an opponent play reported on an earlier frame (scripts/vision/events,
+    EventConfig.reguess_ticks): `old` is the play as it was reported (its card, tick, exec_tick
+    and cost: what the public memory and the elixir count took), `new` the play it is now
+    (its card re-guessed). Consumers retract `old` and record `new`."""
+    old: OppPlay
+    new: OppPlay
 
     def to_dict(self) -> dict[str, Any]:
-        return {"opp_plays": [p.to_dict() for p in self.opp_plays],
-                "own_landings": [p.to_dict() for p in self.own_landings]}
+        return {"old": self.old.to_dict(), "new": self.new.to_dict()}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "OppAmend":
+        return cls(OppPlay.from_dict(d["old"]), OppPlay.from_dict(d["new"]))
+
+
+@dataclass(slots=True)
+class Events:
+    """Events derived on this frame (not cumulative). opp_amended: corrections of opponent plays
+    reported on earlier frames (OppAmend); to_dict leaves the key out when there are none, so
+    frames without one are written as they always were."""
+    opp_plays: list[OppPlay] = field(default_factory=list)
+    own_landings: list[OwnLanding] = field(default_factory=list)
+    opp_amended: list[OppAmend] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {"opp_plays": [p.to_dict() for p in self.opp_plays],
+             "own_landings": [p.to_dict() for p in self.own_landings]}
+        if self.opp_amended:
+            d["opp_amended"] = [a.to_dict() for a in self.opp_amended]
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> "Events":
         d = d or {}
         return cls([OppPlay.from_dict(p) for p in d.get("opp_plays", [])],
-                   [OwnLanding.from_dict(p) for p in d.get("own_landings", [])])
+                   [OwnLanding.from_dict(p) for p in d.get("own_landings", [])],
+                   [OppAmend.from_dict(a) for a in d.get("opp_amended", [])])
 
 
 @dataclass(slots=True)

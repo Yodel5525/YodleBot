@@ -156,6 +156,68 @@ more than one deck.
   our same-class track was seen at most this long before (within ``own_recent_radius_mt``) is
   ours. It lost real opponent plays (an opponent Hog Rider and Skeletons) on the data.
 
+PHANTOMS (EventConfig; off in EventConfig(), on live through LIVE_PHANTOMS in EventConfig.live(),
+off under --legacy-opp-plays with the guards). The owner's 2026-11-01 --tap friendlies: one enemy
+unit the detector has no class for (a hero Musketeer read as Goblins, Little Prince, Prince) was a
+new play at every label change, evolved-Skeleton clones were plays, a Fireball was logged again as a
+Rocket, and the plays the elixir count could not pay drained it (22 of 47). The rules:
+* reid_doubtful. Rule 1 (enemy, reid_any_label) also takes a lost track of another unit label that
+  explained a play WITHOUT the motion (a ranged unit standing at the bridge has no heading) when the
+  new track's play is DOUBTFUL: the opponent elixir count (bind_opp_elixir:
+  public_state.OpponentElixir.can_pay) says it could not be paid even leaving out the plays the
+  count already found unaffordable (the phantoms that drain it: with the plain count over half the
+  real plays read as unpaid, as many as the misreads). No count bound: nothing is doubtful. The
+  opponent's confirmed cards are no test (their first ``deck_size`` hold the early misreads).
+  The lost track must be LOST: no longer reported by the tracker (a unit missed for a frame or two
+  is coasting, not gone), and the new track is not taken before it is min_play_age_ticks old
+  (asked again on every update until then: a unit missed while a real play lands next to it is
+  seen again first). The new track is born within ``reid_doubt_radius_mt`` of where the lost one
+  was last seen, and the two are not moving apart (both faster than reid_min_speed_mt_per_tick
+  with headings that disagree); a lost unit that dies on its first hit (ONE_HIT_CLASSES: the
+  spirits and Wall Breakers that hit, the Skeletons and Bats that are hit) is gone, not continued.
+  CONFIRMED cards are the cards of reported plays the count could pay (every play without a count),
+  the first ``deck_size`` (8) of them (prefer_confirmed, reguess_ticks). LIVE_PHANTOMS also widens
+  rule 1's window for the ENEMY's lost tracks to opp_reid_ticks 50 (and the young tracks'
+  fragments): the hero Musketeer's walking track came back 33 and 44 ticks after it was lost; our
+  own keep reid_ticks (30: a misread unit of our tap is not an older unit of ours). Cost: a real
+  first play the count cannot pay, deployed where an enemy unit of another label was lost moments
+  before, is taken for that unit.
+* self_clones. Rule 3 for the enemy: a new track of one of these classes (Skeleton: the evolved
+  Skeletons clone themselves when they attack) next to a living (or just dead) enemy unit of the
+  same class (by the tracker's current label) of a reported play whose card puts that class down
+  is that unit's clone, not a play. Cost: a second Skeletons play next to living enemy skeletons.
+* spell_relabel. Rule 2 for spells takes a spell track of another label of the same look-alike group
+  (SPELL_FLIGHT_LOOKALIKES: the spells that fly from the king tower, Fireball / Rocket / Goblin
+  Barrel / Snowball / Arrows; the rolling ones, Log / Barbarian Barrel) on the play's flight as the
+  same cast: within the same windows as the same label, and always within spell_reach_mt (plus the
+  play's speed) of where its spell was last seen (_spell_reaches; the same label needs that only
+  past PLAY_WINDOW). The play's card then follows the label seen on the most frames (an
+  amendment, below). Cost: a second look-alike spell cast on the first one's path within PLAY_WINDOW.
+* prefer_confirmed. An enemy play several cards fit (Skeletons / Skeleton Army) takes a confirmed
+  card when one of the candidates is.
+* reguess_ticks (LIVE 15). A classified track's card (card_of / card_for, the board's unit token)
+  is guessed again from the tracker's label when the tracker's team no longer is the team the card
+  was given for (the card of the other side's best guess), or when its label has been outside the
+  card's classes (and the label it was classified with) for this many ticks in a row (a short
+  flicker keeps the card); an enemy track's new card is the best guess among the opponent's
+  confirmed cards (but its own play's) first. A reported opponent play one of whose units is so
+  guessed again is AMENDED to the card of the label its units were seen with on the most frames
+  (its children left out), once that label has reguess_ticks more frames than the labels of the
+  play's card (no flip-flop), every unit seen about as recently names that card too and it is no
+  building for a troop or back (a building's track that walks off took another unit's boxes):
+  Events.opp_amended carries OppAmend(old, new), and the runners correct the public memory
+  (rs_memory.PublicMemory.retract) and the elixir count (public_state.OpponentElixir.amend); a play
+  amended on the update that reports it is reported with the new card, no OppAmend. A team change
+  never amends a play.
+Measured on six logged sessions (2026-10-29 Round 0 and dry run, the four 2026-11-01 --tap
+friendlies), the deriver re-run on the logged tracks: 171 opponent plays -> 150 and 61 the count
+could not pay -> 40; game 2 (a Hog 2.6 mirror) 47 plays of 19 cards, 22 unpaid -> 39 of 15, 8
+unpaid, the cards in the opponent's real deck 55% -> 69%; Round 0 47 -> 38 (23 by the owner's
+list). With the tracker's CAPTURE rules too (tracker re-run from the logged detections) 171 -> 144
+plays, 68 -> 37 unpaid. Of the enemy tracks reid_doubtful asks about, it doubts 25% of those of a
+card in the opponent's real deck and 31% of the others (the plain count and the first eight
+confirmed cards: 55% and 59%).
+
 Every classified track also gets a CARD-LEVEL identity (card_of / card_for):
 the card that put it on the board, so a Witch's skeleton is the Witch's. That
 is what the legacy --live-compat rows use as the unit token (rs_rows.py: unit
@@ -221,15 +283,16 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .tracker import MID_Y_MT, TICK_MS
-from .types import (ENEMY_TEAM, OWN_TEAM, UNKNOWN_CARD, UNKNOWN_TEAM, Events, OppPlay, OwnLanding,
-                    Track, now)
+from .types import (ENEMY_TEAM, OWN_TEAM, UNKNOWN_CARD, UNKNOWN_TEAM, Events, OppAmend, OppPlay,
+                    OwnLanding, Track, now)
 
 __all__ = ["PLAY_WINDOW", "SPELL_WINDOW", "TOKEN_OFFSET", "KIND_UNIT", "KIND_SPELL", "WILDCARD",
            "SPAWN_CHILDREN", "KATACR_SPELL_CLASSES", "SPELL_LOOKALIKES", "UNKNOWN_CARD", "UNKNOWN_PLAY_COST",
-           "LIVE_GUARDS", "LIVE_OWN",
+           "LIVE_GUARDS", "LIVE_OWN", "LIVE_PHANTOMS", "SPELL_FLIGHT_LOOKALIKES",
            "DEPLOY_ANYWHERE_CLASSES", "EventTables", "EventConfig", "EventDeriver", "OwnTap",
            "LandingStats", "OppStats", "StateTracks", "load_spawn_children", "unit_class_map",
-           "cardless_classes", "record_plays", "guard_settings", "strip_form", "now"]
+           "cardless_classes", "record_plays", "amend_plays", "opp_cards", "guard_settings", "strip_form",
+           "now"]
 
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN_CHILDREN = ROOT / "data" / "vision" / "spawn_children.json"
@@ -262,6 +325,25 @@ LIVE_GUARDS: Mapping[str, Any] = {"min_play_age_ticks": 10, "reid_any_label": Tr
 #: tap; the real unit dropping in at the run (+23..+33, up to 3 tiles above the aim) became a
 #: second own play no tap explained, a false human play on 16 of 33 taps.
 LIVE_OWN: Mapping[str, Any] = {"own_drop_in_ticks": 45}
+#: The phantom-play rules the live runners turn on (module doc, PHANTOMS; EventConfig.live): on the
+#: owner's 2026-11-01 --tap friendlies one standing enemy unit relabelled was several plays, evolved
+#: Skeleton clones were plays, a Fireball was logged again as a Rocket.
+LIVE_PHANTOMS: Mapping[str, Any] = {"opp_reid_ticks": 50, "reid_doubtful": True,
+                                    "self_clones": frozenset({"Skeleton"}), "spell_relabel": True,
+                                    "prefer_confirmed": True, "reguess_ticks": 15}
+#: Units that die on their first hit, the one they give (the spirits, Wall Breakers) or the one
+#: they take (a Skeleton, a Bat): reid_doubtful never continues a lost one, it is gone (a real
+#: play dropped where their skeleton just died is a play).
+ONE_HIT_CLASSES = frozenset({"IceSpirits", "FireSpirits", "ElectroSpirit", "HealSpirit", "Wallbreaker",
+                             "Wallbreaker_mini", "Skeleton", "Bat"})
+#: Spell labels that look alike on one flight (EventConfig.spell_relabel): the spells that fly from
+#: the king tower, and the rolling ones. Card names (what the detector puts in Detection.cls for a
+#: spell) and their KataCR names.
+SPELL_FLIGHT_LOOKALIKES: tuple[frozenset, ...] = (
+    frozenset({"Fireball", "fireball", "Rocket", "rocket", "GoblinBarrel", "goblin-barrel",
+               "Snowball", "giant-snowball", "Arrows", "arrows"}),
+    frozenset({"Log", "the-log", "BarbLog", "barbarian-barrel"}),
+)
 #: The princess towers whose fall opens a pocket (scripts/vision/types.TOWER_KEYS).
 _POCKET_TOWERS = ("own_left", "own_right", "enemy_left", "enemy_right")
 
@@ -353,6 +435,8 @@ class EventTables:
                   Goblin up to 11.5 tiles away: Mortar {Goblin: 13600}). Rule 3 takes such
                   a child that far (module doc, FAR CHILD); every other parent and child
                   class keeps EventConfig.child_radius_mt.
+    buildings     the building cards (a Cannon: its units stand where they were put down);
+                  a re-guess never amends a building's play to a troop or back (PHANTOMS).
     Mapping keys may be strings (JSON); values may be lists, sets or count dicts.
     """
     compositions: Mapping[int, Mapping[str, int]]
@@ -362,6 +446,7 @@ class EventTables:
     aliases: Mapping[int, int] = field(default_factory=dict)
     variant_costs: Mapping[int, Mapping[str, int]] = field(default_factory=dict)
     child_reach: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    buildings: Iterable[int] = frozenset()
     _unit_by: dict = field(init=False, repr=False, compare=False)
     _spell_by: dict = field(init=False, repr=False, compare=False)
 
@@ -441,6 +526,7 @@ class EventTables:
                                      f"got {value!r}")
                 reach.setdefault(str(parent), {})[str(kid)] = mt
         object.__setattr__(self, "child_reach", reach)
+        object.__setattr__(self, "buildings", frozenset(_card_id(c) for c in self.buildings))
         object.__setattr__(self, "compositions", comps)
         object.__setattr__(self, "spells", spells)
         object.__setattr__(self, "children", children)
@@ -461,6 +547,10 @@ class EventTables:
 
     def is_spell(self, cls: str) -> bool:
         return cls in self._spell_by
+
+    def is_building(self, card: int | None) -> bool:
+        """Whether `card` is a building card (EventTables.buildings)."""
+        return card is not None and int(card) in self.buildings
 
     def kind_of(self, card: int) -> str | None:
         return KIND_SPELL if card in self.spells else KIND_UNIT if card in self.compositions else None
@@ -642,8 +732,10 @@ class EventTables:
                 if c and c in children[p]:      # the farthest of the units mapped to one class
                     have = reach.setdefault(p, {})
                     have[c] = max(have.get(c, 0.0), float(mt))
+        buildings = {int(card_ids[n]) for n, k in table.get("kinds", {}).items()
+                     if k == "building" and card_ids.get(n) is not None and int(card_ids[n]) in comps}
         return cls(comps, spells, children, frozenset(ignore), aliases=aliases,
-                   variant_costs=variant_costs, child_reach=reach)
+                   variant_costs=variant_costs, child_reach=reach, buildings=buildings)
 
     @classmethod
     def from_spawn_primary(cls, raw: Mapping[str, Any], *,
@@ -713,8 +805,9 @@ class EventTables:
         ignore = base.ignore if base is not None else frozenset()
         costs = base.variant_costs if base is not None else {}
         reach = base.child_reach if base is not None else {}
+        buildings = base.buildings if base is not None else frozenset()
         return cls(comps, spells, children, ignore, aliases=aliases, variant_costs=costs,
-                   child_reach=reach)
+                   child_reach=reach, buildings=buildings)
 
     @classmethod
     def for_engine(cls, spawn_primary: Mapping[str, Any], *,
@@ -766,6 +859,7 @@ class EventConfig:
     just_dead_ticks: int = 30                # a parent seen this recently still explains a child
     child_radius_mt: float = 4500.0          # ... born this close to it (Graveyard radius 4000)
     reid_ticks: int = 30                     # a lost track may come back under a new uid this late
+    opp_reid_ticks: int | None = None        # ... the enemy's lost tracks (None: reid_ticks; PHANTOMS)
     reid_radius_mt: float = 1200.0           # ... this close to where it was lost
     reid_speed_mt_per_tick: float = 50.0     # ... plus this much per tick it was gone
     reid_max_dead_hp: float = 0.2            # a track lost at or below this HP fraction died
@@ -800,20 +894,35 @@ class EventConfig:
     own_reid_cross_team: bool = False        # rule 1 across teams for our deck's classes
     own_recent_ticks: int = 0                # our class in the enemy half, ours seen this recently: ours
     own_recent_radius_mt: float = 6000.0     # ... this close to it
+    # PHANTOMS (module doc); these defaults are the rules as they were, LIVE_PHANTOMS the live ones
+    reid_doubtful: bool = False              # rule 1 (enemy, another label): no motion needed for a doubtful play
+    reid_doubt_radius_mt: float = 2000.0     # ... born this close to where the lost track was last seen
+    deck_size: int = 8                       # the opponent's confirmed cards stop at this many
+    self_clones: frozenset = frozenset()     # rule 3 (enemy): a living unit of these classes makes more of itself
+    spell_relabel: bool = False              # rule 2: a look-alike spell label on the play's flight is the same cast
+    prefer_confirmed: bool = False           # an enemy play several cards fit takes a confirmed one
+    reguess_ticks: int = 0                   # a track's label outside its card this long re-guesses it (0: never)
 
     @classmethod
     def live(cls, **over: Any) -> "EventConfig":
-        """The config the live runners use: LIVE_GUARDS and LIVE_OWN on top of the defaults,
-        then `over`."""
-        return cls(**{**LIVE_GUARDS, **LIVE_OWN, **over})
+        """The config the live runners use: LIVE_GUARDS, LIVE_OWN and LIVE_PHANTOMS on top of the
+        defaults, then `over`."""
+        return cls(**{**LIVE_GUARDS, **LIVE_OWN, **LIVE_PHANTOMS, **over})
 
     def __post_init__(self):
         for name in ("play_window_ticks", "spell_window_ticks", "just_dead_ticks", "reid_ticks",
                      "team_wait_ticks", "ambiguity_wait_ticks", "unit_sight_lag_ticks", "spell_sight_lag_ticks",
                      "tap_max_lag_ticks", "forget_ticks", "min_play_age_ticks", "young_drop_ticks",
-                     "own_recent_ticks", "late_reach_ticks", "own_drop_in_ticks"):
+                     "own_recent_ticks", "late_reach_ticks", "own_drop_in_ticks", "reguess_ticks"):
             if getattr(self, name) < 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
+        if self.deck_size < 1:
+            raise ValueError("EventConfig.deck_size must be >= 1")
+        if self.opp_reid_ticks is not None and self.opp_reid_ticks < 0:
+            raise ValueError("EventConfig.opp_reid_ticks must be None or >= 0")
+        clones = self.self_clones
+        object.__setattr__(self, "self_clones",
+                           frozenset([clones] if isinstance(clones, str) else (str(c) for c in clones)))
         if not -1.0 <= self.reid_motion_cos <= 1.0:
             raise ValueError("EventConfig.reid_motion_cos must be in [-1, 1]")
         if self.deploy_zone_mt is not None and not self.deploy_zone_mt >= 0:
@@ -832,7 +941,7 @@ class EventConfig:
                              f"got {self.unknown_cost!r}")
         for name in ("merge_radius_mt", "child_radius_mt", "reid_radius_mt", "reid_speed_mt_per_tick",
                      "excess_weight", "missing_weight", "reid_min_speed_mt_per_tick", "own_recent_radius_mt",
-                     "late_reach_mt", "late_reach_mt_per_tick"):
+                     "late_reach_mt", "late_reach_mt_per_tick", "reid_doubt_radius_mt"):
             if not getattr(self, name) >= 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
         if self.tap_min_lag_ticks > self.tap_max_lag_ticks:
@@ -942,6 +1051,13 @@ class OppStats:
     relabelled: int = 0            # rule 1 across labels (reid_any_label), also in `reacquired`
     cross_team: int = 0            # enemy-seen tracks taken as our units (own_reid_cross_team,
     #                                own_recent_ticks); not in `reacquired`
+    # PHANTOMS (module doc); all 0 with the rules off
+    doubtful: int = 0              # rule 1 without the motion for a doubtful play (reid_doubtful), also in
+    #                                `reacquired` and `relabelled`
+    clones: int = 0                # rule 3 by self_clones (also in `children`)
+    spell_relabels: int = 0        # rule 2 across look-alike spell labels (spell_relabel), also in `merged`
+    reguessed: int = 0             # track cards guessed again (reguess_ticks), both teams
+    amended: int = 0               # reported opponent plays whose card changed (Events.opp_amended)
 
     def summary(self) -> dict[str, Any]:
         return {"plays": self.plays, "spells": self.spells, "merged": self.merged,
@@ -949,7 +1065,9 @@ class OppStats:
                 "ambiguous": self.ambiguous, "fallback_team": self.fallback_team,
                 "unknown": dict(self.unknown), "unknown_plays": self.unknown_plays,
                 "dropped": self.dropped, "fragments": self.fragments, "late": self.late,
-                "relabelled": self.relabelled, "cross_team": self.cross_team}
+                "relabelled": self.relabelled, "cross_team": self.cross_team,
+                "doubtful": self.doubtful, "clones": self.clones, "spell_relabels": self.spell_relabels,
+                "reguessed": self.reguessed, "amended": self.amended}
 
 
 # ---------------------------------------------------------------------------
@@ -972,6 +1090,9 @@ class _Play:
     resolve_at: int | None = None
     counts: Counter = field(default_factory=Counter)
     record: Any = None                # the OppPlay / OwnLanding reported for it
+    affordable: bool = True           # PHANTOMS: the opponent count could pay it when it was reported
+    relabelled: bool = False          # PHANTOMS: a look-alike spell label joined it (spell_relabel)
+    revote: bool = False              # PHANTOMS: a unit's card was guessed again (reguess_ticks)
 
 
 @dataclass(slots=True, eq=False)
@@ -1000,6 +1121,13 @@ class _Rec:
     fell_back: bool = False           # its team came from _fallback_team (counted once)
     chained: bool = False             # min_play_age_ticks: looked for the young track it continues
     fragments: list = field(default_factory=list)   # ... those tracks' uids, oldest first
+    seen_cls: str = ""                # the tracker's latest label
+    frames: int = 0                   # frames the track was seen on (spell_relabel's label vote)
+    label_frames: Counter = field(default_factory=Counter)   # ... by the tracker's label (reguess_ticks)
+    card_cls: str = ""                # reguess_ticks: the label `card` was given for ...
+    card_team: int = UNKNOWN_TEAM     # ... and the team (UNKNOWN_TEAM: not yet noted)
+    off_since: int | None = None      # ... the first sighting of the current run of labels off the card
+    reported: int = -1                # the last update the tracker reported it on (coasting too)
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1174,9 @@ class EventDeriver:
         self._primed = not self.config.prime
         self._out_opp: list[OppPlay] = []
         self._out_own: list[OwnLanding] = []
+        self._out_amend: list[OppAmend] = []
+        self._opp_log: list[_Play] = []           # the opponent plays reported, oldest first (confirmed)
+        self._opp_elixir: Any = None              # bind_opp_elixir (cleared with the battle)
         self.backwards_ticks = 0
         self.opp_stats = OppStats()
         self.fallen_towers: set[str] = set()      # princess towers seen destroyed (pockets)
@@ -1053,6 +1184,15 @@ class EventDeriver:
             self.landing_stats = LandingStats()
 
     # -- inputs ---------------------------------------------------------------
+    def bind_opp_elixir(self, counter: Any) -> None:
+        """PHANTOMS (module doc): the battle's opponent elixir count, anything with
+        can_pay(card, tick, cost=None, extra=()) -> bool | None (public_state.OpponentElixir):
+        whether the opponent could pay `card` (or `cost`) at `tick` with the plays it was given,
+        less `extra` [(tick, card, cost)] (the plays this update reported, not given yet); None
+        when it cannot tell. It tells reid_doubtful a play the opponent could not pay, and which
+        reported plays confirm their card. reset() unbinds it; None unbinds it too."""
+        self._opp_elixir = counter
+
     def note_own_tap(self, card: int, tick: int, *, slot: int, aim_x_mt: float | None = None,
                      aim_y_mt: float | None = None, t: float | None = None,
                      tracker: Any = None) -> OwnTap:
@@ -1089,9 +1229,10 @@ class EventDeriver:
             self.backwards_ticks += 1
             tick = self._tick
         self._tick = tick
-        self._out_opp, self._out_own = [], []
+        self._out_opp, self._out_own, self._out_amend = [], [], []
         if towers or destroyed is not None:
             self.note_towers(towers or {}, destroyed)
+        cfg = self.config
 
         for tr in tracks:
             rec = self._recs.get(tr.uid)
@@ -1115,10 +1256,16 @@ class EventDeriver:
                 if rec.play is not None:
                     rec.play.last_tick = max(rec.play.last_tick, rec.last_tick)
             rec.seen_team = tr.team
+            rec.seen_cls = str(tr.cls)
+            rec.reported = tick
+            if int(tr.last_seen_tick) == tick:
+                rec.frames += 1
+                rec.label_frames[rec.seen_cls] += 1
             rec.vx, rec.vy = float(getattr(tr, "vx", 0.0)), float(getattr(tr, "vy", 0.0))
+            if cfg.reguess_ticks and rec.state == DONE:
+                self._note_label(rec, tr)
         self._primed = True
 
-        cfg = self.config
         pending = sorted((r for r in self._recs.values() if r.state == PENDING),
                          key=lambda r: (r.first_tick, r.uid))
         for rec in pending:
@@ -1137,9 +1284,14 @@ class EventDeriver:
         for play in self._plays:
             if play.card is None and play.resolve_at is not None and tick >= play.resolve_at:
                 self._resolve(play)
+        if cfg.spell_relabel:
+            self._spell_votes(tick)
+        if cfg.reguess_ticks:
+            self._reguess(tick)
         self._expire_taps(tick)
         self._forget(tick)
-        return Events([_copy_opp(p) for p in self._out_opp], [replace(x) for x in self._out_own])
+        return Events([_copy_opp(p) for p in self._out_opp], [replace(x) for x in self._out_own],
+                      [OppAmend(_copy_opp(a.old), _copy_opp(a.new)) for a in self._out_amend])
 
     def note_towers(self, towers: Mapping[str, Any], destroyed: Iterable[str] | None = None) -> set[str]:
         """Note the princess towers read destroyed (hp 0) in `towers` (Hud.towers: TOWER_KEYS ->
@@ -1194,12 +1346,36 @@ class EventDeriver:
 
     def card_for(self, track: Track) -> int | None:
         """card_of(track.uid), or the tables' best guess for its class while it is
-        pending (our deck first for our own tracks)."""
+        pending (our deck first for our own tracks; with prefer_confirmed, the opponent's
+        confirmed cards first for theirs). With reguess_ticks, card_of follows a track whose
+        team or label left its card (module doc, PHANTOMS)."""
         rec = self._recs.get(track.uid)
         if rec is not None and rec.card is not None:
             return rec.card
-        prefer = self.own_deck if track.team == self.own_team else None
-        return self.tables.card_guess(track.cls, prefer)
+        return self.tables.card_guess(track.cls, self._prefer(track.team))
+
+    def _prefer(self, team: int, exclude: "_Play | None" = None) -> Iterable[int] | None:
+        """The cards a guess for a track of `team` tries first: our deck for ours; the
+        opponent's confirmed cards (but `exclude`'s) for theirs with prefer_confirmed."""
+        if team == self.own_team:
+            return self.own_deck
+        if team == self.enemy_team and self.config.prefer_confirmed:
+            return self.confirmed(exclude)
+        return None
+
+    def confirmed(self, exclude: "_Play | None" = None) -> list[int]:
+        """PHANTOMS: the opponent's confirmed cards, in the order they were first reported: the
+        cards of reported plays the opponent elixir count could pay (bind_opp_elixir; every play
+        without a count), at most deck_size; `exclude`'s play left out."""
+        out: list[int] = []
+        for play in self._opp_log:
+            if play is exclude or not play.affordable or play.card is None or play.card < 0:
+                continue
+            if play.card not in out:
+                out.append(play.card)
+                if len(out) >= self.config.deck_size:
+                    break
+        return out
 
     def track_cards(self, tracks: Iterable[Track]) -> dict[int, int]:
         """uid -> creating card for the tracks whose card is known or guessable."""
@@ -1283,6 +1459,10 @@ class EventDeriver:
             if play.card is None:
                 play.counts[rec.cls] += 1
                 play.tick = min(play.tick, rec.first_tick)
+            elif spell and rec.cls not in self.tables.classes_of(play.card):    # spell_relabel
+                play.relabelled = True
+                if enemy:
+                    self.opp_stats.spell_relabels += 1
             if enemy:
                 self.opp_stats.merged += 1
             return
@@ -1291,6 +1471,8 @@ class EventDeriver:
             self._attach(rec, parent.play, parent.card, "child")
             if enemy:
                 self.opp_stats.children += 1
+                if not self.tables.explains(parent.cls, rec.cls):            # self_clones
+                    self.opp_stats.clones += 1
             return
         if not enemy:
             tap = self._match_tap(rec, spell)
@@ -1300,7 +1482,10 @@ class EventDeriver:
                 return
             play = self._drop_in(rec, spell)
             if play is not None:                         # rule 4b: the same tap's unit again
-                card = play.card if rec.cls in self.tables.classes_of(play.card) else \
+                # a misread unit of the tap is the tap's card (PHANTOMS, reguess_ticks); without,
+                # the guess of its first label, which it kept
+                card = play.card if (rec.cls in self.tables.classes_of(play.card)
+                                     or self.config.reguess_ticks) else \
                     self.tables.card_guess(rec.cls, self.own_deck)
                 self._attach(rec, play, card, "drop_in")
                 self.landing_stats.drop_ins += 1
@@ -1405,7 +1590,7 @@ class EventDeriver:
             if r.cls != rec.cls and not (cfg.reid_any_label and self._moving_on(r, rec)):
                 continue
             gap = rec.first_tick - r.last_tick
-            if not 0 < gap <= cfg.reid_ticks:
+            if not 0 < gap <= self._reid_window(team):
                 continue
             if r.hp is not None and r.hp <= cfg.reid_max_dead_hp:
                 continue
@@ -1413,6 +1598,12 @@ class EventDeriver:
             if d <= cfg.reid_radius_mt + cfg.reid_speed_mt_per_tick * gap and d < best_d:
                 best, best_d = r, d
         return best
+
+    def _reid_window(self, team: int) -> int:
+        """Rule 1's window for a lost track of `team`: opp_reid_ticks for the enemy's (when set),
+        reid_ticks for ours (a misread unit of our tap is no older unit of ours)."""
+        cfg = self.config
+        return cfg.opp_reid_ticks if team == self.enemy_team and cfg.opp_reid_ticks is not None else cfg.reid_ticks
 
     def _adopt_fragments(self, rec: _Rec, play: _Play) -> None:
         """The young tracks `rec` continued (_continue_fragment) join rec's `play` as how_of
@@ -1534,33 +1725,85 @@ class EventDeriver:
     def _reacquired(self, rec: _Rec, team: int) -> _Rec | None:
         """Rule 1: the lost track that `rec` is the same unit as, or None. With reid_any_label an
         enemy unit may come back under another unit label when the motion carries on
-        (_moving_on); with own_reid_cross_team an enemy-seen track of one of our classes may be
-        our lost same-class track."""
+        (_moving_on), with reid_doubtful without it for a doubtful play (module doc, PHANTOMS);
+        with own_reid_cross_team an enemy-seen track of one of our classes may be our lost
+        same-class track."""
         cfg = self.config
         enemy = team == self.enemy_team
         any_label = enemy and cfg.reid_any_label and not self.tables.is_spell(rec.cls)
         cross = enemy and cfg.own_reid_cross_team and rec.cls in self.own_classes
-        best, best_d = None, math.inf
+        doubt: bool | None = None if any_label and cfg.reid_doubtful else False   # asked once, if at all
+        best, best_d, best_doubt = None, math.inf, False
         for r in self._recs.values():
             if (r is rec or r.state != DONE or r.succeeded
                     or r.how in ("unknown", "ignored", "dropped")):
                 continue
+            standing = False                     # reid_doubtful: another label without the motion
             if r.team == team:
-                if r.cls != rec.cls and not (any_label and r.play is not None
-                                             and not self.tables.is_spell(r.cls)
-                                             and self._moving_on(r, rec)):
-                    continue
+                if r.cls != rec.cls:
+                    if not (any_label and r.play is not None and not self.tables.is_spell(r.cls)):
+                        continue
+                    if not self._moving_on(r, rec):
+                        if r.cls in ONE_HIT_CLASSES:     # lost: one hit and it is gone
+                            continue
+                        if r.reported >= self._tick or rec.last_tick - rec.first_tick < cfg.min_play_age_ticks:
+                            continue                     # still coasting, or rec too young: asked again
+                        if doubt is None:
+                            doubt = self._doubtful(rec)
+                        if not doubt or self._moving_apart(r, rec):
+                            continue
+                        standing = True
             elif not (cross and r.team == self.own_team and r.cls == rec.cls):
                 continue
             gap = rec.first_tick - r.last_tick
-            if not 0 < gap <= cfg.reid_ticks:
+            if not 0 < gap <= self._reid_window(r.team):
                 continue
             if r.hp is not None and r.hp <= cfg.reid_max_dead_hp:
                 continue
             d = _dist(r.x, r.y, rec.bx, rec.by)
-            if d <= cfg.reid_radius_mt + cfg.reid_speed_mt_per_tick * gap and d < best_d:
-                best, best_d = r, d
+            reach = cfg.reid_radius_mt + cfg.reid_speed_mt_per_tick * gap
+            if standing:
+                reach = min(reach, cfg.reid_doubt_radius_mt)
+            if d <= reach and d < best_d:
+                best, best_d, best_doubt = r, d, standing
+        if best is not None and best_doubt:
+            self.opp_stats.doubtful += 1
         return best
+
+    def _doubtful(self, rec: _Rec) -> bool:
+        """reid_doubtful: whether a new play of enemy track `rec` would be doubtful: the bound
+        elixir count says the opponent could not pay the card its class best names (confirmed
+        cards first) at rec's first sighting, even leaving out the plays the count already found
+        unaffordable (public_state.OpponentElixir.can_pay). No count bound, or a class no card
+        puts down (rules 5 and 6 decide): not doubtful. The opponent's confirmed cards are no
+        test: the first deck_size of them hold the early misreads (module doc, PHANTOMS)."""
+        card = self.tables.card_guess(rec.cls, self.confirmed())
+        if card is None:
+            return False
+        return self._can_pay(card, rec.first_tick, self.tables.play_cost(card, [rec.cls])) is False
+
+    def _can_pay(self, card: int, tick: int, cost: int | None = None) -> bool | None:
+        """The bound elixir count's verdict on a play of `card` (or `cost`) at `tick` (None: no
+        count bound, or it cannot tell); this update's reported plays are passed as `extra`."""
+        fn = getattr(self._opp_elixir, "can_pay", None)
+        if fn is None:
+            return None
+        extra = [(int(p.exec_tick if p.exec_tick is not None else p.tick), int(p.card), p.cost)
+                 for p in self._out_opp]
+        try:
+            ok = fn(int(card), int(tick), cost=cost, extra=extra)
+        except Exception:                        # a count that cannot price it: no verdict
+            return None
+        return None if ok is None else bool(ok)
+
+    def _moving_apart(self, old: _Rec, new: _Rec) -> bool:
+        """reid_doubtful: both tracks move at least reid_min_speed_mt_per_tick and their headings
+        disagree (cosine at most reid_motion_cos): two units, not one."""
+        cfg = self.config
+        s_old, s_new = math.hypot(old.vx, old.vy), math.hypot(new.vx, new.vy)
+        if min(s_old, s_new) <= 0.0 or min(s_old, s_new) < cfg.reid_min_speed_mt_per_tick:
+            return False
+        return (old.vx * new.vx + old.vy * new.vy) / (s_old * s_new) <= cfg.reid_motion_cos
 
     def _moving_on(self, old: _Rec, new: _Rec) -> bool:
         """reid_any_label: whether `new` carries on `old`'s motion: both move at least
@@ -1582,11 +1825,14 @@ class EventDeriver:
                 classes = set().union(*(self.tables.classes_of(c) for c in play.candidates))
             else:
                 classes = self.tables.classes_of(play.card)
-            if rec.cls not in classes:
+            relabel = rec.cls not in classes     # spell_relabel: a look-alike label, on the flight only
+            if relabel and not (spell and cfg.spell_relabel and play.card is not None
+                                and self._lookalike(play.card, rec.cls)):
                 continue
             if spell:                            # a cast seen again: from its LAST sighting
                 gap = rec.first_tick - play.last_tick
-                ok = ((gap <= cfg.play_window_ticks and rec.first_tick - play.tick > -cfg.play_window_ticks)
+                ok = ((gap <= cfg.play_window_ticks and rec.first_tick - play.tick > -cfg.play_window_ticks
+                       and (not relabel or self._spell_reaches(play, rec, max(0, gap))))
                       or (gap <= cfg.spell_window_ticks and rec.first_tick - play.tick > -cfg.spell_window_ticks
                           and self._spell_reaches(play, rec, max(0, gap))))
             else:
@@ -1595,6 +1841,12 @@ class EventDeriver:
             if ok:
                 return play
         return None
+
+    def _lookalike(self, card: int, cls: str) -> bool:
+        """spell_relabel: whether spell label `cls` looks like spell `card` on one flight (one
+        SPELL_FLIGHT_LOOKALIKES group holds both cls and one of the card's classes)."""
+        mine = self.tables.classes_of(card)
+        return any(cls in group and not group.isdisjoint(mine) for group in SPELL_FLIGHT_LOOKALIKES)
 
     def _spell_reaches(self, play: _Play, rec: _Rec, gap: int) -> bool:
         """Rule 2 for a spell seen again past play_window_ticks: whether `rec` was born within
@@ -1621,7 +1873,7 @@ class EventDeriver:
                 continue
             if r.first_tick > rec.first_tick or rec.first_tick - r.last_tick > cfg.just_dead_ticks:
                 continue
-            if not self.tables.explains(r.cls, rec.cls):
+            if not self.tables.explains(r.cls, rec.cls) and not self._clones(r, rec, team):
                 continue
             d = _dist(r.x, r.y, rec.bx, rec.by)
             reach = max(cfg.child_radius_mt, self.tables.reach_of(r.cls, rec.cls))
@@ -1630,6 +1882,18 @@ class EventDeriver:
         if best is not None and best_d > cfg.child_radius_mt and not self._far_child(rec, team):
             return None                          # the nearest is far: no parent within child_radius_mt
         return best
+
+    def _clones(self, parent: _Rec, rec: _Rec, team: int) -> bool:
+        """self_clones: whether enemy track `rec` of a cloning class (the evolved Skeletons) is a
+        clone of `parent`: a unit of that class by the tracker's current label (or the one it was
+        classified with) of a reported play whose card puts that class down."""
+        cfg = self.config
+        play = parent.play
+        return (team == self.enemy_team and rec.cls in cfg.self_clones
+                and rec.cls in (parent.seen_cls, parent.cls) and play is not None
+                and play.record is not None and play.card is not None
+                and rec.cls in self.tables.classes_of(play.card)
+                and parent.how not in ("unknown", "late", "dropped"))
 
     def _far_child(self, rec: _Rec, team: int) -> bool:
         """Rule 3, FAR CHILD (module doc): whether `rec` of `team`, farther than child_radius_mt
@@ -1749,7 +2013,11 @@ class EventDeriver:
         if len(play.candidates) == 1 or play.kind == KIND_SPELL:
             play.card = play.candidates[0]
         else:
-            play.card = max(play.candidates, key=lambda c: self._score(c, play.counts))
+            cands = play.candidates
+            if play.team == self.enemy_team and self.config.prefer_confirmed:
+                conf = self.confirmed()
+                cands = tuple(c for c in cands if c in conf) or cands
+            play.card = max(cands, key=lambda c: self._score(c, play.counts))
             if play.team == self.enemy_team:
                 self.opp_stats.ambiguous += 1
         play.resolve_at = None
@@ -1764,6 +2032,8 @@ class EventDeriver:
                           x_mt=play.x, y_mt=play.y, kind=play.kind, uids=list(play.uids),
                           cost=self.tables.play_cost(play.card, play.counts))
             play.record = opp
+            play.affordable = self._can_pay(play.card, opp.exec_tick, opp.cost) is not False
+            self._opp_log.append(play)
             self.opp_stats.plays += 1
             if play.kind == KIND_SPELL:
                 self.opp_stats.spells += 1
@@ -1775,6 +2045,135 @@ class EventDeriver:
             play.record = landing
             self.landing_stats.unmatched += 1
             self._emit_own(landing)
+
+    # -- PHANTOMS: cards guessed again, plays amended -----------------------------
+    def _note_label(self, rec: _Rec, tr: Track) -> None:
+        """reguess_ticks: note classified track `rec`'s label on this frame: the run of labels
+        outside its card's classes (and the label the card was given for) starts at the first
+        such sighting and ends with a label back inside."""
+        if rec.card is None or rec.card < 0:
+            return
+        if rec.card_team == UNKNOWN_TEAM:            # the card as classified
+            rec.card_cls, rec.card_team = rec.cls, rec.team
+        if tr.cls == rec.card_cls or tr.cls in self.tables.classes_of(rec.card):
+            rec.off_since = None
+        elif rec.off_since is None:
+            rec.off_since = int(tr.last_seen_tick)
+
+    def _reguess(self, tick: int) -> None:
+        """reguess_ticks (module doc, PHANTOMS): guess again the card of each classified unit track
+        whose team changed from the one its card was given for, or whose label has been off the
+        card for reguess_ticks; a reported opponent play such a unit belongs to is voted on again
+        on every update until it is gone (_reguess_play)."""
+        cfg = self.config
+        for rec in list(self._recs.values()):
+            if (rec.state != DONE or rec.card is None or rec.card < 0 or rec.card_team == UNKNOWN_TEAM
+                    or self.tables.is_spell(rec.cls) or rec.how in ("ignored", "unknown")):
+                continue
+            team = rec.seen_team
+            if team in (0, 1) and team != rec.card_team:             # the other side's unit now
+                new = self.tables.card_guess(rec.seen_cls, self._prefer(team))
+                if new is not None:
+                    rec.card, rec.card_cls, rec.card_team, rec.off_since = new, rec.seen_cls, team, None
+                    self.opp_stats.reguessed += 1
+                continue
+            if rec.off_since is None or rec.last_tick - rec.off_since < cfg.reguess_ticks:
+                continue
+            enemy = rec.card_team == self.enemy_team
+            mine = rec.play if enemy else None
+            others = self.confirmed(mine) if enemy else []
+            new = self.tables.card_guess(rec.seen_cls, others if enemy and cfg.prefer_confirmed
+                                         else self._prefer(rec.card_team))
+            rec.off_since = None                                     # asked again after another run
+            if new is None or new == rec.card:
+                continue
+            rec.card, rec.card_cls = new, rec.seen_cls
+            self.opp_stats.reguessed += 1
+            if enemy and rec.play is not None and isinstance(rec.play.record, OppPlay):
+                rec.play.revote = True
+        for play in self._opp_log:                  # plays a unit of which was guessed again
+            if play.revote:
+                if tick - play.last_tick > cfg.reguess_ticks:
+                    play.revote = False             # gone: as it last stood
+                else:
+                    self._reguess_play(play)
+
+    def _reguess_play(self, play: _Play) -> None:
+        """reguess_ticks: reported opponent play `play`, a unit of which had its card guessed again,
+        takes the card of the label its units (and their fragments; not its children) were seen
+        with on the most frames, once that label has reguess_ticks frames more than the labels of
+        the play's card together, every unit seen about as recently as the latest one names that
+        card too and it is no building for a troop or back (amend)."""
+        cfg = self.config
+        votes: Counter = Counter()
+        units = []
+        for r in (self._recs.get(u) for u in play.uids):
+            if r is None or r.play is not play or r.how not in ("play", "merged", "reacquired", "fragment"):
+                continue
+            votes.update(r.label_frames or {r.cls: 1})
+            if r.how != "fragment":
+                units.append(r)
+        latest = max((r.last_tick for r in units), default=None)
+        units = [r for r in units if latest is not None and r.last_tick >= latest - cfg.reguess_ticks]
+        if not votes or not units:
+            return
+        top = max(votes.values())
+        label = min(c for c, v in votes.items() if v == top)
+        mine = self.tables.classes_of(play.card) if play.card is not None else frozenset()
+        if top < sum(v for c, v in votes.items() if c in mine) + cfg.reguess_ticks:
+            return                                   # not clearly another card's yet (no flip-flop)
+        others = self.confirmed(play)
+        card = self.tables.card_guess(label, others if cfg.prefer_confirmed else None)
+        if (card is None or card == play.card or self.tables.is_building(play.card) != self.tables.is_building(card)
+                or any(r.card != card for r in units)):
+            return
+        self._amend(play, card, [label])
+
+    def _spell_votes(self, tick: int) -> None:
+        """spell_relabel: a reported opponent spell play that a look-alike label joined takes the
+        card of the label its spell tracks were seen with on the most frames (ties keep the card);
+        a change is an amendment."""
+        horizon = self.config.spell_window_ticks
+        for play in self._opp_log:
+            if not play.relabelled or play.kind != KIND_SPELL or tick - play.last_tick > horizon:
+                continue
+            votes: Counter = Counter()
+            labels: dict[int, str] = {}
+            for uid in play.uids:
+                r = self._recs.get(uid)
+                if r is None or not self.tables.is_spell(r.cls):
+                    continue
+                cards = self.tables.spell_cards(r.cls)
+                if cards:
+                    votes[cards[0]] += max(1, r.frames)
+                    labels.setdefault(cards[0], r.cls)
+            if not votes:
+                continue
+            best = max(votes.values())
+            if votes.get(play.card, 0) >= best:
+                continue
+            new = min(c for c, v in votes.items() if v == best)
+            self._amend(play, new, [labels[new]])
+
+    def _amend(self, play: _Play, card: int, classes: Sequence[str]) -> None:
+        """Reported opponent play `play` is a play of `card` (module doc, PHANTOMS): its tracks
+        and its OppPlay take the card (and the cost the classes tell, play_cost), and
+        Events.opp_amended carries the correction; a play reported on this very update is only
+        reported with the new card (no OppAmend: the runners never saw the old one)."""
+        rec_play = play.record
+        fresh = any(rec_play is p for p in self._out_opp)
+        old = _copy_opp(rec_play)
+        play.card, play.candidates = int(card), (int(card),)
+        for uid in play.uids:
+            r = self._recs.get(uid)
+            if r is not None and r.play is play:
+                r.card = int(card)
+        rec_play.card = int(card)
+        rec_play.cost = self.tables.play_cost(int(card), classes)
+        if fresh:
+            return
+        self._out_amend.append(OppAmend(old, _copy_opp(rec_play)))
+        self.opp_stats.amended += 1
 
     def _emit_own(self, landing: OwnLanding) -> None:
         self._out_own.append(landing)
@@ -1821,6 +2220,31 @@ def record_plays(memory: Any, plays: Iterable[OppPlay], *, team: int = ENEMY_TEA
                       int(p.exec_tick if p.exec_tick is not None else p.tick))
         n += 1
     return n
+
+
+def amend_plays(memory: Any, amended: Iterable[OppAmend], *, team: int = ENEMY_TEAM,
+                token_offset: int = TOKEN_OFFSET) -> int:
+    """Apply Events.opp_amended to a PublicMemory-like object (PHANTOMS: a reported play whose card
+    was guessed again): memory.retract(team, old card + token_offset, old exec_tick), then the new
+    play is recorded as record_plays does. Returns how many old plays were taken back."""
+    n = 0
+    for a in amended or ():
+        old = a.old
+        if memory.retract(int(team), int(old.card) + int(token_offset),
+                          int(old.exec_tick if old.exec_tick is not None else old.tick)):
+            n += 1
+        record_plays(memory, [a.new], team=team, token_offset=token_offset)
+    return n
+
+
+def opp_cards(plays: Iterable[OppPlay]) -> list[int]:
+    """The opponent's cards in the order `plays` first show them (UNKNOWN plays left out): the
+    live runner's opponent deck, rebuilt after an amendment."""
+    out: list[int] = []
+    for p in plays:
+        if int(p.card) >= 0 and int(p.card) not in out:
+            out.append(int(p.card))
+    return out
 
 
 # ---------------------------------------------------------------------------

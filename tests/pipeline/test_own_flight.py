@@ -467,10 +467,15 @@ def test_the_drop_in_joins_its_taps_play_and_is_no_human_play():
 
 
 def test_the_drop_in_rule_has_limits():
-    """Within 2 tiles another unit label still joins (the detector misread the card) and keeps its
-    own card; a unit of another card 3 tiles away, or one first seen after the horizon (45 ticks),
-    is a play of its own: a human's."""
+    """Within 2 tiles another unit label still joins (the detector misread the card) and, live, takes
+    the tap's card (events PHANTOMS, reguess_ticks: on the 2026-11-01 friendly our Hog dropping in,
+    misread as Ice Spirits, kept the Ice Spirits card for its whole life); with the rule off it keeps
+    its own label's. A unit of another card 3 tiles away, or one first seen after the horizon (45
+    ticks), is a play of its own: a human's."""
     d, landings = _drop_in_battle(EV.EventConfig.live(), drop_cls="IceSpirits", drop_xy=(9600.0, 30000.0))
+    assert d.how_of(2) == "drop_in" and d.card_of(2) == GOLEM and len(landings) == 1
+    d, landings = _drop_in_battle(EV.EventConfig.live(reguess_ticks=0), drop_cls="IceSpirits",
+                                  drop_xy=(9600.0, 30000.0))
     assert d.how_of(2) == "drop_in" and d.card_of(2) == SPIRITS and len(landings) == 1
     d, landings = _drop_in_battle(EV.EventConfig.live(), drop_cls="IceSpirits", drop_xy=(9600.0, 28500.0))
     assert d.how_of(2) == "play" and [x.slot for x in landings] == [0, -1]

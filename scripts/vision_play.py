@@ -1555,6 +1555,12 @@ class VisionPlay:
                     ctx.opp_unknown += 1
                 elif int(p.card) not in ctx.opp_cards:
                     ctx.opp_cards.append(int(p.card))
+        amended = getattr(vf.events, "opp_amended", None)
+        if amended:                                    # a play's card guessed again (events PHANTOMS)
+            EV.amend_plays(ctx.memory, amended)
+            plays = getattr(getattr(self.perception, "deriver", None), "opp_plays", None)
+            if callable(plays):
+                ctx.opp_cards = EV.opp_cards(plays())
         if vf.events.own_landings:
             ctx.own_plays += sum(1 for x in vf.events.own_landings if x.land_tick is not None)
         if ctx.observer is not None:                   # v2 rows: the count and our taps in flight
@@ -1998,6 +2004,11 @@ class VisionPlay:
                 self.ctx.observer = make(self.ctx)
             except Exception as exc:                   # v2 rows then fail: no decision, no tap
                 self._error("observer_error", exc, tick=vf.tick)
+        # the deriver asks the battle's opponent elixir count (v2 rows) which plays it could pay
+        # (events PHANTOMS); legacy rows have none: the confirmed cards alone
+        bind = getattr(getattr(self.perception, "deriver", None), "bind_opp_elixir", None)
+        if callable(bind):
+            bind(getattr(self.ctx.observer, "opp", None))
         make = getattr(self.decider, "elixir_cap_for", None)
         if make is not None:
             try:
@@ -2537,7 +2548,9 @@ def _main(args: argparse.Namespace) -> int:
     # The hand boxes follow --geometry's card slots (the taps do too).
     hud_reader = HUD.HudReader(store, {n: ids[n] for n in args.deck}, deck=deck_ids,
                                regions=HUD.load_regions(geometry=geometry))
-    tracker = TRK.Tracker(own_classes=table.deck_labels(args.deck), spell_classes=table.spell_labels())
+    # the live tracker rules (tracker.py CAPTURE: a lost track takes no other unit's box)
+    tracker = TRK.Tracker(TRK.TrackerConfig.live(), own_classes=table.deck_labels(args.deck),
+                          spell_classes=table.spell_labels())
     # N02 (--unknown-plays): UNKNOWN plays and unknown units; without it, the calls as before
     unknown = bool(args.unknown_plays)
     deriver = EV.EventDeriver(tables, event_config(args), own_deck=deck_ids)

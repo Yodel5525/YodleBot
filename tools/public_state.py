@@ -833,6 +833,15 @@ class OpponentElixir:
     of 103 were unaffordable, 15 of 39 with scripts/vision/events.LIVE_GUARDS. It is not a
     filter: early phantoms drain the bar, so rejecting what it cannot pay loses real plays.
     summary() gives the counts for a battle's record.
+
+    amend(amendments) applies scripts/vision OppAmends (Events.opp_amended: a reported play whose
+    card the deriver guessed again): the old play is taken out of the count and the new one
+    paid instead (the count is rebuilt from its plays, so `unaffordable` is the count's again).
+    can_pay(card, tick, cost=None, extra=()) is the deriver's question
+    (events.EventDeriver.bind_opp_elixir): could the bar pay `card` (or `cost`) at `tick`, after
+    the plays recorded and `extra` [(tick, card, cost)]; None for a card it cannot price. It asks a
+    LENIENT bar that leaves out each recorded play it could not pay when it came (a phantom
+    drains the count, and with the count itself over half the real plays read as unpaid).
     """
 
     def __init__(self, catalogue: Sequence[Sequence[Any]], *,
@@ -844,7 +853,11 @@ class OpponentElixir:
         self.recorded = 0
         self.unpriced = 0
         self.unknown = 0
+        self.amended = 0
         self._waiting: list[tuple[int, int, int | None]] = []     # (tick, card, cost or None)
+        self._paid: list[tuple[int, int, int | None]] = []        # ... fed to the counter
+        # can_pay's bar: the paid plays but those this bar could not pay (the likely phantoms)
+        self._lenient = rs_elixir.ElixirCounter.from_catalogue(catalogue, fields=fields, law=law)
 
     @property
     def late(self) -> bool:
@@ -868,9 +881,12 @@ class OpponentElixir:
     def summary(self) -> dict[str, Any]:
         """The counts of the battle so far: plays recorded, unaffordable, unpriced, UNKNOWN,
         still waiting for their tick, and whether the bar is exact."""
-        return {"recorded": self.recorded, "unaffordable": self.unaffordable,
-                "unpriced": self.unpriced, "unknown": self.unknown, "waiting": len(self._waiting),
-                "exact": self.exact}
+        out = {"recorded": self.recorded, "unaffordable": self.unaffordable,
+               "unpriced": self.unpriced, "unknown": self.unknown, "waiting": len(self._waiting),
+               "exact": self.exact}
+        if self.amended:
+            out["amended"] = self.amended
+        return out
 
     def record(self, plays: Iterable[Any]) -> int:
         """Log the opponent plays `plays` (OppPlay); returns how many were taken."""
@@ -889,16 +905,82 @@ class OpponentElixir:
         self.recorded += n
         return n
 
-    def view(self, tick: int) -> tuple[int, bool]:
-        """(milli, exact): the opponent's bar at `tick` as the bot counts it."""
-        tick = max(0, int(tick))
+    def _feed(self, tick: int) -> None:
+        """Pay the recorded plays dated `tick` or before."""
         if self._waiting:
             due = [e for e in self._waiting if e[0] <= tick]
             if due:
                 self._waiting = [e for e in self._waiting if e[0] > tick]
                 for when, card, cost in due:
                     self.counter.play(when, card, cost=cost)
+                    self._paid.append((when, card, cost))
+                for when, card, cost in sorted(due, key=lambda e: e[0]):
+                    self._pay_lenient(when, card, cost)
+
+    def _pay_lenient(self, when: int, card: int, cost: int | None) -> None:
+        """can_pay's bar pays a play only when it can (a play beyond it is left out)."""
+        price = cost if cost is not None else self.counter.costs.get(int(card))
+        if price is not None and self._lenient.elixir_milli(when) >= 1000 * max(0, int(price)):
+            self._lenient.play(when, card, cost=cost)
+
+    def view(self, tick: int) -> tuple[int, bool]:
+        """(milli, exact): the opponent's bar at `tick` as the bot counts it."""
+        tick = max(0, int(tick))
+        self._feed(tick)
         return int(self.counter.elixir_milli(tick)), self.exact
+
+    def can_pay(self, card: int, tick: int, *, cost: int | None = None,
+                extra: Iterable[tuple[int, int, int | None]] = ()) -> bool | None:
+        """Whether the bar could pay a play of `card` (`cost` when given) at `tick` after the
+        plays recorded so far and `extra` (plays not recorded yet, (tick, card, cost)), each paid
+        when dated `tick` or before; None when `card` has no price here (nor a cost). The bar
+        asked is a lenient one: it leaves out every recorded play it could not pay when it came
+        (the phantoms that drain the count would make most real plays look unaffordable)."""
+        tick = max(0, int(tick))
+        price = cost if cost is not None else self.counter.costs.get(int(card))
+        if price is None:
+            return None
+        self._feed(tick)
+        milli = int(self._lenient.elixir_milli(tick))
+        for when, c, k in extra or ():
+            if int(when) <= tick:
+                k = k if k is not None else self.counter.costs.get(int(c))
+                milli -= 1000 * max(0, int(k or 0))
+        return milli >= 1000 * max(0, int(price))
+
+    def amend(self, amendments: Iterable[Any]) -> int:
+        """Apply OppAmends (old play -> new play): the old one leaves the count, the new one is
+        recorded (paid at its tick, as record does). Returns how many were applied; an old play
+        the count never took is skipped (its new play is recorded all the same)."""
+        n = 0
+        for a in () if amendments is None else amendments:
+            old, new = a.old, a.new
+            key = (max(0, int(old.exec_tick if old.exec_tick is not None else old.tick)), int(old.card),
+                   None if getattr(old, "cost", None) is None else max(0, int(old.cost)))
+            if key in self._waiting:
+                self._waiting.remove(key)
+                self.recorded -= 1
+            elif key in self._paid:
+                self._paid.remove(key)
+                self.recorded -= 1
+                self._rebuild()
+            elif key[2] is None and key[1] not in self.counter.costs and self.unpriced:
+                self.unpriced -= 1                         # record skipped it as unpriced
+            if int(old.card) < 0 and self.unknown:
+                self.unknown -= 1
+            self.record([new])
+            self.amended += 1
+            n += 1
+        return n
+
+    def _rebuild(self) -> None:
+        """The counter from its seed with the plays paid so far (after one was taken out)."""
+        self.counter.start(0)
+        self._lenient.start(0)
+        for when, card, cost in self._paid:
+            self.counter.play(when, card, cost=cost)
+        for when, card, cost in sorted(self._paid, key=lambda e: e[0]):
+            self._pay_lenient(when, card, cost)
 
 
 @dataclasses.dataclass(eq=False)
@@ -1340,10 +1422,12 @@ class LiveObserver:
         self.own = OwnTaps(delay=self.delay, max_age=max_age)
 
     def events(self, events: Any) -> None:
-        """Feed one frame's scripts/vision Events: opp_plays and own_landings."""
+        """Feed one frame's scripts/vision Events: opp_plays, opp_amended (OpponentElixir.amend)
+        and own_landings."""
         if events is None:
             return
         self.opp.record(getattr(events, "opp_plays", None) or ())
+        self.opp.amend(getattr(events, "opp_amended", None) or ())
         self.own.landed(getattr(events, "own_landings", None) or ())
 
     def watch(self, tick: int, hand: Sequence[int], next_card: int | None = None,

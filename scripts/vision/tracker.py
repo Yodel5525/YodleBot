@@ -84,6 +84,33 @@ Per update (one call per processed frame):
      Goblin Barrel flies about 600 mt a tick and our Fireball 375, so with a unit's
      gate every box of a flight started a track of its own (several copies of one
      cast on the board). Boxes of another spell label keep the unit gate.
+   CAPTURE (TrackerConfig.live(); all off in TrackerConfig(), the rules as they were). On the
+   owner's 2026-11-01 --tap friendlies a track that had lost its unit took another unit's boxes:
+   our dead Hog's track an enemy Skeleton clone's, an enemy Hog Rider's coasting track (unseen 13
+   ticks) the enemy Ice Golem's and then one of our Skeletons', a Barbarian's and a Skeleton's
+   tracks each other's. A box of a label the track never showed costs class_cost (0.5), a box the
+   side classifier puts on the other side at most team_cost (0.3 x 0.8 = 0.24 at its 0.9), and a
+   lone candidate pair is taken at any cost below the gate. The rules:
+   * contra_cost (LIVE 1.0). A box ``contra_side_prob`` (0.85) or more toward the other team than a
+     decided unit track's costs this much more: a track keeps its own side's box when another
+     track, of the other side, can take the other one.
+   * coast_strict (LIVE on). A unit track unseen for more than ``coast_ticks`` (no longer reported)
+     does not take a box of a label it never showed that is also clearly on the other side: the
+     box starts a track of its own. Measured on the six logged sessions below, the stricter rule
+     that forbids a box of a new label alone (or either one alone) left as many opponent plays
+     (141-142 against 142 over the six) but made 11-12% more tracks than this one, 12-16 more own
+     plays no tap explains (1-7 a battle), 7-8 more plays the count could not pay, and showed our
+     own units on the enemy's side longer (140-147 frames against 125).
+   * first_velocity_alpha (LIVE 0.5). The first velocity estimate (from a track's first two
+     boxes) is damped like the later ones (weighted against standing still): the first pair of
+     boxes is the least sure (a deploying unit, a box that grows), and a raw 150 mt/tick first
+     estimate carried the Ice Golem's track out of its own gate.
+   Measured with the event deriver's live rules on the six logged sessions of 2026-10-29..11-01
+   (the tracker re-run from their logged detections, without the HP-bar colours the logs lack):
+   tracks whose team flipped 44 -> 21 times, our own units shown on the enemy's side in the two
+   games the opponent had none of our cards 237 -> 125 frames, opponent plays 146 -> 142, at 4%
+   more tracks (925 -> 958) and no more own plays no tap explains (164). Cost: a unit whose label
+   changes while it is unseen and whose side is misread when it comes back starts a new track.
 3. Label vote. A decayed histogram of labels weighted by detector confidence.
    The reported label changes only when a different label was seen in
    ``label_switch_frames`` consecutive frames AND outweighs every other label
@@ -139,6 +166,9 @@ _BIG = 1e9                     # stands in for a forbidden pair in the Hungarian
 
 #: A cost-matrix entry that forbids the pair.
 FORBIDDEN = math.inf
+
+#: The capture rules the live runners turn on (module doc, CAPTURE; TrackerConfig.live).
+LIVE_TRACKER: dict[str, Any] = {"contra_cost": 1.0, "coast_strict": True, "first_velocity_alpha": 0.5}
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +364,16 @@ class TrackerConfig:
     spell_gate_mt: float = 2500.0           # a spell track's gate for a box of its own label ...
     spell_max_gate_mt: float = 4000.0       # ... growing like gate_mt up to this
     spell_max_speed_mt_per_tick: float = 1000.0   # a spell track's velocity clamp (a Goblin Barrel: ~600)
+    # CAPTURE (module doc); these defaults are the rules as they were, LIVE_TRACKER the live ones
+    contra_cost: float = 0.0                # extra cost of a box clearly on the other side of a decided unit track
+    contra_side_prob: float = 0.85          # ... "clearly": side_prob this far toward the other team (0.5..1)
+    coast_strict: bool = False              # unseen past coast_ticks: no box of a new label on the other side
+    first_velocity_alpha: float = 1.0       # weight of the first velocity sample (1: taken as is)
+
+    @classmethod
+    def live(cls, **over: Any) -> "TrackerConfig":
+        """The config the live runners use: LIVE_TRACKER on top of the defaults, then `over`."""
+        return cls(**{**LIVE_TRACKER, **over})
 
     def __post_init__(self):
         positive = ("gate_mt", "max_gate_mt", "max_speed_mt_per_tick", "decide_llr", "llr_cap",
@@ -352,6 +392,10 @@ class TrackerConfig:
             raise ValueError("TrackerConfig.min_hits and label_switch_frames must be >= 1")
         if not 0 < self.velocity_alpha <= 1 or not 0 < self.label_decay <= 1:
             raise ValueError("TrackerConfig.velocity_alpha and label_decay must be in (0, 1]")
+        if not 0 < self.first_velocity_alpha <= 1:
+            raise ValueError("TrackerConfig.first_velocity_alpha must be in (0, 1]")
+        if not self.contra_cost >= 0 or not 0.5 <= self.contra_side_prob <= 1.0:
+            raise ValueError("TrackerConfig needs contra_cost >= 0 and contra_side_prob in [0.5, 1]")
         if not self.decide_llr <= self.flip_llr <= self.llr_cap:
             raise ValueError("TrackerConfig needs decide_llr <= flip_llr <= llr_cap")
         if self.max_gate_mt < self.gate_mt:
@@ -601,12 +645,20 @@ class Tracker:
         gate = self._gate(t, o, tick)
         if d > gate:
             return FORBIDDEN
-        c = d / gate + cfg.class_cost * (1.0 - self._class_sim(t, o.cls))
         team = self.team_of(t)
+        unit = not self.is_spell(t.label)
+        contra = (unit and team != UNKNOWN_TEAM
+                  and abs((1.0 if team == ENEMY_TEAM else 0.0) - o.side_prob) >= cfg.contra_side_prob)
+        if cfg.coast_strict and unit and contra and tick - t.last_tick > cfg.coast_ticks and (
+                o.cls not in t.label_weights):
+            return FORBIDDEN                     # CAPTURE: a lost track takes no other unit's box
+        c = d / gate + cfg.class_cost * (1.0 - self._class_sim(t, o.cls))
         if team != UNKNOWN_TEAM:
             target = 1.0 if team == ENEMY_TEAM else 0.0
             # 0 when side_prob is 0.5 or agrees, 1 when it is fully against the team
             c += cfg.team_cost * max(0.0, 2.0 * abs(target - o.side_prob) - 1.0)
+            if contra:
+                c += cfg.contra_cost             # CAPTURE: clearly the other side's box
         return c
 
     def _flickers(self, tracks: Sequence[TrackState], obs: Sequence[Observation], seen: Collection[int],
@@ -672,8 +724,9 @@ class Tracker:
         dt = tick - t.last_tick
         if dt > 0:
             rvx, rvy = (o.x_mt - t.x_mt) / dt, (o.y_mt - t.y_mt) / dt
-            if t.hits == 1:
-                vx, vy = rvx, rvy
+            if t.hits == 1:                      # CAPTURE: damped toward standing still (LIVE 0.5)
+                a1 = cfg.first_velocity_alpha
+                vx, vy = a1 * rvx, a1 * rvy
             else:
                 a = cfg.velocity_alpha
                 vx, vy = a * rvx + (1 - a) * t.vx, a * rvy + (1 - a) * t.vy

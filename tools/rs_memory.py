@@ -121,6 +121,26 @@ class PublicMemory:
         if exec_tick < first.get(card, exec_tick + 1):
             first[card] = exec_tick
 
+    def retract(self, team: int, card: int, exec_tick: int) -> bool:
+        """Take back one play recorded with record(team, card, exec_tick) (the live runner's
+        correction of an opponent play perception named wrong: scripts/vision/types.OppAmend).
+        Returns whether such a play was recorded."""
+        team = _team(team)
+        card = _int(card, "card")
+        exec_tick = _int(exec_tick, "exec_tick")
+        last = self._last[team]
+        for k, entry in enumerate(last):
+            if entry == (card, exec_tick):
+                del last[k]
+                del self._ticks[team][k]
+                left = [t for c, t in last if c == card]
+                if left:
+                    self._first[team][card] = min(left)
+                else:
+                    self._first[team].pop(card, None)
+                return True
+        return False
+
     def record_ran(self, rows: Iterable[Sequence]) -> int:
         """Record the card plays in Battle.step_commands_run() rows, (tick, team, kind, what,
         reason): kind "deploy" with reason 0 is catalogue card `what` that ran on `tick`.

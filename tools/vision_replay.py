@@ -1211,7 +1211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from scripts.vision.geometry import load_geometry
     from scripts.vision.labels import load_class_table
     from scripts.vision.record import VisionRecorder
-    from scripts.vision.tracker import Tracker
+    from scripts.vision.tracker import Tracker, TrackerConfig
 
     rec_path = Path(args.recording)
     if not rec_path.exists():
@@ -1266,8 +1266,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config and config.get("deck") and config.get("deck_ids"):
         live_names = {int(i): str(n) for n, i in zip(config["deck"], config["deck_ids"])}
     unknown = bool(args.unknown_plays)
-    # the live chain's tracker (scripts/vision_play.py): our deck's labels, the spell labels
-    tracker = Tracker(own_classes=table.deck_labels(deck), spell_classes=table.spell_labels())
+    # the live chain's tracker (scripts/vision_play.py): its live config (tracker.py CAPTURE), our
+    # deck's labels, the spell labels
+    tracker = Tracker(TrackerConfig.live(), own_classes=table.deck_labels(deck), spell_classes=table.spell_labels())
     perception = ReplayPerception(hud_reader=hud_reader, tracker=tracker,
                                   deriver=EV.EventDeriver(tables, ev_config, own_deck=deck_ids), geometry=geometry,
                                   detector=detector, names=names, ticks=ticks, recorded=args.recorded)
