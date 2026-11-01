@@ -62,6 +62,60 @@ PRESETS (DecideConfig):
               learner decides what to do with it. No cap rule, no lane guard.
   Every preset takes presses= (default False: every button masked, as before E15).
 
+DECISION RULES (DecideConfig.wait_floor, stray_cards; both OFF by default, so every preset
+decides as before, draw for draw; tests/pipeline/test_decide_rules.py). Two hand-written rules
+from the over-defence audit of the owner's live friendlies of 2026-11-01, switched on per seat
+for an A/B in the simulator first (rs_eval --wait-floor / --stray-guard, rs_match and
+rs_league_eval players' wait_floor= / stray_guard=, scripts/decide_ab.ps1). The argmax presets
+only: the sampling preset refuses them, so RL rollouts and their probabilities never change.
+  wait floor  (rule 6, wait_floor = P, the A/B's 0.95) the bot waits whenever the model's own
+              p_wait (per 20 ticks, the gate after the wait bias and the masks: what the
+              decision records) is at least P, i.e. the model rates playing in the next second
+              under 1 - P. Without it, the draw u >= p_wait ** (dt / 20) still plays now and
+              then: in the audit about one play a game came from p_wait >= 0.95 (game 1 t2178,
+              a Cannon at p_wait 0.986, a 0.3% draw over 12 ticks, which left the bot empty).
+              The cap rule wins: the floor never holds a playable card at or above the cap
+              (cfg.cap_milli; 9500 when the preset has no cap rule too), so elixir never leaks
+              to it. The one random() is still drawn first; a drawn wait keeps its reason
+              ("wait"), and a wait the floor made is reason "floor" (R_FLOOR): a play the draw
+              would have tried, so at most the plays it removed (one of them might have found
+              no tile and waited "no_tile" anyway).
+  stray guard (rule 7, stray_cards = card_ids(catalogue, STRAY_CARD_NAMES): Skeletons and Ice
+              Spirits, the 1-elixir troops of the bot's Hog 2.6) while an enemy THREAT is on
+              the board, a tile of such a card on our half farther than STRAY_REACH_MT (5.5
+              tiles) from every threat's PATH is skipped, as the lane guard skips its tiles:
+              the model's next tile is tried. When the guard turns down every legal tile of the
+              card in the first 60, the decision WAITS (no_tile, stray > 0) in every preset: the
+              guard holds the play, it never hands it to another card (the live fallback would
+              otherwise go on to, say, a 4-elixir Hog Rider at the bridge: the over-commit the
+              rule is there to stop). Episode 9 of the audit (game 1 t1587): Skeletons at
+              centre-river (own tile (8, 17)) while a P.E.K.K.A walked down the other lane at
+              own (15.3, 13.5); with nothing near, two of the three walked up the far lane and
+              died to the enemy tower. A threat: an enemy TROOP (as the lane guard's
+              threat_lane: no building, no crown tower) with hp left at own-frame y >=
+              GUARD_DEEP_MT (13 tiles), the lane guard's line; the P.E.K.K.A was there, 1.5
+              tiles short of the river. An enemy building alone (a Cannon at their river edge)
+              walks nowhere, so it switches nothing on. A threat's path: from where it is, for
+              a ground troop not yet past the river by its lane's bridge exit (own x 3.5 or
+              14.5, y 17), to our princess tower in its lane (the king once that one is down);
+              and from the bridge exit (or where it is) to each building of ours on our half,
+              which pulls it. 5.5 tiles is half the 11 tiles between the lanes: beyond it a
+              troop is nearer the other lane, the one it walks when it finds nothing to hit
+              (own column 8 is 6.0 tiles from a right-lane path, column 9 is 5.0). Kept
+              whatever the distance: no threat at all (back-of-king cycle plays, any tile), the
+              enemy half (own rows below 17: offence, the pocket of a fallen princess), the
+              bridge tiles of a lane where a troop of ours is at our bridge or beyond (own
+              columns 2-4 or 13-15 of rows 17-18, with a troop of ours in that lane at own y <
+              STRAY_PUSH_MT, 19 tiles: a bridge play with or behind the Hog; without one, a
+              far-lane bridge play is episode 9's walk up the other lane, and the threat's own
+              bridge is near its path anyway) and tiles next to one of our living crown towers
+              (within STRAY_TOWER_MT, 1 tile, of its body: the back of the king, a princess
+              tower's side). Ice Golem (2) is left out, as the lane guard leaves it out: pros
+              pull with it, far from the path on purpose; the lane guard's Cannon is a
+              building. Decision.stray counts the legal tiles the guard turned down (the guard
+              is asked after legality): a play with stray > 0 is the same card the guard moved
+              to another tile, a wait with stray > 0 one the guard made.
+
 PENDING (plays we sent that have not run): pending=None reads them from the state, as RoyaleSim
 reports them under a command delay (players[team]["pending"] rows [kind, what, x, y, ticks_left,
 cost] and "pending_cost", the elixir they speak for): that is rs_eval. The live runner passes
@@ -208,6 +262,21 @@ GUARD_SHARE = 0.75           # share of that hp in one lane for it to be "the" l
 GUARD_CENTRE = (7, 10)       # own-frame tile columns always allowed
 GUARD_DEEP_MT = 13_000       # an enemy at own-frame y below this is still deep on their side
 
+# The decision rules (module doc, DECISION RULES), both off unless a DecideConfig says so.
+WAIT_FLOOR_AB = 0.95         # rule 6's floor in the A/B (scripts/decide_ab.ps1)
+STRAY_CARD_NAMES = frozenset({"Skeletons", "IceSpirits"})   # rule 7: the deck's 1-elixir troops
+STRAY_REACH_MT = 5_500       # a tile farther than this from every threat's path is a stray
+STRAY_TOWER_MT = 1_000       # tiles within this of one of our living crown towers' body are kept
+STRAY_OWN_ROW = 17           # own-frame rows from here are our half (below: offence, kept)
+STRAY_BRIDGE_COLS = ((2, 4), (13, 15))   # own-frame columns of the two bridge plays ...
+STRAY_BRIDGE_ROWS = (17, 18)             # ... in our first two rows: kept with a push
+STRAY_PUSH_MT = 19_000       # a troop of ours at own y below this (our bridge or beyond)
+                             # keeps its lane's bridge tiles
+LANE_X_MT = (3_500, 14_500)  # own-frame x of the two lanes: the bridges and the princess towers
+BRIDGE_EXIT_MT = 17_000      # own-frame y where a ground troop leaves its lane's bridge
+LANE_SPLIT_MT = 9_000        # own-frame x below which a unit is in the left lane (threat_lane)
+KIND_BUILDING = 1            # entity kind (threat_lane, rs_rows: 1 = building)
+
 # Sampling (rs_selfplay.TOP_TILES, EXTRA_TILES, EXPLORE, TILE_TEMP; 120 random tiles scanned).
 SAMPLE_TOP, SAMPLE_EXTRA, SAMPLE_SCAN, SAMPLE_EXPLORE, SAMPLE_TEMP = 8, 8, 120, 0.15, 1.0
 
@@ -216,6 +285,7 @@ MODES = (MODE_LEGACY, MODE_LIVE, MODE_SAMPLE)
 
 PLAY, WAIT, PRESS = "play", "wait", "press"
 R_WAIT, R_NO_CARD, R_NO_TILE = "wait", "no_card", "no_tile"
+R_FLOOR = "floor"            # a wait the wait floor made (module doc, DECISION RULES)
 
 #: An abilities row's columns by position (royalegym protocol.AbilityRow / ability_row, and
 #: tools/rs_presses._row): a column the engine does not send reads its default.
@@ -348,6 +418,23 @@ class DecideConfig:
     tile_temp: float = SAMPLE_TEMP
     name: str = MODE_LEGACY
     presses: bool = False            # E15: ability buttons may be pressed (presses_allowed)
+    # The decision rules (module doc, DECISION RULES): off unless set (apply_rules).
+    wait_floor: float | None = None  # rule 6: wait at p_wait >= this (None: off)
+    stray_cards: frozenset[int] = frozenset()   # rule 7, the stray guard, on these cards
+
+    def __post_init__(self) -> None:
+        if self.wait_floor is not None:
+            object.__setattr__(self, "wait_floor", check_wait_floor(self.wait_floor))
+        if not isinstance(self.stray_cards, frozenset):
+            object.__setattr__(self, "stray_cards", frozenset(int(c) for c in self.stray_cards))
+        if self.sample and self.has_rules:
+            raise ValueError("the decision rules (wait_floor, the stray guard) are for the "
+                             "argmax presets: the sampling preset (RL rollouts) refuses them")
+
+    @property
+    def has_rules(self) -> bool:
+        """Whether a decision rule is on (module doc, DECISION RULES)."""
+        return self.wait_floor is not None or bool(self.stray_cards)
 
     @classmethod
     def legacy(cls, wait_bias: float = math.log(1 / DEFAULT_WAIT_KEEP), *, dt: int = DECIDE,
@@ -392,6 +479,55 @@ class DecideConfig:
         if "guard_cards" in changes:
             changes["guard_cards"] = frozenset(int(c) for c in changes["guard_cards"])
         return dataclasses.replace(self, **changes)
+
+
+def check_wait_floor(value: Any) -> float:
+    """A wait floor as a float above 0 and at most 1 (ValueError otherwise)."""
+    try:
+        floor = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"wait floor: a number above 0 and at most 1, got {value!r}") from None
+    if isinstance(value, bool) or not 0.0 < floor <= 1.0:      # NaN fails the comparison too
+        raise ValueError(f"wait floor: above 0 and at most 1, got {value!r}")
+    return floor
+
+
+def apply_rules(cfg: DecideConfig, catalogue: Sequence[Sequence[Any]] = (), *,
+                wait_floor: float | None = None, stray_guard: bool = False) -> DecideConfig:
+    """`cfg` with the decision rules a seat's switches turn on (module doc, DECISION RULES): the
+    wait floor, and the stray guard on STRAY_CARD_NAMES of `catalogue` (catalogue_json rows).
+    Both off: `cfg` itself, unchanged."""
+    if wait_floor is None and not stray_guard:
+        return cfg
+    changes: dict[str, Any] = {}
+    if wait_floor is not None:
+        changes["wait_floor"] = check_wait_floor(wait_floor)
+    if stray_guard:
+        cards = card_ids(catalogue, STRAY_CARD_NAMES)
+        if not cards:
+            raise ValueError(f"stray guard: the catalogue holds none of {sorted(STRAY_CARD_NAMES)}")
+        changes["stray_cards"] = cards
+    return cfg.replace(**changes)
+
+
+def rules_record(wait_floor: float | None = None, stray_guard: bool = False) -> dict[str, Any]:
+    """The switches as reports record them: only those on ({} when both are off)."""
+    out: dict[str, Any] = {}
+    if wait_floor is not None:
+        out["wait_floor"] = check_wait_floor(wait_floor)
+    if stray_guard:
+        out["stray_guard"] = True
+    return out
+
+
+def rules_label(wait_floor: float | None = None, stray_guard: bool = False) -> str:
+    """The switches as a run's name says them: " wait-floor 0.95 stray-guard" ("" when off)."""
+    out = ""
+    if wait_floor is not None:
+        out += f" wait-floor {check_wait_floor(wait_floor):g}"
+    if stray_guard:
+        out += " stray-guard"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1236,16 +1372,113 @@ def _guarded(lane: int | None, tx: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# the stray guard (rule 7; module doc, DECISION RULES)
+# ---------------------------------------------------------------------------
+
+def _own_mt(x_mt: float, y_mt: float, team: int) -> tuple[float, float]:
+    """World millitiles -> the acting player's frame (to_world's inverse; it is its own)."""
+    return to_world(x_mt, y_mt, team)
+
+
+def _segment_mt(px: float, py: float, a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Distance from (px, py) to the segment a-b, millitiles."""
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    n = dx * dx + dy * dy
+    t = 0.0 if n == 0 else min(1.0, max(0.0, ((px - ax) * dx + (py - ay) * dy) / n))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+@dataclasses.dataclass(frozen=True)
+class StrayGuard:
+    """The stray guard of one decision (module doc, DECISION RULES), own frame, millitiles:
+    `paths`, one polyline per threat (and per threat and building of ours), `towers`, our
+    living crown towers as (x, y, body half), and `push_lanes`, the lanes (0 left, 1 right)
+    with a troop of ours at our bridge or beyond, whose bridge tiles are kept."""
+
+    paths: tuple
+    towers: tuple
+    push_lanes: frozenset = frozenset()
+
+    def reach(self, tx: int, ty: int) -> float:
+        """Millitiles from own-frame tile (tx, ty)'s centre to the nearest threat's path."""
+        cx, cy = tx * 1000 + 500, ty * 1000 + 500
+        return min(_segment_mt(cx, cy, p[i], p[i + 1]) for p in self.paths
+                   for i in range(len(p) - 1))
+
+    def keeps(self, tx: int, ty: int) -> bool:
+        """Whether own-frame tile (tx, ty) stays in for a stray card: on the enemy half, a
+        bridge tile of a lane we push in, next to one of our towers, or within STRAY_REACH_MT
+        of a threat's path."""
+        if ty < STRAY_OWN_ROW:
+            return True
+        if ty in STRAY_BRIDGE_ROWS and any(lo <= tx <= hi and lane in self.push_lanes
+                                           for lane, (lo, hi) in enumerate(STRAY_BRIDGE_COLS)):
+            return True
+        cx, cy = tx * 1000 + 500, ty * 1000 + 500
+        for x0, y0, half in self.towers:
+            if max(abs(cx - x0), abs(cy - y0)) <= half + STRAY_TOWER_MT:
+                return True
+        return self.reach(tx, ty) <= STRAY_REACH_MT
+
+
+def stray_guard(state: Mapping[str, Any], team: int, sub: int = SUBTILE_PER_MILLITILE
+                ) -> StrayGuard | None:
+    """The stray guard of `team` on `state`, or None when no enemy threatens (module doc,
+    DECISION RULES): every enemy troop (not a building, as threat_lane, nor a crown tower)
+    with hp left at own-frame y >= GUARD_DEEP_MT."""
+    hp = _tower_hp(state, team)
+    towers, princess = [], {}
+    for s in (0, 1, 2):
+        if not _alive(hp[s]):
+            continue
+        wx, wy = TOWER_CENTRE[(team, s)]
+        ox, oy = _own_mt(wx * 1000, wy * 1000, team)
+        towers.append((ox, oy, TOWER_BODY_HALF[s] * 1000))
+        if s:
+            princess[0 if ox < LANE_SPLIT_MT else 1] = (ox, oy)
+    king = _own_mt(TOWER_CENTRE[(team, 0)][0] * 1000, TOWER_CENTRE[(team, 0)][1] * 1000, team)
+    ours, pushes, threats = [], set(), []
+    for e in state["entities"]:
+        if e[F["hp"]] <= 0 or e[F["tower_slot"]] >= 0:
+            continue
+        ox, oy = own(e[F["x"]], e[F["y"]], team, sub)
+        building = e[F["kind"]] == KIND_BUILDING
+        if e[F["team"]] == team:
+            if building:
+                if oy >= STRAY_OWN_ROW * 1000:
+                    ours.append((ox, oy))
+            elif oy < STRAY_PUSH_MT:
+                pushes.add(0 if ox < LANE_SPLIT_MT else 1)
+        elif not building and oy >= GUARD_DEEP_MT:
+            threats.append((ox, oy, bool(e[F["flying"]])))
+    if not threats:
+        return None
+    paths = []
+    for ox, oy, flying in threats:
+        lane = 0 if ox < LANE_SPLIT_MT else 1
+        entry = (ox, oy)
+        if not flying and oy < BRIDGE_EXIT_MT:
+            entry = (LANE_X_MT[lane], BRIDGE_EXIT_MT)
+        target = princess.get(lane, king)
+        paths.append(((ox, oy), entry, target) if entry != (ox, oy) else ((ox, oy), target))
+        paths += [(entry, b) for b in ours]
+    return StrayGuard(tuple(paths), tuple(towers), frozenset(pushes))
+
+
+# ---------------------------------------------------------------------------
 # the decision
 # ---------------------------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """What decide() chose. kind PLAY (command set) or WAIT (reason: R_WAIT drawn, R_NO_CARD
-    nothing playable, R_NO_TILE no legal tile) or PRESS (E15: `button`, its card in `card` when
-    the abilities row names it, its elixir in `cost`; command (team, HAND_SIZE + button, 0, 0)).
-    Tiles: `tile` = ty * 18 + tx, the model's own frame; x_sub / y_sub the engine-frame tap of
-    its centre. `value`: the critic's raw [outcome, won logit] (module doc, V2 CHECKPOINTS)."""
+    nothing playable, R_NO_TILE no legal tile, R_FLOOR the wait floor) or PRESS (E15: `button`,
+    its card in `card` when the abilities row names it, its elixir in `cost`; command (team,
+    HAND_SIZE + button, 0, 0)). Tiles: `tile` = ty * 18 + tx, the model's own frame; x_sub /
+    y_sub the engine-frame tap of its centre. `value`: the critic's raw [outcome, won logit]
+    (module doc, V2 CHECKPOINTS). `stray`: the legal tiles the stray guard turned down (DECISION
+    RULES)."""
 
     team: int
     tick: int | None
@@ -1277,6 +1510,7 @@ class Decision:
     tile_a: int = -1                         # sampling: index into tile_cands
     logq_tile: float = 0.0
     value: tuple[float, ...] = ()            # E15: the critic (value2), raw; () without one
+    stray: int = 0                           # rule 7: legal tiles the stray guard turned down
 
     @property
     def is_play(self) -> bool:
@@ -1461,6 +1695,11 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
         return Decision(kind=WAIT, reason=R_NO_CARD, **base)
     if not capped and u < q_wait:
         return Decision(kind=WAIT, reason=R_WAIT, **base)
+    if cfg.wait_floor is not None and p_wait >= cfg.wait_floor:
+        # Rule 6 (module doc, DECISION RULES): the cap wins, also without a cap rule.
+        cap = CAP_ELIXIR if cfg.cap_milli is None else cfg.cap_milli
+        if not (cards_ok and spendable >= cap):
+            return Decision(kind=WAIT, reason=R_FLOOR, **base)
     # The argmax over the slots and buttons (g[1:]: slot s is entry s, button k is
     # HAND_SIZE + k); the fallback goes on in gate order. A masked entry is -1e9, so with every
     # button masked this is the slots' argmax and order, exactly as before E15.
@@ -1471,6 +1710,7 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
                     if mask[1 + int(s)] and int(s) != first]
     check: Bound | None = None
     tried: list[int] = []
+    strays: list[Any] = []                  # rule 7: [the guard] once a stray card is tried
     for slot in entries:
         if slot >= HAND_SIZE:
             return press(slot - HAND_SIZE, tried, check)
@@ -1482,6 +1722,12 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
         if aim is not None:
             order = aim(order, slot, card)
         lane = threat_lane(state, team, sub) if card in cfg.guard_cards else None
+        guard = None
+        if card in cfg.stray_cards:
+            if not strays:
+                strays.append(stray_guard(state, team, sub))
+            guard = strays[0]
+        skipped = 0                         # rule 7: legal tiles of this card turned down
         for t in order[:cfg.top_tiles]:
             t = int(t)
             tx, ty = t % GRID_W, t // GRID_W
@@ -1491,7 +1737,16 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
                 continue
             wx, wy = to_world(tx * 1000 + 500, ty * 1000 + 500, team)
             if check(slot, card, wx * sub, wy * sub):
-                return play(slot, t, wx, wy, lane, tried, check)
+                if guard is not None and not guard.keeps(tx, ty):
+                    skipped += 1
+                    continue
+                return play(slot, t, wx, wy, lane, tried, check,
+                            **({"stray": skipped} if skipped else {}))
+        if skipped:
+            # The guard turned down every legal tile it was shown: it holds the play (module
+            # doc, DECISION RULES), never hands it to the next card.
+            return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried),
+                            legality=check.name, stray=skipped, **base)
     return Decision(kind=WAIT, reason=R_NO_TILE, tried=tuple(tried),
                     legality="" if check is None else check.name, **base)
 

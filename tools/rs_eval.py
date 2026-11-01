@@ -48,6 +48,18 @@ blocked (RoyaleSim refuses them CARD_PENDING), a card with no legal tile hands o
 one, no wait at 9.5 elixir, and the Cannon's lane guard. A run that is not legacy says so in its
 name; reports/rs_ghost.jsonl then records "decide".
 
+Decision rules (tools/rs_decide.py DECISION RULES; both off by default, and then every run is
+what it was): `--wait-floor P` (rule 6: wait whenever the model's own p_wait is at least P, the
+cap winning) and `--stray-guard` (rule 7: no Skeletons or Ice Spirits on our half more than 5.5
+tiles from every threat's path) switch them on for the AGENT seat only, under either --decide,
+so the reactive opponent and the ghost stay the reference. --pro (no agent seat) and --search
+(an act() of its own) refuse them (check_rule_seats). A run with one says so in its name
+(" wait-floor 0.95 stray-guard"); reports/rs_ghost.jsonl then records "rules" (the switches)
+and "rule_counts" (floor_waits: waits the floor made, plays the draw would have tried;
+stray_moved: plays the guard moved to another tile of the same card; stray_waits: plays it held,
+every legal tile shown turned down), per match in each row's "rules". For an A/B, run the same command with and without them: the matches and seeds are
+the same (scripts/decide_ab.ps1 plays the league instead).
+
 Visibility (E12, tools/rs_rows.py --visibility): each checkpoint seat sees what its rows showed,
 the "visibility" of its meta (vocab.json; absent, as in every checkpoint before E12: legacy,
 every living unit). `--visibility legacy|public` overrides that for every checkpoint seat.
@@ -170,6 +182,11 @@ class RSAgent:
     # E17 (--noise): a perception_noise.MatchNoise play() sets for the match; act() then decides
     # on what it observes (module doc, "Perception noise"). None: the engine's state, as before.
     noise = None
+    # The decision rules (--wait-floor, --stray-guard; module doc, "Decision rules"): off unless
+    # play() / rs_match.configure sets them; rule_counts: what they did (only once one fired).
+    wait_floor = None
+    stray_guard = False
+    rule_counts = None
 
     _CAT = None
 
@@ -515,14 +532,40 @@ class RSAgent:
         return p
 
     def decide_config(self):
-        """The rs_decide.DecideConfig of `decide_mode`, with this checkpoint's wait bias."""
+        """The rs_decide.DecideConfig of `decide_mode`, with this checkpoint's wait bias (and
+        the seat's decision rules, with_rules)."""
         if self.decide_mode == rs_decide.MODE_LEGACY:
-            return rs_decide.DecideConfig.legacy(self.wait_bias, dt=DECIDE)
+            return self.with_rules(rs_decide.DecideConfig.legacy(self.wait_bias, dt=DECIDE))
         if self.decide_mode == rs_decide.MODE_LIVE:
             guard = rs_decide.card_ids(self._catalogue(), rs_decide.GUARD_CARD_NAMES)
-            return rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard, dt=DECIDE)
+            return self.with_rules(rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard,
+                                                               dt=DECIDE))
         raise ValueError(f"RSAgent.decide_mode: {rs_decide.MODE_LEGACY!r} or "
                          f"{rs_decide.MODE_LIVE!r}, got {self.decide_mode!r}")
+
+    def with_rules(self, cfg):
+        """`cfg` with this seat's decision rules on (rs_decide.apply_rules; module doc, "Decision
+        rules"); `cfg` itself while both are off."""
+        floor, stray = getattr(self, "wait_floor", None), bool(getattr(self, "stray_guard", False))
+        if floor is None and not stray:
+            return cfg
+        return rs_decide.apply_rules(cfg, self._catalogue() if stray else (), wait_floor=floor,
+                                     stray_guard=stray)
+
+    def note_rules(self, d):
+        """Count what the decision rules did in decision `d` (rule_counts): a wait the floor
+        made, a play the stray guard moved to another tile (the same card), a play it held (a
+        wait). Nothing while they never fire, so a seat without them has rule_counts None."""
+        reason, stray = getattr(d, "reason", None), getattr(d, "stray", 0)
+        if reason != rs_decide.R_FLOOR and not stray:
+            return
+        counts = self.__dict__.setdefault("rule_counts", Counter())
+        if reason == rs_decide.R_FLOOR:
+            counts["floor_waits"] += 1
+        elif getattr(d, "kind", None) == rs_decide.PLAY:
+            counts["stray_moved"] += 1
+        else:
+            counts["stray_waits"] += 1
 
     def _spell_aim(self, view, team, sub):
         """rs_decide's aim hook for --spell-aim: aim_spell on a spell's tile order."""
@@ -558,6 +601,7 @@ class RSAgent:
         d = rs_decide.decide(self.policy, row, state, team, rs_decide.BattleLegality(battle),
                              self.decide_config(), rng=self.rng, tick=tick, sub=sub, aim=aim)
         self.last_decision = d
+        self.note_rules(d)
         return d.command
 
 
@@ -773,6 +817,22 @@ def check_noise_seats(noise, opp_noise, mode_, opp_ckpt="", shadow=False) -> Non
                          "--opponent-ckpt (the ghost replays its commands and sees nothing)")
 
 
+def check_rule_seats(wait_floor, stray_guard, mode_) -> None:
+    """ValueError when a decision rule (--wait-floor, --stray-guard; module doc, "Decision
+    rules") is asked for a run whose agent does not decide through rs_decide.decide: --pro has
+    no agent seat, and the --search agents have an act() of their own."""
+    if wait_floor is None and not stray_guard:
+        return
+    if wait_floor is not None:
+        rs_decide.check_wait_floor(wait_floor)
+    if mode_ == "pro":
+        raise ValueError("--wait-floor / --stray-guard are the agent seat's decision rules; "
+                         "--pro has no agent seat")
+    if mode_ != "agent":
+        raise ValueError(f"--wait-floor / --stray-guard: the {mode_} agent decides in an act() "
+                         "of its own, not through rs_decide.decide; leave out --search")
+
+
 def skip_record(tag, mode_, why, detail=""):
     """What play() returns for a match it does not play: {"tag", "mode", "skipped": why,
     "detail"}. It has no "result" or "records", so callers that keep only played
@@ -791,7 +851,7 @@ def split_results(results):
 def play(args):
     """One match. args: (payload_text, ckpt, mode, seed[, opp_ckpt, delay, lead, hold,
     shadow, spell_aim, engine, mem_lag, decide, visibility, noise, opponent_noise,
-    noise_seed]); `engine` (an rs_engine config's to_json()) becomes this process's
+    noise_seed, wait_floor, stray_guard]); `engine` (an rs_engine config's to_json()) becomes this process's
     rs_engine.active() config, else the active one is used. `mem_lag` as --mem-lag (missing or
     None: rs_memory.BOARD_LAG; module doc). `decide` as --decide (missing or None: legacy), for
     both RSAgent seats. `visibility` as --visibility (missing or None: each RSAgent seat keeps
@@ -800,7 +860,10 @@ def play(args):
     profile's to_dict(), a path, "default"; missing, None or "none": a perfect observer, as
     before) and `noise_seed` as --noise-seed (missing or None: 0); ValueError for noise on a
     seat that is not there or does not decide through RSAgent.act (module doc, "Perception
-    noise"). A noisy seat's counts are in the result's "noise" / "opponent_noise"."""
+    noise"). A noisy seat's counts are in the result's "noise" / "opponent_noise".
+    `wait_floor` / `stray_guard` as --wait-floor / --stray-guard (missing or None / False: off,
+    as before): the AGENT seat's decision rules (module doc, "Decision rules"; ValueError for a
+    run without one, check_rule_seats); what they did is the result's "rules" (only then)."""
     payload_text, ckpt, mode_, seed = args[:4]
     opp_ckpt = args[4] if len(args) > 4 else ""
     delay = args[5] if len(args) > 5 else 0
@@ -816,6 +879,10 @@ def play(args):
     opp_noise = RR.noise_profile(args[15] if len(args) > 15 else None)
     noise_seed = RR.noise_seed_value(args[16] if len(args) > 16 and args[16] is not None else 0)
     check_noise_seats(noise, opp_noise, mode_, opp_ckpt, args[8] if len(args) > 8 else False)
+    # The agent seat's decision rules (None / False: off, as before).
+    wait_floor = args[17] if len(args) > 17 else None
+    stray_guard = bool(args[18]) if len(args) > 18 else False
+    check_rule_seats(wait_floor, stray_guard, mode_)
     mem_lag = RR.mem_lag_value(args[11] if len(args) > 11 and args[11] is not None
                                else rs_memory.BOARD_LAG)
     legacy = mem_lag == RR.MEM_LEGACY
@@ -899,6 +966,10 @@ def play(args):
         agent.hold_pending = hold
         agent.spell_aim = spell_aim
         agent.decide_mode = decide_mode
+        if wait_floor is not None or stray_guard:     # the agent seat only, not the opponent
+            agent.wait_floor = rs_decide.check_wait_floor(wait_floor) if wait_floor is not None \
+                else None
+            agent.stray_guard = stray_guard
     ghost_team = 1 - hog_team
     opponent = RSAgent(opp_ckpt, seed=seed + 7) if opp_ckpt else None
     if opponent is not None:
@@ -1012,6 +1083,8 @@ def play(args):
     for key, team in (("noise", hog_team), ("opponent_noise", ghost_team)):
         if noises[team] is not None:
             out[key] = dict(sorted(noises[team].stats.items()))
+    if wait_floor is not None or stray_guard:     # likewise: only with a decision rule on
+        out["rules"] = dict(sorted((getattr(agent, "rule_counts", None) or {}).items()))
     return out
 
 
@@ -1065,6 +1138,14 @@ def main() -> int:
                     help="perception noise of the reactive opponent seat (--opponent-ckpt), as "
                          "--noise (default: none, it sees the engine's state; --noise-only does "
                          "not apply to it)")
+    ap.add_argument("--wait-floor", type=float, default=None, metavar="P",
+                    help="decision rule 6, the agent seat only: wait whenever the model's own "
+                         "p_wait is at least P (e.g. 0.95), except at the cap (tools/rs_decide.py "
+                         "DECISION RULES); default off")
+    ap.add_argument("--stray-guard", action="store_true",
+                    help="decision rule 7, the agent seat only: no Skeletons or Ice Spirits on "
+                         "our half more than 5.5 tiles from every threat's path while a threat "
+                         "is on the board (tools/rs_decide.py DECISION RULES); default off")
     rs_engine.add_engine_args(ap)
     args = ap.parse_args()
     mode_ = ("pro" if args.pro else "search_rebuild" if args.search and args.rebuild
@@ -1074,8 +1155,10 @@ def main() -> int:
         noise = PN.profile_from_args(args)                   # None without --noise
         opp_noise = RR.noise_profile(args.opponent_noise)
         check_noise_seats(noise, opp_noise, mode_, args.opponent_ckpt, args.shadow)
+        check_rule_seats(args.wait_floor, args.stray_guard, mode_)
     except (ValueError, FileNotFoundError) as exc:
         ap.error(str(exc))
+    rules = rs_decide.rules_record(args.wait_floor, args.stray_guard)    # {}: both off
     rs_engine.set_active(cfg)
     import pyarrow.parquet as pq
     royalesim, names, ids, cat = RR._setup(cfg)
@@ -1124,11 +1207,15 @@ def main() -> int:
                 break
         if len(picked) >= args.matches:
             break
-    # E17: the noise slots only when a seat has noise, so the tasks are otherwise as before.
+    # E17: the noise slots only when a seat has noise (or a decision rule follows them), so the
+    # tasks are otherwise as before; then the decision rules' slots, only when one is on.
+    noisy = noise is not None or opp_noise is not None
     extra = ()
-    if noise is not None or opp_noise is not None:
+    if noisy or rules:
         extra = (None if noise is None else noise.to_dict(),
                  None if opp_noise is None else opp_noise.to_dict(), args.noise_seed)
+    if rules:
+        extra += (args.wait_floor, bool(args.stray_guard))
     # Capped by free memory and CPUs (module doc, Workers): match k is seeded k whatever the count.
     # A search or a shadow keeps a second battle in each worker: the league's search memory.
     second_battle = mode_ in ("search", "search_rebuild") or bool(args.shadow)
@@ -1162,7 +1249,8 @@ def main() -> int:
             + (f" visibility {args.visibility}" if args.visibility is not None else "")
             + (f" noise {noise.name}" if noise is not None else "")
             + (f" opponent-noise {opp_noise.name}" if opp_noise is not None else "")
-            + (f" noise-seed {args.noise_seed}" if extra and args.noise_seed else "")
+            + (f" noise-seed {args.noise_seed}" if noisy and args.noise_seed else "")
+            + rs_decide.rules_label(args.wait_floor, args.stray_guard)
             + (f" vs reactive {Path(args.opponent_ckpt).parent.name}" if args.opponent_ckpt else " vs ghost"))
     real_w = sum(r["real"] == "win" for r in rows)
     print(f"  real result of the Hog player in these matches: {real_w}/{len(rows)} "
@@ -1192,6 +1280,15 @@ def main() -> int:
         record[f"{key}_stats"] = dict(sorted(stats.items()))
         print(f"  {key.replace('_', ' ')}: "
               + (", ".join(f"{k} {v:,}" for k, v in sorted(stats.items())) or "nothing observed"))
+    if rules:                                    # likewise: only with a decision rule on
+        counts: Counter = Counter()
+        for r in rows:
+            counts.update(r.get("rules") or {})
+        record["rules"] = rules
+        record["rule_counts"] = dict(sorted(counts.items()))
+        print(f"  rules{rs_decide.rules_label(args.wait_floor, args.stray_guard)}: "
+              + (", ".join(f"{k} {v:,} ({v / max(1, len(rows)):.2f}/match)"
+                           for k, v in sorted(counts.items())) or "never fired"))
     with out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return 0

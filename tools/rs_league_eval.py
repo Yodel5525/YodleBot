@@ -106,6 +106,17 @@ gate() gives such a candidate the decision "privileged" (never promoted, never a
 the names given and from the games themselves (Game.privileged), so no report can promote it.
 A run warns when a search's opponent model (S07) is a gate seat's checkpoint (search_warnings).
 
+DECISION RULES (tools/rs_decide.py DECISION RULES; tools/rs_match.py DECISION RULES). A player
+may switch on rs_decide's two hand-written rules with the keys wait_floor (a p_wait floor above
+0 and at most 1: wait whenever the model's own p_wait reaches it, the cap rule winning) and
+stray_guard (on: no Skeletons or Ice Spirits on our half more than 5.5 tiles from every
+threat's path), e.g. "v2_hog_rules=runs/tokens/v2_hog/best.pt,wait_floor=0.95,stray_guard=on"
+against "v2_hog=runs/tokens/v2_hog/best.pt": the same checkpoint under two names, an A/B of the
+rules (scripts/decide_ab.ps1, tools/decide_ab.py). Both keys are part of the player's identity
+and game keys only when on (the run header's players list them), so every log without them
+resumes as before, and a name played with other rules is refused like a changed checkpoint.
+Every game record's seat info carries "rules" (the switches and what they did) for such a seat.
+
 WORKERS. Each worker process holds torch, royalesim and two policies (about WORKER_MB = 1.2 GB);
 worker_cap() keeps RESERVE_MB (3 GB) for the parent and the system, at most MAX_WORKERS (6) and
 one CPU free: on the owner's 16 GB PC with MuMu and the browser closed that is 4-6 workers. A
@@ -387,8 +398,8 @@ def pairings_for(config: GateConfig, protocol: Protocol, *, pool: bool = False) 
 # ---------------------------------------------------------------------------
 
 _INT_OPTS = frozenset({"lead", "noise_seed", "seed_offset", "latency_ticks"})
-_FLOAT_OPTS = frozenset({"wait_keep"})
-_BOOL_OPTS = frozenset({"spell_aim", "hold_pending", "allow_drift", "presses"})
+_FLOAT_OPTS = frozenset({"wait_keep", "wait_floor"})
+_BOOL_OPTS = frozenset({"spell_aim", "hold_pending", "allow_drift", "presses", "stray_guard"})
 _STR_OPTS = frozenset({"decide", "visibility", "schema", "noise", "search"})
 _TRUE, _FALSE = frozenset({"1", "true", "yes", "on"}), frozenset({"0", "false", "no", "off"})
 
@@ -419,8 +430,9 @@ def parse_player(value: Any, **defaults: Any) -> Any:
     """An rs_match.AgentSpec from an AgentSpec, its dict, a JSON object, or the command-line
     form [NAME=]CKPT[,KEY=VALUE...] (keys: lead, decide, noise, noise_seed, visibility, schema,
     wait_keep, spell_aim, hold_pending, seed_offset, allow_drift, presses, search, latency_ticks:
-    module doc, SEARCH PLAYERS). CKPT "idle" (or empty) never plays. `defaults` fill keys the
-    value leaves out (None: not filled)."""
+    module doc, SEARCH PLAYERS; wait_floor, stray_guard: module doc, DECISION RULES). CKPT
+    "idle" (or empty) never plays. `defaults` fill keys the value leaves out (None: not
+    filled)."""
     RM = _rm()
     if isinstance(value, RM.AgentSpec):
         return value
@@ -1656,7 +1668,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="a candidate (repeatable); CKPT 'idle' never plays; keys: lead, "
                           "decide, noise, noise_seed, visibility, schema, wait_keep, spell_aim, "
                           "hold_pending, seed_offset, allow_drift, presses, search (a preset: "
-                          "s_root, s_idle; s_true is privileged, never promoted), latency_ticks")
+                          "s_root, s_idle; s_true is privileged, never promoted), latency_ticks, "
+                          "wait_floor (a p_wait floor, e.g. 0.95), stray_guard (on/off): the "
+                          "decision rules of tools/rs_decide.py, off by default")
     run.add_argument("--champion", required=True, metavar=player)
     run.add_argument("--anchor", action="append", default=[], metavar=player)
     run.add_argument("--pool", action="append", default=[], metavar=player,

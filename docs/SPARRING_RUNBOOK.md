@@ -1483,6 +1483,32 @@ Send back the log, `reports\rl_train_<time>.log`. If it is too big, send:
 - `runs\rl\hog_rl1\log.jsonl` (small) and `runs\rl\hog_rl1\gates\*.report.json`;
 - any `error:` or `warning:` line, with the matching file under `runs\rl\hog_rl1\logs\`.
 
+## 22. Decision rules: the A/B in the simulator
+
+Two hand-written rules from the over-defence audit of the 2026-11-01 friendlies. Both are **off** everywhere until this A/B says they make the bot stronger: the live runner, `rs_eval`, the leagues and RL decide exactly as before without them. The live runner's switch comes in a later change.
+
+- **Wait floor** (audit fix 6): when the model itself rates playing in the next second under 5% (its `p_wait` at 0.95 or more), the bot waits instead of rolling for a play. The cap rule still wins: at 9.5 elixir with a card in hand the bot never waits, so no elixir leaks. In the audit this removes about one near-impossible play a game, such as the Cannon of game 1 at tick 2178 (a 0.3% draw).
+- **Stray guard** (audit fix 7): while an enemy troop is on our half or about to cross (from 2 tiles before the river), Skeletons and Ice Spirits are not dropped on our half more than 5.5 tiles from every enemy's path to our towers. 5.5 tiles is half the distance between the lanes: farther away, the troop is closer to the other lane and walks up it, as the Skeletons of game 1 tick 1587 did. The bot tries the model's next tile; when every tile it is shown is too far, it waits rather than play another card. These stay allowed: any tile when no enemy troop is coming (cycle plays behind the king; an enemy building alone does not count), the bridge tiles of a lane where one of our troops is at our bridge or beyond (plays with or behind the Hog), tiles next to our own towers, and the enemy half. The Ice Golem and the Cannon are not affected.
+
+`scripts\decide_ab.ps1` plays `v2_hog` with the rules on (league name `v2_hog_rules`) against itself with them off (`v2_hog`, the same `runs\tokens\v2_hog\best.pt`): 1,000 league games on both seats and with the decks exchanged, a 24-tick delay, the noise prior on every seat, the live rule, 4 workers. Its log is `runs\league\decide_ab.jsonl`, not section 20's. About 40 minutes (2.2 s a game at 4 workers); close MuMu and the browser first.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\decide_ab.ps1
+# optional: each rule alone, or all three candidates in one run (3,000 games, about 2 hours)
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\decide_ab.ps1 -Variant floor
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\decide_ab.ps1 -Variant stray
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\hcr\scripts\decide_ab.ps1 -Variant all
+```
+
+What it prints at the end, per candidate:
+- `score 52.3% over 1000 games (...); 95% [49.2%, 55.4%] Wilson, [...] bootstrap over 250 pairings`: the rules player's score against the same checkpoint without them (a win 1, a draw 0.5);
+- `a game: plays ..., elixir leak ...; v2_hog_rules's rules: floor waits 1.10, stray moved 0.35, ...`: how often each rule changed a decision;
+- `verdict: STRONGER`, `NO DIFFERENCE` or `WEAKER`, with the score and both 95% intervals. STRONGER means both intervals lie above 50%, WEAKER both below.
+
+How to read it: at 1,000 games an interval is about 3 points either side, and a rule that changes about one play a game may move the score by less than that, so NO DIFFERENCE is the likely result and means "too small to see", not "equal". In half the games (the decks exchanged) the rules player plays the opponent's deck, so the score mixes the rules' effect on Hog 2.6 with their effect on other decks. `-Variant all` makes three calls, so a STRONGER by chance somewhere is about three times as likely as for one.
+
+For another checkpoint, such as the live one if it is not `v2_hog`, add `-Ckpt`, for example `-Ckpt runs\tokens\v2_hog_20k\best.pt` (players `v2_hog_20k_rules` and `v2_hog_20k`); `-WaitFloor 0.9` tries another floor under its own name (`v2_hog_rules_wf090`). A rerun of the same command plays only the games the log lacks (exit code 2 and `INCOMPLETE` mean games are missing). Send back `reports\decide_ab_<time>.log`. The same rules exist as `--wait-floor 0.95 --stray-guard` in `tools\rs_eval.py` (the agent seat only) and as the league player keys `wait_floor=0.95,stray_guard=on`.
+
 ## If something breaks
 
 Paste these back to the cloud session:

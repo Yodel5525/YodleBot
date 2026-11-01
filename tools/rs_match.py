@@ -43,7 +43,19 @@ runner's rule, the default here), "legacy" (rs_eval's) or "sample" (RL's sampled
 visibility: rs_rows --visibility (None: the checkpoint's own). presses: whether the seat may
 press its ability buttons (V2 SEATS; default False, every seat as before). search and
 latency_ticks: the seat's search and the delay it is charged (SEARCH SEATS; default none and 0,
-every seat as before).
+every seat as before). wait_floor and stray_guard: the seat's decision rules (DECISION RULES).
+
+DECISION RULES (tools/rs_decide.py DECISION RULES). AgentSpec.wait_floor (a p_wait floor above
+0 and at most 1, e.g. 0.95; None: off) and AgentSpec.stray_guard (the stray cheap-troop guard;
+False: off) switch rs_decide's two hand-written rules on for that seat (configure() sets them on
+the seat, MatchAgent.decide_config adds them to the seat's preset, rs_decide.apply_rules), so
+one checkpoint can play under two names, with and without them. An idle seat, the sample
+rule (RL) and a search seat (it picks among alternatives of its own) refuse them. to_dict
+leaves both out while they are off (the specs, game keys and identities of earlier runs do not
+change); seat_info adds "rules" (the switches, and the counts of rs_eval.RSAgent.note_rules:
+floor_waits, stray_moved, stray_waits) only for a seat with one on; rules_summary sums them per
+agent. The command line: --wait-floor-a / -b P and
+--stray-guard none|a|b|ab.
 
 V2 SEATS (E14 / E15; tools/rs_schema.py). A checkpoint whose meta "schema" is rs_rows/v2 gets
 rs_eval.RSAgent's v2 rows (RSAgent.v2_kw) with what the live runner gives its rows:
@@ -262,9 +274,23 @@ class AgentSpec:
     presses: bool = False
     search: Mapping | None = None
     latency_ticks: int = 0
+    wait_floor: float | None = None
+    stray_guard: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ckpt", "" if self.ckpt is None else str(self.ckpt))
+        # DECISION RULES: the seat's switches (rs_decide.apply_rules), off by default.
+        if self.wait_floor is not None:
+            object.__setattr__(self, "wait_floor", rs_decide.check_wait_floor(self.wait_floor))
+        if not isinstance(self.stray_guard, (bool, np.bool_)):
+            raise ValueError(f"stray_guard: True or False, got {self.stray_guard!r}")
+        object.__setattr__(self, "stray_guard", bool(self.stray_guard))
+        if self.rules:
+            if self.idle:
+                raise ValueError("wait_floor / stray_guard: an idle seat never decides")
+            if self.decide == rs_decide.MODE_SAMPLE:
+                raise ValueError("wait_floor / stray_guard: the sample rule (RL rollouts) "
+                                 "refuses the decision rules; use decide live or legacy")
         object.__setattr__(self, "name", str(self.name or ""))
         if self.decide not in rs_decide.MODES:
             raise ValueError(f"decide: one of {', '.join(rs_decide.MODES)}, got {self.decide!r}")
@@ -289,6 +315,10 @@ class AgentSpec:
         if self.search is not None:
             if self.idle:
                 raise ValueError("search: an idle seat never decides, so it cannot search")
+            if self.rules:
+                raise ValueError("wait_floor / stray_guard: a search seat chooses among its "
+                                 "own alternatives, which the decision rules do not see (as "
+                                 "rs_eval refuses them with --search); leave out the search")
             if self.lead:
                 raise ValueError(f"search: the search looks ahead itself; lead {self.lead} would "
                                  "look ahead twice (lead 0 with a search)")
@@ -315,9 +345,15 @@ class AgentSpec:
         a ceiling, never promoted (tools/rs_league_eval.py)."""
         return bool(self.search is not None and self.search.get("opponent") == "true")
 
+    @property
+    def rules(self) -> dict:
+        """The decision rules this agent has on (rs_decide.rules_record; {}: none)."""
+        return rs_decide.rules_record(self.wait_floor, self.stray_guard)
+
     def to_dict(self) -> dict:
         """The fields as a dict; `presses` only when True (V2 SEATS), `search` only when set and
-        `latency_ticks` only when not 0 (SEARCH SEATS): while they are off the dict, and so the
+        `latency_ticks` only when not 0 (SEARCH SEATS), `wait_floor` only when set and
+        `stray_guard` only when True (DECISION RULES): while they are off the dict, and so the
         game keys and identities built from it, is what it was before them."""
         out = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
         if _is_noise_model(self.noise):
@@ -330,6 +366,10 @@ class AgentSpec:
             out["search"] = json.loads(json.dumps(self.search))         # a copy, plain data
         if not self.latency_ticks:
             del out["latency_ticks"]
+        if self.wait_floor is None:
+            del out["wait_floor"]
+        if not self.stray_guard:
+            del out["stray_guard"]
         return out
 
     @classmethod
@@ -549,16 +589,20 @@ class MatchAgent(rs_eval.RSAgent):
         return bool(self.presses) and rs_decide.presses_allowed(getattr(self, "meta", None))
 
     def decide_config(self):
+        """The rule of decide_mode at this seat's cadence, presses and (DECISION RULES) the
+        decision rules configure() set (rs_eval.RSAgent.with_rules: off, the config as before)."""
         m = self.decide_mode
         kw = {"presses": True} if self.presses_on() else {}
         if m == rs_decide.MODE_LEGACY:
-            return rs_decide.DecideConfig.legacy(self.wait_bias, dt=self.cadence, **kw)
+            return self.with_rules(rs_decide.DecideConfig.legacy(self.wait_bias, dt=self.cadence,
+                                                                 **kw))
         if m == rs_decide.MODE_LIVE:
             guard = rs_decide.card_ids(self._catalogue(), rs_decide.GUARD_CARD_NAMES)
-            return rs_decide.DecideConfig.live(self.wait_bias, guard_cards=guard, dt=self.cadence,
-                                               **kw)
+            return self.with_rules(rs_decide.DecideConfig.live(
+                self.wait_bias, guard_cards=guard, dt=self.cadence, **kw))
         if m == rs_decide.MODE_SAMPLE:
-            return rs_decide.DecideConfig.sampling(self.wait_bias, dt=self.cadence, **kw)
+            return self.with_rules(rs_decide.DecideConfig.sampling(self.wait_bias,
+                                                                   dt=self.cadence, **kw))
         raise ValueError(f"decide: one of {', '.join(rs_decide.MODES)}, got {m!r}")
 
     def own_pending(self, state, team) -> list:
@@ -623,8 +667,9 @@ def check_schema(seat: Any, agent: AgentSpec) -> None:
 
 def configure(seat: Any, agent: AgentSpec, cfg: Any) -> Any:
     """Set an RSAgent-like seat up as rs_eval.play sets its agent: engine, lead (rs_eval --lead
-    encoding), hold, spell aim, decision rule, the presses switch (MatchAgent reads it) and
-    (when given) visibility; checks the schema."""
+    encoding), hold, spell aim, decision rule, the presses switch (MatchAgent reads it), the
+    decision rules' switches (DECISION RULES; only when one is on, so a seat without them is
+    set up as before) and (when given) visibility; checks the schema."""
     seat.engine = cfg
     seat.lead = abs(agent.lead) % 1000
     seat.lead_rebuild = -1000 < agent.lead < 0
@@ -633,6 +678,9 @@ def configure(seat: Any, agent: AgentSpec, cfg: Any) -> Any:
     seat.spell_aim = agent.spell_aim
     seat.decide_mode = agent.decide
     seat.presses = agent.presses
+    if agent.rules:
+        seat.wait_floor = agent.wait_floor
+        seat.stray_guard = agent.stray_guard
     if agent.visibility is not None:
         seat.visibility = agent.visibility
     check_schema(seat, agent)
@@ -671,8 +719,9 @@ def build_seat(agent: AgentSpec, team: int, spec: MatchSpec, cfg: Any) -> Any:
 
 def seat_info(seat: Any, agent: AgentSpec) -> dict:
     """What the result records about a seat (JSON-ready). "search" (the seat's search_info:
-    SEARCH SEATS) only for an agent with a search, "latency_ticks" only when it is not 0, so the
-    records of every other seat are what they were."""
+    SEARCH SEATS) only for an agent with a search, "latency_ticks" only when it is not 0, "rules"
+    (the switches and what they did, rs_eval.RSAgent.note_rules: DECISION RULES) only for an
+    agent with a decision rule on, so the records of every other seat are what they were."""
     meta = getattr(seat, "meta", None)
     meta = meta if isinstance(meta, Mapping) else {}
     vis = getattr(seat, "visibility", None) if seat is not None else None
@@ -689,6 +738,9 @@ def seat_info(seat: Any, agent: AgentSpec) -> dict:
         out["search"] = info() if callable(info) else None
     if agent.latency_ticks:
         out["latency_ticks"] = int(agent.latency_ticks)
+    if agent.rules:
+        counts = getattr(seat, "rule_counts", None) or {}
+        out["rules"] = {**agent.rules, **{k: int(v) for k, v in sorted(counts.items())}}
     return out
 
 
@@ -1604,6 +1656,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--presses", default="none", choices=("none", "a", "b", "ab"),
                     help="agents that may press their ability buttons, when their checkpoint's "
                          "buttons trained (rs_decide.presses_allowed; default none)")
+    for side in ("a", "b"):
+        ap.add_argument(f"--wait-floor-{side}", type=float, default=None, metavar="P",
+                        help=f"decision rule 6 for {side.upper()}: wait whenever the model's own "
+                             "p_wait is at least P (tools/rs_decide.py DECISION RULES; default "
+                             "off)")
+    ap.add_argument("--stray-guard", default="none", choices=("none", "a", "b", "ab"),
+                    help="agents with decision rule 7, the stray cheap-troop guard "
+                         "(tools/rs_decide.py DECISION RULES; default none)")
     RR.add_mem_lag_arg(ap)
     ap.add_argument("--max-ticks", type=int, default=MAX_TICKS)
     ap.add_argument("--pairs-file", type=Path, default=None,
@@ -1646,8 +1706,43 @@ def agents_from_args(args: argparse.Namespace) -> tuple[AgentSpec, AgentSpec]:
                              noise=getattr(args, f"noise_{side}"), noise_seed=args.noise_seed,
                              decide=args.decide, visibility=args.visibility,
                              presses=side in args.presses, search=search,
-                             latency_ticks=getattr(args, f"latency_{side}", 0)))
+                             latency_ticks=getattr(args, f"latency_{side}", 0),
+                             wait_floor=getattr(args, f"wait_floor_{side}", None),
+                             stray_guard=side in getattr(args, "stray_guard", "none")))
     return out[0], out[1]
+
+
+def rules_summary(results: Sequence[MatchResult], name: str) -> dict | None:
+    """Agent `name`'s decision rules over `results` (seat_info "rules"; DECISION RULES): the
+    switches, the games, and each count's total and mean per game; None when it had none on."""
+    switches: dict = {}
+    totals: Counter = Counter()
+    games = 0
+    for r in results:
+        if name not in r.agents:
+            continue
+        info = r.info[r.team_of(name)] if r.info else None
+        rules = info.get("rules") if isinstance(info, Mapping) else None
+        if not isinstance(rules, Mapping):
+            continue
+        games += 1
+        for k, v in rules.items():
+            if k in ("wait_floor", "stray_guard"):
+                switches[k] = v
+            else:
+                totals[k] += int(v)
+    if not games:
+        return None
+    return {**switches, "games": games,
+            "counts": {k: {"total": v, "per_game": v / games} for k, v in sorted(totals.items())}}
+
+
+def rules_line(name: str, s: Mapping[str, Any]) -> str:
+    """The summary line of an agent's decision rules (rules_summary)."""
+    label = rs_decide.rules_label(s.get("wait_floor"), bool(s.get("stray_guard"))).strip()
+    counts = ", ".join(f"{k.replace('_', ' ')} {c['per_game']:.2f} a game"
+                       for k, c in (s.get("counts") or {}).items())
+    return f"{name} rules ({label}) over {s['games']} games: {counts or 'never fired'}"
 
 
 def search_summary(results: Sequence[MatchResult], name: str) -> dict | None:
@@ -1758,6 +1853,8 @@ def main(argv: list[str] | None = None) -> int:
     searches = {a.label: search_summary(results, a.label) for a in agents
                 if a.search is not None}
     lines += [_search_line(n, sm) for n, sm in searches.items() if sm]
+    ruled = {a.label: rules_summary(results, a.label) for a in agents if a.rules}
+    lines += [rules_line(n, s) for n, s in ruled.items() if s]
     print("\n".join(lines) + f"\n({time.time() - t0:.0f}s)")
     record = {"kind": "rs_match", "agents": [a.to_dict() for a in agents], "split": split,
               "pairs_digest": pairs.digest(), "seats": args.seats, "seed": args.seed,
@@ -1766,6 +1863,8 @@ def main(argv: list[str] | None = None) -> int:
               "results": [r.to_dict(log=False) for r in results]}
     if searches:
         record["search"] = searches
+    if ruled:
+        record["rules"] = ruled
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
