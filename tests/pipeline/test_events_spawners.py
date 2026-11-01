@@ -183,7 +183,8 @@ def test_the_regenerated_table_only_adds_to_the_one_before():
     for sec in ("children", "spell_children"):
         for name, kids in old[sec].items():
             assert set(kids) <= set(new[sec].get(name, ())), (sec, name)
-    assert set(new) - set(old) == {"child_reach"}
+    # child_reach (REACH), and the gold play list's MOTION sections (tools/vision_autolabel.py derive_plays)
+    assert set(new) - set(old) == {"child_reach", "speeds", "evolutions", "spells", "drops", "spawners"}
     added = {(sec, p, k) for sec in ("children", "spell_children") for p, kids in new[sec].items()
              for k in kids if k not in old[sec].get(p, ())}
     assert len(added) == 93
@@ -589,3 +590,82 @@ def test_the_generator_closes_descendants_and_reach_over_the_merged_tables():
     # the shell's pod and what it creates in turn (and its look-alike) land where the shell does
     assert doc["child_reach"] == {"Gun": {"BarrelGoblin": 6500, "Goblin": 6500, "Pod": 6500}}
     assert VSC.build(first)["child_reach"] == {"Gun": {"Pod": 6500}}
+
+
+def motion_table(version: str = "cards-motion.1", snow_speed: int = 800) -> dict:
+    """A card table with the MOTION facts (module doc of tools/vision_spawn_children.py), RoyaleSim 16.402's
+    shapes: a thrown spell, a thrown-and-rolling one, area effects (a schedule, a strike area), a barrel that
+    drops a container, an evolved army with its General and an evolved barrel."""
+    cards = [
+        {"name": "Snowball", "kind": "spell", "projectile": {"name": "SnowballSpell", "speed": snow_speed,
+                                                             "radius_milli": 2500}},
+        {"name": "Log", "kind": "spell", "projectile": {"name": "LogProjectile", "speed": 360, "radius_milli": 1950,
+                                                        "spawn_projectile": {"name": "LogProjectileRolling",
+                                                                             "speed": 200,
+                                                                             "projectile_range_milli": 10100,
+                                                                             "projectile_radius_milli": 1950}}},
+        {"name": "Vines", "kind": "spell", "spell": {"radius_milli": 2500, "area_effect_object": {
+            "name": "Vines_AeO", "life_duration_ms": 1400, "radius_milli": 2500,
+            "strike_area": {"start_delay_ms": 900, "catch_offsets_ms": [0, 250, 500],
+                            "air_to_ground": {"total_ms": 2000}}}}},
+        {"name": "Zap", "kind": "spell", "spell": {"radius_milli": 2500, "area_effect_object": {
+            "name": "Zap", "life_duration_ms": 1, "radius_milli": 2500}}},
+        {"name": "SkeletonBalloon", "kind": "troop", "summon_character": "SkeletonBalloon"},
+        {"name": "SkeletonArmy", "kind": "troop", "summon_character": "Skeleton", "count": 15},
+    ]
+    units = {"SkeletonBalloon": {"speed": 90, "death_spawn": {"character": "SkeletonContainerNew", "count": 1}},
+             "SkeletonContainerNew": {"speed": None, "death_spawn": {"character": "Skeleton", "count": 7}},
+             "Skeleton": {"speed": 90}, "SkeletonArmy_EV1_General": {"speed": 90},
+             # live spawners: a spawner's waves, an interval spawner's and a life-state spawner's one
+             "Witch": {"speed": 60, "spawner": {"character": "Skeleton", "number": 4, "pause_time_ms": 7000}},
+             "Tombstone": {"speed": 0, "spawner": {"character": "Skeleton", "number": 2},
+                           "death_spawn": {"character": "Skeleton", "count": 4}},
+             "Furnace_rework": {"speed": 0, "interval_spawner": {"character": "FireSpirits", "interval_ms": 5000}},
+             "GoblinHut_Rework": {"speed": 0, "life_state_spawner": {"character": "SpearGoblin_Dummy", "number": 1}},
+             "FireSpirits": {"speed": 120}, "SpearGoblin_Dummy": {"speed": 0}}
+    evolutions = [
+        {"name": "SkeletonArmy_EV1", "kind": "troop", "form_of": "SkeletonArmy",
+         "summon_character": "SkeletonArmy_EV1_Soldier", "count": 15, "speed": 90,
+         "evo_army": {"general": "SkeletonArmy_EV1_General", "spectral": "SkeletonArmy_EV1_Spectral"}},
+        {"name": "SkeletonBalloon_EV1", "kind": "troop", "form_of": "SkeletonBalloon",
+         "summon_character": "SkeletonBalloon_EV1", "count": 1, "speed": 90,
+         "evo_barrel": {"extra": {"name": "Extra", "source_table": "buildings", "speed": 0,
+                                  "death_spawn": {"character": "Skeleton", "count": 7}},
+                        "death": {"name": "Death", "source_table": "buildings", "speed": 0,
+                                  "death_spawn": {"character": "Skeleton", "count": 7}}}},
+        {"name": "Zap_EV1", "kind": "spell", "form_of": "Zap", "spell": {"radius_milli": 2500, "area_effect_object": {
+            "name": "Zap_EV1", "life_duration_ms": 5000, "radius_milli": 2500,
+            "schedule": {"entries": [{"delay_ms": 1450, "spawn_type": "AreaEffectType", "spawn": "Zap_EV1_Strike"}]}}}},
+        {"name": "Snowball_EV1", "kind": "spell", "form_of": "Snowball",
+         "projectile": {"name": "SnowballSpell_EV1", "speed": 800, "radius_milli": 2500},
+         "evo_capture": {"roll_speed": 300, "roll_len_milli": 4000, "radius_milli": 2500, "release_ms": 3000}},
+    ]
+    return {"version": version, "cards": cards, "units": units, "evolutions": evolutions, "projectiles": {},
+            "area_effect_objects": {"Zap_EV1_Strike": {"life_duration_ms": 400}}}
+
+
+def test_the_generator_writes_the_gold_play_lists_motion_facts():
+    VSC = pytest.importorskip("tools.vision_spawn_children")
+    doc = VSC.build(motion_table(), files=["new.json"])
+    # raw Speed (60 is a tile a second) of every record, a container that does not walk at 0
+    assert {k: doc["speeds"][k] for k in ("SkeletonBalloon", "SkeletonContainerNew", "SkeletonArmy_EV1_Soldier",
+                                          "SkeletonArmy_EV1_General")} == {
+        "SkeletonBalloon": 90, "SkeletonContainerNew": 0, "SkeletonArmy_EV1_Soldier": 90, "SkeletonArmy_EV1_General": 90}
+    # an evolved play's units: summon_character x count, plus its General
+    assert doc["evolutions"] == {"SkeletonArmy": {"SkeletonArmy_EV1_Soldier": 15, "SkeletonArmy_EV1_General": 1},
+                                 "SkeletonBalloon": {"SkeletonBalloon_EV1": 1}}
+    sp = doc["spells"]
+    assert sp["Snowball"] == {"flight_speed": 800.0, "radius_milli": 2500.0}
+    assert sp["Log"] == {"flight_speed": 360.0, "roll_speed": 200.0, "roll_milli": 10100.0, "radius_milli": 1950.0}
+    assert sp["Vines"] == {"radius_milli": 2500.0, "life_ms": 3400.0}                   # 900 + 500 + 2000
+    assert sp["Zap"] == {"radius_milli": 2500.0, "life_ms": 1.0} and sp["Zap_EV1"]["life_ms"] == 5000.0
+    assert sp["Snowball_EV1"] == {"flight_speed": 800.0, "roll_speed": 300.0, "roll_milli": 4000.0,
+                                  "radius_milli": 2500.0, "life_ms": 3000.0}
+    # death drops through a container that does not walk; the evolved barrel's two drops
+    assert doc["drops"] == {"SkeletonBalloon": {"Skeleton": 7}, "SkeletonBalloon_EV1": {"Skeleton": 14}}
+    # what a unit puts down while it lives, a wave at a time (not its death drop: the Tombstone's 4 are not here)
+    assert doc["spawners"] == {"Witch": {"Skeleton": 4}, "Tombstone": {"Skeleton": 2},
+                               "Furnace_rework": {"FireSpirits": 1}, "GoblinHut_Rework": {"SpearGoblin_Dummy": 1}}
+    # a later table only adds: the first table's entry stays
+    both = VSC.build([motion_table(), motion_table("cards-old.1", snow_speed=700)], files=["new.json", "old.json"])
+    assert both["spells"]["Snowball"]["flight_speed"] == 800.0

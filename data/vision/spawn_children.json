@@ -806,6 +806,188 @@
    "ZapMachine": 1
   }
  },
+ "drops": {
+  "Balloon": {
+   "BalloonBomb": 1
+  },
+  "BarbarianHut": {
+   "Barbarian": 1
+  },
+  "BattleRam": {
+   "Barbarian": 2
+  },
+  "BattleRam_EV1": {
+   "Barbarian_EV1": 2
+  },
+  "BombTower": {
+   "BombTowerBomb": 1
+  },
+  "DarkWitch": {
+   "Bat": 1
+  },
+  "ElixirGolem": {
+   "ElixirGolem2": 2
+  },
+  "GiantSkeleton": {
+   "GiantSkeletonBomb": 1
+  },
+  "GoblinCage": {
+   "GoblinBrawler": 1
+  },
+  "GoblinCage_EV1": {
+   "GoblinCage_EV1_GoblinBrawler": 1
+  },
+  "GoblinHut": {
+   "SpearGoblin": 1
+  },
+  "GoblinPartyHut": {
+   "SpearGoblin": 3
+  },
+  "Golem": {
+   "Golemite": 2
+  },
+  "LavaHound": {
+   "LavaPups": 6
+  },
+  "SkeletonBalloon": {
+   "Skeleton": 7
+  },
+  "SkeletonBalloon_EV1": {
+   "Skeleton": 14
+  },
+  "SuperLavaHound": {
+   "SuperLavaHound2": 2
+  },
+  "Tombstone": {
+   "Skeleton": 4
+  },
+  "Wallbreakers_EV1": {
+   "Wallbreaker_mini": 1
+  }
+ },
+ "evolutions": {
+  "AngryBarbarians": {
+   "AngryBarbarian_EV1": 2
+  },
+  "Archer": {
+   "Archer_EV1": 2
+  },
+  "AxeMan": {
+   "AxeMan_EV1": 1
+  },
+  "BabyDragon": {
+   "BabyDragon_EV1": 1
+  },
+  "Barbarians": {
+   "Barbarian_EV1": 5
+  },
+  "Bats": {
+   "Bat_EV1": 5
+  },
+  "BattleRam": {
+   "BattleRam_EV1": 1
+  },
+  "BlowdartGoblin": {
+   "BlowdartGoblin_EV1": 1
+  },
+  "Bomber": {
+   "Bomber_EV1": 1
+  },
+  "Cannon": {
+   "Cannon_EV1": 1
+  },
+  "ElectroDragon": {
+   "electro_dragon_ev1": 1
+  },
+  "ElectroGiant": {
+   "ElectroGiant_EV1": 1
+  },
+  "Firecracker": {
+   "Firecracker_EV1": 1
+  },
+  "FirespiritHut": {
+   "Furnace_EV1": 1
+  },
+  "Ghost": {
+   "Ghost_EV1": 1
+  },
+  "GoblinCage": {
+   "GoblinCage_EV1_TEMPNAME": 1
+  },
+  "GoblinDrill": {
+   "GoblinDrill_EV1_Dig": 1
+  },
+  "GoblinGiant": {
+   "GoblinGiant_EV1": 1
+  },
+  "Hunter": {
+   "Hunter_EV1": 1
+  },
+  "IceSpirits": {
+   "IceSpirits_EV1": 1
+  },
+  "InfernoDragon": {
+   "InfernoDragon_EV1": 1
+  },
+  "Knight": {
+   "Knight_EV1": 1
+  },
+  "MegaKnight": {
+   "MegaKnight_EV1": 1
+  },
+  "MinionHorde": {
+   "MinionHorde_EV1": 6
+  },
+  "Mortar": {
+   "Mortar_EV1": 1
+  },
+  "Musketeer": {
+   "Musketeer_EV1": 1
+  },
+  "Pekka": {
+   "Pekka_EV1": 1
+  },
+  "Princess": {
+   "Princess_EV1": 1
+  },
+  "RageBarbarian": {
+   "RageBarbarian_EV1": 1
+  },
+  "RoyalGiant": {
+   "RoyalGiant_EV1": 1
+  },
+  "RoyalHogs": {
+   "RoyalHog_EV1": 4
+  },
+  "RoyalRecruits": {
+   "Recruit_EV1": 6
+  },
+  "SkeletonArmy": {
+   "SkeletonArmy_EV1_General": 1,
+   "SkeletonArmy_EV1_Soldier": 15
+  },
+  "SkeletonBalloon": {
+   "SkeletonBalloon_EV1": 1
+  },
+  "Skeletons": {
+   "Skeleton_EV1": 3
+  },
+  "Tesla": {
+   "Tesla_EV1": 1
+  },
+  "Valkyrie": {
+   "Valkyrie_EV1": 1
+  },
+  "Wallbreakers": {
+   "Wallbreaker_EV1": 2
+  },
+  "Witch": {
+   "Witch_EV1": 1
+  },
+  "Wizard": {
+   "Wizard_EV1": 1
+  }
+ },
  "kinds": {
   "AngryBarbarians": "troop",
   "Archer": "troop",
@@ -969,6 +1151,454 @@
   ],
   "version": "cards-160402017-20261019.1"
  },
+ "spawners": {
+  "BarbarianHut": {
+   "Barbarian": 3
+  },
+  "DarkPrinceTower_SpookyChess": {
+   "DarkPrince": 1
+  },
+  "DarkWitch": {
+   "Bat": 2
+  },
+  "FirespiritHut": {
+   "FireSpirits": 1
+  },
+  "Furnace_rework": {
+   "FireSpirits": 1
+  },
+  "GoblinDrill": {
+   "Goblin": 1
+  },
+  "GoblinDrill_EV1": {
+   "Goblin": 1
+  },
+  "GoblinGiant": {
+   "SpearGoblinGiant": 2
+  },
+  "GoblinGiant_EV1": {
+   "Goblin": 1,
+   "SpearGoblinGiant": 2,
+   "SpearGoblinGiant_EV1": 2
+  },
+  "GoblinHut": {
+   "SpearGoblin": 3
+  },
+  "GoblinHut_Rework": {
+   "SpearGoblin_Dummy": 1
+  },
+  "PhoenixEgg": {
+   "PhoenixNoRespawn": 1
+  },
+  "PrinceTower_chess": {
+   "Prince": 1
+  },
+  "Ram": {
+   "RamRider": 1
+  },
+  "SuperHogRider": {
+   "SantaPresent": 1
+  },
+  "SuperMiniPekka": {
+   "SuperMiniPekkaPancakes": 1
+  },
+  "SuperWitch": {
+   "Bat": 4,
+   "Skeleton": 4
+  },
+  "Tombstone": {
+   "Skeleton": 2
+  },
+  "TombstoneHero": {
+   "Skeleton": 2
+  },
+  "Tombstone_Skeleton": {
+   "Skeleton": 2
+  },
+  "Tombstone_Skeleton_SK": {
+   "SkeletonWarrior": 3
+  },
+  "Witch": {
+   "Skeleton": 4
+  },
+  "Witch_EV1": {
+   "Skeleton": 4,
+   "Witch_EV1_Healing_Skeleton": 4
+  }
+ },
+ "speeds": {
+  "AngryBarbarian": 90,
+  "AngryBarbarian_EV1": 90,
+  "AngryBarbarian_EV1_2": 90,
+  "Archer": 60,
+  "ArcherQueen": 60,
+  "ArcherQueen_Chess": 60,
+  "Archer_EV1": 60,
+  "Assassin": 90,
+  "AxeMan": 60,
+  "AxeManTower_SpookyChess": 0,
+  "AxeMan_EV1": 60,
+  "AxeMan_Small": 60,
+  "BabyDragon": 90,
+  "BabyDragon_EV1": 90,
+  "BabyGoblin": 120,
+  "Balloon": 60,
+  "BalloonBomb": 0,
+  "BalloonHero": 60,
+  "BalloonHero_Bomb": 0,
+  "BarbLogBarbarianHero": 60,
+  "Barbarian": 60,
+  "BarbarianHut": 0,
+  "BarbarianLauncher": 0,
+  "Barbarian_EV1": 60,
+  "BarrelGoblin": 120,
+  "Bat": 120,
+  "Bat_EV1": 120,
+  "BattleGround_Spawnblocker": 0,
+  "BattleHealer": 60,
+  "BattleRam": 60,
+  "BattleRam_EV1": 60,
+  "Berserker": 90,
+  "BerserkerHero": 90,
+  "BlowdartGoblin": 120,
+  "BlowdartGoblin_EV1": 120,
+  "BombTower": 0,
+  "BombTowerBomb": 0,
+  "BombTower_chess": 0,
+  "Bomber": 60,
+  "Bomber_Chess": 60,
+  "Bomber_EV1": 60,
+  "Boost": 0,
+  "BoostObject_TrickOrTreat_Bomb": 0,
+  "BoostObject_TrickOrTreat_Clone": 0,
+  "BoostObject_TrickOrTreat_Elixir": 0,
+  "BoostObject_TrickOrTreat_Pekka": 0,
+  "BoostObject_TrickOrTreat_Skeletons": 0,
+  "BoostObject_TrickOrTreat_SuperRage": 0,
+  "BossBandit": 90,
+  "Bowler": 45,
+  "BowlerHero": 45,
+  "BowlerHero_Siege": 45,
+  "BrokenCannon": 0,
+  "BushGoblin": 60,
+  "BushSpawner": 0,
+  "BushStatic_Randomiser": 0,
+  "Cannon": 0,
+  "Cannon_EV1": 0,
+  "Cannoneer": 0,
+  "CapturableArcherQueen": 0,
+  "CapturableSparky": 0,
+  "CaptureTower": 0,
+  "CaptureTowerTop": 0,
+  "ChampionGuard": 60,
+  "Chef": 60,
+  "ChefTower": 0,
+  "ChefTowerKing": 0,
+  "ClanWarsTowerBomb": 0,
+  "ClanWarsTowerXbow": 0,
+  "ClanWarsTowerXbowDestroyedAtStart": 0,
+  "ClanWarsTowerXbowDestroyedSpawn": 0,
+  "CloneBottle": 0,
+  "CloneBottle_Battleground": 0,
+  "CommonBomb": 0,
+  "DaggerDuchess": 0,
+  "DarkElixir": 0,
+  "DarkElixirCollector": 0,
+  "DarkElixir_Bottle": 0,
+  "DarkPrince": 60,
+  "DarkPrinceHero": 60,
+  "DarkPrinceHero_Mount": 60,
+  "DarkPrinceHero_Walking": 60,
+  "DarkPrinceTower_SpookyChess": 0,
+  "DarkPrince_Small": 60,
+  "DarkWitch": 60,
+  "DartBarrell": 90,
+  "DeliveryRecruit": 60,
+  "DragonEgg": 0,
+  "DummyKingTower": 0,
+  "DummyKingTower2": 0,
+  "DummyKingTower3": 0,
+  "DummyKingTowerAnarchy": 0,
+  "ElectroDragon": 60,
+  "ElectroGiant": 45,
+  "ElectroGiant_EV1": 45,
+  "ElectroSpirit": 120,
+  "ElectroWizard": 90,
+  "ElectroWizardHero": 90,
+  "ElectroWizardHero_Surge": 90,
+  "EliteArcher": 60,
+  "EliteArcherHero": 60,
+  "EliteArcherHero_Dummy": 40,
+  "EliteArcherTower_chess": 0,
+  "EliteArcher_Chess": 60,
+  "ElixirBarrel": 0,
+  "ElixirCollector": 0,
+  "ElixirCollectorNeutral": 0,
+  "ElixirGolem1": 45,
+  "ElixirGolem2": 60,
+  "ElixirGolem4": 90,
+  "Event_Blackout_Spawner": 0,
+  "Event_BushSpawner": 0,
+  "Event_HolidayFeast_Pancake": 0,
+  "Event_HolidayFeast_Pancake_Object": 0,
+  "Event_VoodooHog": 120,
+  "FireSpirits": 120,
+  "Firecracker": 90,
+  "Firecracker_EV1": 90,
+  "FirespiritHut": 0,
+  "FishBoat": 0,
+  "Fisherbarrel": 0,
+  "Fisherman": 60,
+  "Furnace_EV1": 60,
+  "Furnace_rework": 60,
+  "Ghost": 90,
+  "GhostOverlay": 90,
+  "Ghost_EV1": 90,
+  "Ghost_EV1_Clone": 90,
+  "Ghost_EV1_Summon_Base": 90,
+  "Ghost_EV1_Summon_Left": 90,
+  "Ghost_EV1_Summon_Right": 90,
+  "Giant": 45,
+  "GiantBuffer": 60,
+  "GiantHero": 45,
+  "GiantSkeleton": 60,
+  "GiantSkeletonBomb": 0,
+  "Gift_Delivery_Dummy": 0,
+  "Goblin": 120,
+  "GoblinBrawler": 90,
+  "GoblinBrawlerDouble": 90,
+  "GoblinBrawlerParty": 90,
+  "GoblinCage": 0,
+  "GoblinCage_EV1_GoblinBrawler": 90,
+  "GoblinCage_EV1_TEMPNAME": 0,
+  "GoblinCannon": 0,
+  "GoblinCurseGoblin": 120,
+  "GoblinDemolisher": 60,
+  "GoblinDemolisher_kamikaze_form": 120,
+  "GoblinDrill": 0,
+  "GoblinDrillDig": 60,
+  "GoblinDrill_EV1": 0,
+  "GoblinDrill_EV1_Dig": 60,
+  "GoblinDummy": 120,
+  "GoblinGiant": 60,
+  "GoblinGiant_EV1": 60,
+  "GoblinHero": 120,
+  "GoblinHero_Flag_Building": 0,
+  "GoblinHut": 0,
+  "GoblinHut_Rework": 0,
+  "GoblinHut_Rework_SpearGoblin": 120,
+  "GoblinMachine": 60,
+  "GoblinParty": 120,
+  "GoblinPartyHut": 0,
+  "GoblinQueenSecondaryTower": 0,
+  "GoblinQueenTower": 0,
+  "GoblinQueenTowerTopCharacter": 0,
+  "GoblinRocketSilo": 0,
+  "GoblinRocketSilo1": 0,
+  "GoblinRocketSilo2": 0,
+  "Goblin_Stab": 120,
+  "Goblin_dummy": 120,
+  "GoldenKnight": 60,
+  "Golem": 45,
+  "Golemite": 45,
+  "Graveyard_rework_Skeleton": 90,
+  "HealBottle": 0,
+  "HealBottle_Battleground": 0,
+  "HealSpirit": 120,
+  "HeistStorage": 0,
+  "HeistStorage3": 0,
+  "HogRider": 120,
+  "Hunter": 60,
+  "Hunter_EV1": 60,
+  "IceGolemite": 45,
+  "IceGolemiteHero": 45,
+  "IceSpirits": 120,
+  "IceSpirits_EV1": 120,
+  "IceWizard": 60,
+  "IceWizardHero": 60,
+  "IceWizardHero_IceCube": 40,
+  "InfernoDragon": 60,
+  "InfernoDragon_EV1": 60,
+  "InfernoTower": 0,
+  "InvisibilityBottle": 0,
+  "InvisibilityBottle_Battleground": 0,
+  "KingTower": 0,
+  "KingTower3": 0,
+  "KingTowerClanBoatAttacker": 0,
+  "KingTowerClanBoatDefender": 0,
+  "KingTowerMiddle": 0,
+  "KingTower_AllRandom": 0,
+  "KingTower_Battleground": 0,
+  "KingTower_Gift_Delivery": 0,
+  "KingTower_IgnoreBarrel": 0,
+  "KingTower_LowHP": 0,
+  "KingTower_SpawnMelee": 0,
+  "KingTower_SpookyChess": 0,
+  "KingTower_chess": 0,
+  "Knight": 60,
+  "KnightHero": 60,
+  "Knight_EV1": 60,
+  "LavaHound": 45,
+  "LavaPups": 60,
+  "LittlePrince": 60,
+  "MagicBomb": 0,
+  "MegaKnight": 60,
+  "MegaKnight_EV1": 60,
+  "MegaMinion": 60,
+  "MegaMinionHero": 60,
+  "MegaMonk": 45,
+  "MergeMaiden_Mounted": 60,
+  "MergeMaiden_Normal": 90,
+  "MightyMiner": 60,
+  "MightyMinerBomb": 0,
+  "Miner": 90,
+  "MiniPekka": 90,
+  "MiniPekkaHero": 90,
+  "MiniZapMachine": 60,
+  "Minion": 90,
+  "MinionGiant": 60,
+  "MinionHorde_EV1": 90,
+  "Monk": 60,
+  "Mortar": 0,
+  "Mortar_EV1": 0,
+  "Mortar_Owned": 0,
+  "Mortar_Unowned": 0,
+  "MovingCannon": 60,
+  "Musketeer": 60,
+  "MusketeerHero": 60,
+  "MusketeerTurret": 0,
+  "Musketeer_EV1": 60,
+  "NOTINUSE_Building_01": 0,
+  "NOTINUSE_Building_02": 0,
+  "NOTINUSE_CHARACTER_04": 60,
+  "NOTINUSE_CHARACTER_05": 60,
+  "Neutral_RageBarbarians": 0,
+  "ObstacleBush": 0,
+  "Pekka": 45,
+  "Pekka_EV1": 45,
+  "Phoenix": 60,
+  "PhoenixEgg": 40,
+  "PhoenixNoRespawn": 60,
+  "Prince": 60,
+  "PrinceBuff": 60,
+  "PrinceTower_chess": 0,
+  "Prince_Chess": 60,
+  "Princess": 60,
+  "PrincessTower": 0,
+  "PrincessTowerClanBoatDefender": 0,
+  "PrincessTowerSwapping": 0,
+  "PrincessTower_AllRandom": 0,
+  "PrincessTower_Battleground": 0,
+  "PrincessTower_IgnoreBarrel": 0,
+  "PrincessTower_LowHP": 0,
+  "PrincessTower_SpookyChess": 0,
+  "PrincessTower_chess": 0,
+  "Princess_EV1": 60,
+  "RageBarbarian": 120,
+  "RageBarbarianBottle": 0,
+  "RageBarbarianBottleEvo": 0,
+  "RageBarbarianEvoGhost": 120,
+  "RageBarbarian_EV1": 120,
+  "RageBottle": 0,
+  "RageBottle_Battleground": 0,
+  "Ram": 60,
+  "RamRider": 60,
+  "RascalBoy": 60,
+  "RascalGirl": 60,
+  "Recruit": 60,
+  "Recruit_Chess": 0,
+  "Recruit_EV1": 60,
+  "Ronin": 90,
+  "RoyalDelivery": 0,
+  "RoyalGiant": 45,
+  "RoyalGiant_EV1": 45,
+  "RoyalHog": 120,
+  "RoyalHog_EV1": 120,
+  "RoyalHog_EV1_Grounded": 120,
+  "SantaPresent": 0,
+  "ShieldBottle": 0,
+  "Skeleton": 90,
+  "SkeletonArmy_EV1_General": 90,
+  "SkeletonArmy_EV1_General_Base": 90,
+  "SkeletonArmy_EV1_Soldier": 90,
+  "SkeletonArmy_EV1_Spectral": 60,
+  "SkeletonBalloon": 90,
+  "SkeletonBalloonEvoDummyAeO_DEATH": 0,
+  "SkeletonBalloonEvoDummyAeO_EXTRA": 0,
+  "SkeletonBalloon_EV1": 90,
+  "SkeletonContainer": 0,
+  "SkeletonContainerNew": 0,
+  "SkeletonDragon": 90,
+  "SkeletonKing": 60,
+  "SkeletonKingSkeleton": 90,
+  "SkeletonTrooper": 120,
+  "SkeletonWarrior": 90,
+  "SkeletonWarrior_SpookyChess": 0,
+  "Skeleton_EV1": 90,
+  "SpearGoblin": 120,
+  "SpearGoblinGiant": 120,
+  "SpearGoblinGiant_EV1": 120,
+  "SpearGoblinParty": 120,
+  "SpearGoblin_Dummy": 120,
+  "SpellCauldron": 0,
+  "SpellCauldron_effect": 0,
+  "SuperArcher": 60,
+  "SuperEliteArcher": 60,
+  "SuperHogRider": 120,
+  "SuperHogRider_Terry": 120,
+  "SuperIceGolemite": 30,
+  "SuperKnight": 60,
+  "SuperLavaHound": 45,
+  "SuperLavaHound2": 45,
+  "SuperMiniPekka": 90,
+  "SuperMiniPekkaPancakes": 0,
+  "SuperWitch": 60,
+  "SuspiciousBush": 60,
+  "Tesla": 0,
+  "Tesla_EV1": 0,
+  "ThreeMusketeer": 60,
+  "ThreeMusketeer_Rework": 60,
+  "ThreeMusketeer_Rework_Character_1": 60,
+  "ThreeMusketeer_Rework_Character_2": 60,
+  "ThreeMusketeer_Rework_Character_3": 60,
+  "ThrownBomb": 0,
+  "Tombstone": 0,
+  "TombstoneHero": 0,
+  "TombstoneHero_Monster_Active": 60,
+  "TombstoneHero_Monster_Passive": 0,
+  "Tombstone_Skeleton": 0,
+  "Tombstone_Skeleton_SK": 0,
+  "TowerCannoneer": 60,
+  "TowerKnifeThrower": 60,
+  "TowerPrincess": 60,
+  "TriWizard": 60,
+  "Valkyrie": 60,
+  "ValkyrieHero": 60,
+  "Valkyrie_EV1": 60,
+  "VinesBottle": 0,
+  "VoodooHog": 120,
+  "Wallbreaker": 120,
+  "Wallbreaker_EV1": 120,
+  "Wallbreaker_mini": 120,
+  "Witch": 60,
+  "WitchMother": 60,
+  "Witch_EV1": 60,
+  "Witch_EV1_Healing_Skeleton": 90,
+  "Witch_EV1_Skeleton_Interval": 90,
+  "Wizard": 60,
+  "WizardHero": 60,
+  "WizardHero_air": 60,
+  "Wizard_EV1": 60,
+  "Xbow": 0,
+  "YetAnotherBat": 120,
+  "YetAnotherSkeleton": 90,
+  "ZapMachine": 45,
+  "ZapMachine_Owned": 0,
+  "ZapMachine_Unowned": 0,
+  "electro_dragon_ev1": 60,
+  "goblinstein": 60,
+  "goblinstein_doctor": 60
+ },
  "spell_children": {
   "BarbLog": [
    "BarbLogBarbarianHero",
@@ -1087,6 +1717,123 @@
   "Zap": [
    "Zap"
   ]
+ },
+ "spells": {
+  "Arrows": {
+   "flight_speed": 1100.0,
+   "radius_milli": 3500.0
+  },
+  "BarbLog": {
+   "flight_speed": 360.0,
+   "radius_milli": 1300.0,
+   "roll_milli": 4500.0,
+   "roll_speed": 200.0
+  },
+  "Clone": {
+   "life_ms": 1000.0,
+   "radius_milli": 3000.0
+  },
+  "DarkMagic": {
+   "life_ms": 4000.0,
+   "radius_milli": 2500.0
+  },
+  "Earthquake": {
+   "life_ms": 3000.0,
+   "radius_milli": 3500.0
+  },
+  "Fireball": {
+   "flight_speed": 600.0,
+   "radius_milli": 2500.0
+  },
+  "Freeze": {
+   "life_ms": 3500.0,
+   "radius_milli": 3000.0
+  },
+  "GlobalClone": {
+   "life_ms": 1000.0,
+   "radius_milli": 30000.0
+  },
+  "GlobalLightning": {
+   "life_ms": 13000.0
+  },
+  "GoblinBarrel": {
+   "flight_speed": 400.0,
+   "radius_milli": 1500.0
+  },
+  "GoblinBarrel_EV1": {
+   "flight_speed": 400.0,
+   "radius_milli": 1500.0
+  },
+  "GoblinCurse": {
+   "life_ms": 6000.0,
+   "radius_milli": 3000.0
+  },
+  "GoblinPartyRocket": {
+   "flight_speed": 350.0
+  },
+  "Graveyard": {
+   "life_ms": 9000.0,
+   "radius_milli": 4000.0
+  },
+  "Heal": {
+   "radius_milli": 1500.0
+  },
+  "Lightning": {
+   "life_ms": 1500.0,
+   "radius_milli": 3500.0
+  },
+  "Log": {
+   "flight_speed": 360.0,
+   "radius_milli": 1950.0,
+   "roll_milli": 10100.0,
+   "roll_speed": 200.0
+  },
+  "Poison": {
+   "life_ms": 8000.0,
+   "radius_milli": 3500.0
+  },
+  "Rage": {
+   "radius_milli": 3000.0
+  },
+  "Rocket": {
+   "flight_speed": 350.0,
+   "radius_milli": 2000.0
+  },
+  "RoyalDelivery": {
+   "life_ms": 2000.0,
+   "radius_milli": 3000.0
+  },
+  "Snowball": {
+   "flight_speed": 800.0,
+   "radius_milli": 2500.0
+  },
+  "Snowball_EV1": {
+   "flight_speed": 800.0,
+   "life_ms": 3000.0,
+   "radius_milli": 2500.0,
+   "roll_milli": 4000.0,
+   "roll_speed": 300.0
+  },
+  "Tornado": {
+   "life_ms": 1050.0,
+   "radius_milli": 5500.0
+  },
+  "Vines": {
+   "life_ms": 3400.0,
+   "radius_milli": 2500.0
+  },
+  "WarmSpell": {
+   "life_ms": 1000.0,
+   "radius_milli": 4000.0
+  },
+  "Zap": {
+   "life_ms": 1.0,
+   "radius_milli": 2500.0
+  },
+  "Zap_EV1": {
+   "life_ms": 5000.0,
+   "radius_milli": 2500.0
+  }
  },
  "variants": {
   "MergeMaiden": {

@@ -97,6 +97,41 @@ is boxed as GiantSkeletonBomb, so they create it too. (ram-rider's "also" RamRid
 look-alike: it rides the Ram the label already names, and a Ram creating Ram would explain
 a second Ram Rider away.)
 
+MOTION (tools/vision_autolabel.py plays, derive_plays). Five sections hold the facts the gold
+play list's rules read, each from the first table that has the entry:
+
+    speeds          unit -> its raw Speed, the table's units[].speed (60 is a tile a second, the
+                    unit of data/royaleapi/cards_stats_characters.json's speed), for every troop
+                    or building record (units, embedded records, hero forms, evolutions'
+                    summon_character): the new cards RoyaleAPI's table predates (GoblinDemolisher
+                    60, goblinstein 60, Ronin 90, SkeletonContainerNew 0).
+    evolutions      card -> {unit: count} an evolved play puts down: the evolution's
+                    summon_character x count, plus evo_army.general (SkeletonArmy ->
+                    {SkeletonArmy_EV1_Soldier: 15, SkeletonArmy_EV1_General: 1}); the
+                    composition's counterpart for the evolved form.
+    spells          spell card or evolved spell (Zap_EV1) -> how its look moves and lasts:
+                    flight_speed (raw Speed of the projectile a thrown spell flies as, the
+                    card's projectile: SnowballSpell 800, RocketSpell 350), roll_speed and
+                    roll_milli (what it rolls on after: the Log's LogProjectileRolling 200 for
+                    10100, the evolved Snowball's evo_capture roll 300 for 4000), radius_milli
+                    (the largest of its projectile's, area effect's and spell radius) and life_ms
+                    (how long its effect shows where it lands: the area effect object's
+                    life_duration_ms, its schedule's last spawn plus that object's life, a strike
+                    area's start delay + last catch + air_to_ground.total_ms (Vines 900 + 500 +
+                    2000), an evo_capture's release_ms; Zap 1, Zap_EV1 5000, GoblinCurse 6000).
+    drops           card or evolution -> {unit: count} its unit drops as it dies (death_spawn,
+                    through a container that does not walk: SkeletonBalloon -> SkeletonContainerNew
+                    -> Skeleton x 7), and an evolution's evo_barrel records' drops too
+                    (SkeletonBalloon_EV1: 7 at 75% HP + 7 at death = 14). Death drops only: a live
+                    spawner's waves (the Witch's skeletons) are in spawners.
+    spawners        unit -> {unit: count a wave} it puts down while it lives: its spawner's
+                    character (and character2) x number, an interval_spawner's or a
+                    life_state_spawner's character (x its number, else 1), of every troop or
+                    building record (units, embedded records, hero forms) and, for an evolution's
+                    unit, of the evolution record too, the larger count of each
+                    (Witch {Skeleton: 4}, Tombstone {Skeleton: 2}, DarkWitch {Bat: 2},
+                    Witch_EV1 {Skeleton: 4, Witch_EV1_Healing_Skeleton: 4}).
+
 Most of the units heroes and evolutions create have no detector label yet (the hero
 Musketeer's turret, the evolved Wall Breaker's runner); their entries explain them once one
 exists. tests/pipeline/test_events_spawners.py checks that no entry is a child of its own
@@ -525,6 +560,168 @@ def form_spell_units(w: Walker, form: Mapping[str, Any]) -> set[str]:
     return found
 
 
+MOTION_SECTIONS = ("speeds", "evolutions", "spells", "drops", "spawners")
+
+
+def _number(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _find_key(obj: Any, key: str) -> Any:
+    """The first value of `key` anywhere inside obj (depth first), or None."""
+    if isinstance(obj, Mapping):
+        if key in obj and obj[key] is not None:
+            return obj[key]
+        for v in obj.values():
+            got = _find_key(v, key)
+            if got is not None:
+                return got
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            got = _find_key(v, key)
+            if got is not None:
+                return got
+    return None
+
+
+def spell_motion(rec: Mapping[str, Any], areas: Mapping[str, Any]) -> dict[str, Any]:
+    """A spell card's or evolved spell's MOTION entry (module doc): flight_speed, roll_speed,
+    roll_milli, radius_milli, life_ms (the keys it has data for)."""
+    out: dict[str, Any] = {}
+    radii: list[float] = []
+    life = 0.0
+    proj = rec.get("projectile") if isinstance(rec.get("projectile"), Mapping) else None
+    if proj:
+        if _number(proj.get("speed")):
+            out["flight_speed"] = _number(proj["speed"])
+        radii += [x for x in (_number(proj.get("radius_milli")),) if x]
+        roll = proj.get("spawn_projectile") if isinstance(proj.get("spawn_projectile"), Mapping) else None
+        if roll and _number(roll.get("projectile_range_milli")) and _number(roll.get("speed")):
+            out["roll_speed"], out["roll_milli"] = _number(roll["speed"]), _number(roll["projectile_range_milli"])
+            radii += [x for x in (_number(roll.get("projectile_radius_milli")), _number(roll.get("radius_milli"))) if x]
+    spell = rec.get("spell") if isinstance(rec.get("spell"), Mapping) else {}
+    aeo = spell.get("area_effect_object") if isinstance(spell.get("area_effect_object"), Mapping) else None
+    radii += [x for x in (_number(spell.get("radius_milli")), _number(rec.get("area_damage_radius_milli"))) if x]
+    if aeo:
+        radii += [x for x in (_number(aeo.get("radius_milli")),) if x]
+        life = max(life, _number(aeo.get("life_duration_ms")) or 0.0)
+        sched = aeo.get("schedule") if isinstance(aeo.get("schedule"), Mapping) else {}
+        for e in sched.get("entries") or ():
+            delay = _number(e.get("delay_ms")) if isinstance(e, Mapping) else None
+            if delay is None:
+                continue
+            spawned = areas.get(e.get("spawn")) if e.get("spawn_type") == "AreaEffectType" else None
+            life = max(life, delay + (_number((spawned or {}).get("life_duration_ms")) or 0.0))
+        strike = _find_key(aeo, "strike_area")
+        if isinstance(strike, Mapping):
+            catches = [x for x in (_number(c) for c in strike.get("catch_offsets_ms") or ()) if x is not None]
+            hold = _number(_find_key(strike, "total_ms")) or 0.0
+            life = max(life, (_number(strike.get("start_delay_ms")) or 0.0) + max(catches, default=0.0) + hold)
+    cap = rec.get("evo_capture") if isinstance(rec.get("evo_capture"), Mapping) else None
+    if cap:
+        if _number(cap.get("roll_speed")) and _number(cap.get("roll_len_milli")):
+            out["roll_speed"], out["roll_milli"] = _number(cap["roll_speed"]), _number(cap["roll_len_milli"])
+        radii += [x for x in (_number(cap.get("radius_milli")),) if x]
+        life = max(life, _number(cap.get("release_ms")) or 0.0)
+    if radii:
+        out["radius_milli"] = max(radii)
+    if life > 0:
+        out["life_ms"] = life
+    return out
+
+
+def death_drops(w: Walker, rec: Mapping[str, Any] | None) -> dict[str, int]:
+    """{unit: count} a unit drops as it dies (module doc, MOTION drops): its death_spawn, or
+    what that drops in turn when it is a container that does not walk (no Speed)."""
+    ds = (rec or {}).get("death_spawn")
+    if not isinstance(ds, Mapping) or not ds.get("character"):
+        return {}
+    ch, n = str(ds["character"]), int(_number(ds.get("count")) or 1)
+    inner = w.units.get(ch) or w.records.get(ch) or {}
+    ids = inner.get("death_spawn") if isinstance(inner, Mapping) else None
+    if inner and not _number(inner.get("speed")) and isinstance(ids, Mapping) and ids.get("character"):
+        return {str(ids["character"]): n * int(_number(ids.get("count")) or 1)}
+    return {ch: n}
+
+
+def live_spawns(rec: Mapping[str, Any] | None) -> dict[str, int]:
+    """{unit: count} a unit puts down a wave while it lives (module doc, MOTION spawners): its
+    spawner's character and character2 x number, its interval_spawner's and life_state_spawner's
+    character x its number (else 1)."""
+    out: dict[str, int] = {}
+    for field, keys in (("spawner", ("character", "character2")), ("interval_spawner", ("character",)),
+                        ("life_state_spawner", ("character",))):
+        sp = (rec or {}).get(field)
+        if not isinstance(sp, Mapping):
+            continue
+        n = int(_number(sp.get("number")) or 1)
+        for key in keys:
+            if sp.get(key):
+                out[str(sp[key])] = max(out.get(str(sp[key]), 0), n)
+    return out
+
+
+def motion_one(data: dict) -> dict:
+    """The MOTION sections of one card table (module doc)."""
+    w = Walker(data)
+    evos = [e for e in data.get("evolutions") or () if isinstance(e, Mapping)]
+    speeds: dict[str, float] = {}
+    for name, rec in [*sorted(w.units.items()), *sorted(w.records.items()), *sorted(w.heroes.items()),
+                      *((e["summon_character"], e) for e in evos if e.get("summon_character"))]:
+        v = _number(rec.get("speed"))
+        if v is not None and v >= 0:
+            speeds.setdefault(str(name), int(v) if v == int(v) else v)
+        elif rec.get("speed") is None and isinstance(rec.get("death_spawn"), Mapping) and name in w.units:
+            speeds.setdefault(str(name), 0)        # a container that does not walk (SkeletonContainerNew)
+    evolutions: dict[str, dict[str, int]] = {}
+    for e in evos:
+        card, unit = e.get("form_of"), e.get("summon_character")
+        if not card or not unit or e.get("kind") == "spell":
+            continue
+        comp = {str(unit): int(_number(e.get("count")) or 1)}
+        army = e.get("evo_army") if isinstance(e.get("evo_army"), Mapping) else {}
+        if army.get("general"):
+            comp[str(army["general"])] = comp.get(str(army["general"]), 0) + 1
+        evolutions.setdefault(str(card), comp)
+    areas = data.get("area_effect_objects") or {}
+    spells: dict[str, dict[str, Any]] = {}
+    for c in data["cards"]:
+        if c.get("kind") == "spell":
+            got = spell_motion(c, areas)
+            if got:
+                spells[str(c["name"])] = got
+    for e in evos:
+        if e.get("kind") == "spell" and e.get("name"):
+            got = spell_motion(e, areas)
+            if got:
+                spells[str(e["name"])] = got
+    drops: dict[str, dict[str, int]] = {}
+    for c in data["cards"]:
+        if c.get("kind") != "spell" and c.get("summon_character"):
+            got = death_drops(w, w.units.get(c["summon_character"]) or w.records.get(c["summon_character"]))
+            if got:
+                drops[str(c["name"])] = got
+    for e in evos:
+        if e.get("kind") == "spell" or not e.get("name"):
+            continue
+        got = dict(death_drops(w, e))
+        barrel = e.get("evo_barrel") if isinstance(e.get("evo_barrel"), Mapping) else {}
+        for k in sorted(EVO_RECORD_KEYS):
+            for unit, n in death_drops(w, barrel.get(k) if isinstance(barrel.get(k), Mapping) else None).items():
+                got[unit] = got.get(unit, 0) + n
+        if got:
+            drops[str(e["name"])] = got
+    spawners: dict[str, dict[str, int]] = {}
+    evo_units = [(e["summon_character"], e) for e in evos if e.get("summon_character") and e.get("kind") != "spell"]
+    for name, rec in [*sorted(w.units.items()), *sorted(w.records.items()), *sorted(w.heroes.items()), *evo_units]:
+        for unit, n in live_spawns(rec).items():
+            have = spawners.setdefault(str(name), {})
+            have[unit] = max(have.get(unit, 0), n)
+    return {"speeds": dict(sorted(speeds.items())), "evolutions": dict(sorted(evolutions.items())),
+            "spells": dict(sorted(spells.items())), "drops": dict(sorted(drops.items())),
+            "spawners": {name: dict(sorted(kids.items())) for name, kids in sorted(spawners.items())}}
+
+
 def _with_lookalikes(created: Sequence[str]) -> list[str]:
     return sorted(set(created) | {LOOKS_LIKE[u] for u in created if u in LOOKS_LIKE})
 
@@ -572,6 +769,13 @@ def merge(parts: Sequence[Mapping[str, Any]]) -> dict:
             if kid in LOOKS_LIKE:
                 kids[LOOKS_LIKE[kid]] = max(kids.get(LOOKS_LIKE[kid], 0), mt)
     out["child_reach"] = {name: dict(sorted(kids.items())) for name, kids in sorted(reach.items()) if kids}
+    # MOTION: each entry from the first table that has it
+    for sec in MOTION_SECTIONS:
+        have: dict[str, Any] = {}
+        for part in parts:
+            for name, value in (part.get(sec) or {}).items():
+                have.setdefault(name, value)
+        out[sec] = dict(sorted(have.items()))
     return out
 
 
@@ -585,7 +789,7 @@ def build(data: dict | Sequence[dict], *, files: Sequence[str] | None = None,
     if files is None:
         files = ["royalesim/data/derived/" + FALLBACK_FILE] if len(tables) == 1 else []
     files = list(files) + ["?"] * (len(tables) - len(files))
-    doc = merge([build_one(t) for t in tables])
+    doc = merge([{**build_one(t), **motion_one(t)} for t in tables])
     read = [{"version": t.get("version"), "file": f} for t, f in zip(tables, files)]
     source: dict[str, Any] = {"file": read[0]["file"], "version": read[0]["version"],
                               "package": package}

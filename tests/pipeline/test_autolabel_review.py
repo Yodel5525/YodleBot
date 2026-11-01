@@ -525,8 +525,9 @@ def test_a_live_uid_alone_does_not_merge_plays(keys):
 
 
 # Round 0's play list 1 (60 derived plays for about 18) over-counted fragmented tracks; the tests below
-# rebuild its patterns (keys as on that list). OLD_RULES: no reach and no deploy-zone rule, as before.
-OLD_RULES = VA.PlayConfig(reach_gap_s=0.0, zone_y_tiles=32.0)
+# rebuild its patterns (keys as on that list). OLD_RULES: no reach and no deploy-zone rule, as before, and none
+# of the rules for the newer cards (V2_RULES_OFF).
+OLD_RULES = VA.PlayConfig(reach_gap_s=0.0, zone_y_tiles=32.0, **VA.V2_RULES_OFF)
 
 
 def r0_cards(keys):
@@ -543,7 +544,32 @@ def test_play_tables_and_the_river():
                                       "BossBandit", "Zap", "MergeMaiden")} == {
         "SkeletonWarriors": 3, "MinionHorde": 6, "AngryBarbarians": 2, "HogRider": 1, "AxeMan": 1, "BossBandit": 1,
         "Zap": None, "MergeMaiden": None}                     # a spell, and a card with forms: no cap
-    assert VA.load_speeds("no/such/table.json") == VA.SPEED_EXTRA and VA.load_units_per_play("no/such.json") == {}
+    assert VA.load_speeds("no/such/table.json", "no/such.json") == VA.SPEED_EXTRA
+    assert VA.load_units_per_play("no/such.json") == {}
+    # the classes RoyaleAPI's table predates: spawn_children.json "speeds" (RoyaleSim 16.402's raw Speed / 60)
+    assert {c: speeds[c] for c in ("GoblinDemolisher", "GoblinDemolisher_kamikaze_form", "goblinstein",
+                                   "goblinstein_doctor", "GiantBuffer", "MinionGiant", "Ronin", "Berserker",
+                                   "SuspiciousBush", "BushGoblin", "SkeletonArmy_EV1_General",
+                                   "SkeletonContainerNew")} == {
+        "GoblinDemolisher": 1.0, "GoblinDemolisher_kamikaze_form": 2.0, "goblinstein": 1.0, "goblinstein_doctor": 1.0,
+        "GiantBuffer": 1.0, "MinionGiant": 1.0, "Ronin": 1.5, "Berserker": 1.5, "SuspiciousBush": 1.0, "BushGoblin": 1.0,
+        "SkeletonArmy_EV1_General": 1.5, "SkeletonContainerNew": 0.0}
+    # per class, base and evolved composition (W, E)
+    caps = VA.load_unit_caps(TABLE)
+    assert caps["SkeletonArmy"] == {"Skeleton": 15, "SkeletonArmy_EV1_General": 1}
+    assert caps["Goblinstein"] == {"goblinstein": 1, "goblinstein_doctor": 1} and caps["MinionHorde"] == {"Minion": 6}
+    assert "MergeMaiden" not in caps                                                     # a card with forms
+    motion = VA.load_spell_motion()
+    assert motion["Snowball"] == {"flight": 800 / 60.0, "radius": 2.5} and motion["Rocket"]["flight"] == 350 / 60.0
+    assert motion["Zap"]["life"] == 0.001 and motion["Zap_EV1"]["life"] == 5.0 and motion["Vines"]["life"] == 3.4
+    assert motion["GoblinCurse"] == {"radius": 3.0, "life": 6.0}
+    assert motion["Snowball_EV1"]["roll_tiles"] == 4.0 and motion["Log"]["roll_tiles"] == 10.1
+    drops = VA.load_drops()
+    assert drops["SkeletonBalloon"] == {"Skeleton": 7} and drops["SkeletonBalloon_EV1"] == {"Skeleton": 14}
+    assert VA.load_unit_caps(TABLE, "no/such.json") == {} and VA.load_drops("no/such.json") == {}
+    spawners = VA.load_spawners()
+    assert spawners["Witch"] == {"Skeleton": 4} and spawners["Tombstone"] == {"Skeleton": 2}
+    assert spawners["DarkWitch"] == {"Bat": 2} and VA.load_spawners("no/such.json") == {}
     pytest.importorskip("numpy")
     from scripts.vision import geometry as G
     assert VA.ARENA_Y_MT == G.HEIGHT_MT and VA.PlayConfig().zone_y_tiles * VA.MT_PER_TILE == G.RIVER_Y_MT[1]
@@ -852,27 +878,39 @@ def test_a_close_fit_holds_after_the_cycle_and_late_merges_are_flagged(keys):
     assert VA.flagged_merges(guards[0]) == [("13", "capacity after its card had cycled", 0.0)]
 
 
-def test_a_champion_cycles_from_her_last_sighting():
+def test_a_champions_card_is_locked_while_she_lives():
     deck = ["BossBandit", "AngryBarbarians", "AxeMan", "Freeze", "SkeletonWarriors", "HogRider", "MinionHorde", "Zap"]
     known = VA.known_labels(TABLE, None)
     assert VA.CHAMPION_CARDS == __import__("rs_presses").CHAMPIONS_BEFORE_THE_COLUMN       # the restated names
     assert all(c in TABLE.cards for c in VA.CHAMPION_CARDS)                                # as classes.json has them
-    # the Boss Bandit alive 18 s while 4 other plays came, lost 5 s (her dash) and found 1.5 tiles on: no new Boss
-    # Bandit can be put down while she lives, and none came since she was last seen, so it is her (the 5 s gap is
-    # flagged, as any reach over flag_gap_s). Counted from her deploy instead (no champions), the card had cycled
+    # her card cycles as any card does (4 other plays since her deploy), but it is locked while she lives. The Boss
+    # Bandit alive 18 s while 4 other plays came, lost 5 s and found 1.5 tiles on, with no play since she was last
+    # seen: she is taken to live, so it is her; her card could be back (4 since her deploy), so the merge is listed
+    # as late in the cycle, for the owner to look at. Counted as any card (no champions), it had cycled: a new play
     bb = [gold_part("10", "BossBandit", 0.0, (14000, 8000), last_t=18.0, last=(14000, 12000)),
           gold_part("11", "BossBandit", 23.0, (14000, 13500), last_t=26.0)]
     between = others(1.0, 17.0, "BossBandit")
     plays, _kids = VA.derive_plays(bb + between, deck, TABLE, known, event_cards=EVENTS)
     boss = [p for p in plays if p["card"] == "BossBandit"]
-    assert [(p["units"], p["continued"], p["cycled"]) for p in boss] == [(["10"], {"11": "reach"}, {})]
-    assert VA.flagged_merges(boss[0]) == [("11", "reach", 5.0)]
+    assert [(p["units"], p["continued"], p["cycled"]) for p in boss] == [(["10"], {"11": "reach"}, {"11": 4})]
+    assert VA.flagged_merges(boss[0]) == [("11", "reach after its card had cycled", 5.0)]
     plays, _kids = VA.derive_plays(bb + between, deck, TABLE, known, event_cards=EVENTS, champions=())
     assert [(p["units"], p["new_by"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], None), (["11"], "cycle")]
-    # dead at 18 s, then 4 other plays: her card is back, so a Boss Bandit 11 s later a tile on is a new play
+    # dead at 18 s, then 4 other plays while she was not seen: her card is back and free, so a Boss Bandit 11 s
+    # later a tile on is a new play
     again = [bb[0], gold_part("11", "BossBandit", 29.0, (14000, 13000), last_t=33.0)]
     plays, _kids = VA.derive_plays(again + others(18.5, 28.5, "BossBandit"), deck, TABLE, known, event_cards=EVENTS)
     assert [(p["units"], p["new_by"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], None), (["11"], "cycle")]
+    # locked from her deploy, not her death: she died at 18 s after 4 plays, and the next Boss Bandit, put down
+    # right after 6 s unseen with one more play between, is a new play (the older reading, champion_lock 0,
+    # counted only the one play since she was last seen, so it took the part for her by reach)
+    late = [bb[0], gold_part("11", "BossBandit", 24.0, (14000, 12500), last_t=30.0)]
+    one = [gold_part("950", "AngryBarbarian", 20.0, (6000, 6000), last_t=21.0)]
+    plays, _kids = VA.derive_plays(late + between + one, deck, TABLE, known, event_cards=EVENTS)
+    assert [(p["units"], p["new_by"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], None), (["11"], "cycle")]
+    plays, _kids = VA.derive_plays(late + between + one, deck, TABLE, known, event_cards=EVENTS,
+                                   config=VA.PlayConfig(champion_lock=0))
+    assert [(p["units"], p["continued"]) for p in plays if p["card"] == "BossBandit"] == [(["10"], {"11": "reach"})]
 
 
 def test_parts_the_rules_must_keep_apart(keys):
@@ -1025,3 +1063,568 @@ def test_pending_tracks_and_a_changed_derivation_refuse_a_confirmation(tmp_path,
     assert shown.list_no == 4 and not shown.doc["confirmed"] and len(shown.plays) == len(ok.plays) + 8   # 2 + 1 + 5
     VA.plays_session(R0_SID, list_no=4, confirm=True, allow_pending=True, config=narrow, **kw)
     assert VA.plays_fresh(paths) == []
+
+
+# ---------------------------------------------------------------------------
+# the rules for the newer cards (module doc, plays: D, P, W, E, B, J, S, C, R, G), synthetic parts only
+# ---------------------------------------------------------------------------
+
+DECK_A = ["SkeletonBalloon", "ElectroWizard", "SkeletonArmy", "Vines", "SuspiciousBush", "GoblinCurse",
+          "GoblinDemolisher", "Rocket"]
+DECK_B = ["BabyDragon", "Goblinstein", "Snowball", "MinionGiant", "GiantBuffer", "Ronin", "Berserker", "Lightning"]
+DECK_R0 = ["BossBandit", "AngryBarbarians", "AxeMan", "Freeze", "SkeletonWarriors", "HogRider", "MinionHorde", "Zap"]
+DECK_HOG = ["HogRider", "Musketeer", "Cannon", "IceSpirits", "Skeletons", "Fireball", "Log", "IceGolemite"]
+
+
+def derive_deck(parts, deck, **kw):
+    return VA.derive_plays(parts, deck, TABLE, VA.known_labels(TABLE, None), event_cards=EVENTS, **kw)
+
+
+def others_of(t0, t1, labels, k0=900):
+    """One play of each label between t0 and t1, in the opponent's deploy zone."""
+    return [gold_part(str(k0 + j), lab, t0 + (t1 - t0) * (j + 1) / (len(labels) + 1.0), (2000 + 3500 * j, 6000),
+                      last_t=t0 + (t1 - t0) * (j + 1) / (len(labels) + 1.0) + 0.5) for j, lab in enumerate(labels)]
+
+
+def card_plays(plays, card):
+    return [p for p in plays if p["card"] == card]
+
+
+def checks_of(plays, kids, cfg=None):
+    cfg = cfg or VA.PlayConfig()
+    final, _k, _s = VA.assemble_plays(plays, kids, [], [], cfg)
+    return VA._play_checks(final, {1: 0.0}, cfg)
+
+
+def test_a_travelling_spell_is_one_play_along_its_path():
+    # S: a Giant Snowball flies from the king tower to Yodle2's left tower in 1.6 s, boxed as three parts 11 and 24
+    # tiles on (past radius_tiles, the last past window_s): one play, the later parts its "flight", landing at the
+    # last one's end
+    ball = [gold_part("10", "giant-snowball", 10.0, (8800, 2100), last_t=10.3, last=(8200, 5600)),
+            gold_part("11", "giant-snowball", 10.8, (7000, 13000), last_t=11.3, last=(6000, 19000)),
+            gold_part("12", "giant-snowball", 11.5, (5300, 26400), last_t=11.9, last=(6300, 28900))]
+    plays, _kids = derive_deck(ball, DECK_B)
+    assert [(p["card"], p["units"], p["continued"]) for p in plays] == [
+        ("Snowball", ["10"], {"11": "flight", "12": "flight"})]
+    assert (plays[0]["x_mt"], plays[0]["y_mt"], plays[0]["land_x_mt"], plays[0]["land_y_mt"]) == (
+        8800.0, 2100.0, 6300.0, 28900.0)
+    # a Rocket (RocketSpell 350 / 60 = 5.8 tiles/s) seen at launch and 3 s later 18 tiles on: one play
+    rocket = [gold_part("20", "rocket", 20.0, (9000, 2000), last_t=20.4, last=(9000, 4000)),
+              gold_part("21", "rocket", 23.0, (9000, 20000), last_t=23.3)]
+    assert [p["continued"] for p in derive_deck(rocket, DECK_A)[0]] == [{"21": "flight"}]
+    # faster than its projectile could fly (30 tiles in 1 s): a new play
+    assert len(derive_deck([ball[0], gold_part("13", "giant-snowball", 11.0, (17000, 31000), last_t=11.2)],
+                           DECK_B)[0]) == 2
+    # off its path: within the reach of its speed, but 7 tiles across the first part's line: a new play
+    assert len(derive_deck([ball[0], gold_part("14", "giant-snowball", 10.8, (14000, 13000), last_t=11.0)],
+                           DECK_B)[0]) == 2
+    # once its card is back in the hand (4 other cards since), even a part on its path is a new play
+    back = [ball[0], *others_of(10.05, 10.75, ["BabyDragon", "MinionGiant", "Ronin", "Berserker"]), ball[1]]
+    assert len(card_plays(derive_deck(back, DECK_B)[0], "Snowball")) == 2
+    # two Rockets 6.5 s apart at the two princess towers (two of the 4 plays between unlabelled): the second
+    # is launched where the first was 6.5 s before, nowhere near where a rocket flying since would be
+    rockets = [gold_part("30", "rocket", 60.0, (9000, 2000), last_t=63.5, last=(3500, 25000)),
+               *others_of(60.5, 64.0, ["GoblinDemolisher", "ElectroWizardHero"]),
+               gold_part("31", "rocket", 66.5, (9000, 2000), last_t=70.0, last=(14500, 25000))]
+    assert len(card_plays(derive_deck(rockets, DECK_A)[0], "Rocket")) == 2
+    # two Logs 10.5 s apart in the two lanes: past the longest a log flies and rolls (LogProjectileRolling
+    # 10.1 tiles at 200 / 60 tiles a second)
+    logs = [gold_part("40", "the-log", 100.0, (4000, 9000), last_t=103.0, last=(4000, 19000)),
+            *others_of(101.0, 108.0, ["HogRider", "Musketeer", "Skeleton"]),
+            gold_part("41", "the-log", 110.5, (14000, 10000), last_t=113.5, last=(14000, 20000))]
+    assert len(card_plays(derive_deck(logs, DECK_HOG)[0], "Log")) == 2
+    # off (spell_track 0): three plays, as before
+    assert len(derive_deck(ball, DECK_B, config=VA.PlayConfig(spell_track=0))[0]) == 3
+
+
+def test_a_lingering_spell_effect_is_one_play_but_two_zaps_are_two():
+    # Goblin Curse's circle lasts 6 s (RoyaleSim GoblinCurse area_effect_object 6000 ms, 3 tiles): a second track
+    # 2.8 s in, 4 tiles off (past radius_tiles), and its end swirl 5.5 s in are the same play ("linger")
+    curse = [gold_part("30", "GoblinCurse", 70.0, (14600, 22400), last_t=75.6),
+             gold_part("31", "GoblinCurse", 72.8, (14600, 26400), last_t=74.0),
+             gold_part("32", "GoblinCurse", 75.5, (14000, 22000), last_t=75.9)]
+    assert [p["continued"] for p in derive_deck(curse, DECK_A)[0]] == [{"31": "linger", "32": "linger"}]
+    # 8 s later (past its life + spell_linger_s): a new play
+    assert len(derive_deck([curse[0], gold_part("33", "GoblinCurse", 78.0, (14600, 22400))], DECK_A)[0]) == 2
+    # Vines catch 0.9 s in, at 0 / 0.25 / 0.5 s, and hold 2 s (3.4 s): a part 3 s in is the same play
+    vines = [gold_part("50", "Vines", 30.0, (9000, 20000), last_t=31.0),
+             gold_part("51", "Vines", 33.0, (10500, 21000), last_t=33.4)]
+    assert [p["continued"] for p in derive_deck(vines, DECK_A)[0]] == [{"51": "linger"}]
+    # a Zap's effect lasts 1 ms: two Zaps 3 s apart on one spot stay two plays (reviewer scenario S5), and so does
+    # a later strike 2 s on (past reacquire_s); the evolved Zap strikes again (Zap_EV1 lives 5 s), so with its deck
+    # slot evolved that strike is the same play
+    zaps = [gold_part("40", "zap", 10.0, (9000, 20000), last_t=10.5), gold_part("41", "zap", 13.0, (9000, 20000))]
+    assert len(derive_deck(zaps, DECK_R0)[0]) == 2
+    strikes = [gold_part("40", "zap", 10.0, (9000, 20000), last_t=10.2),
+               gold_part("41", "zap", 12.0, (9200, 20100), last_t=12.3)]
+    assert len(derive_deck(strikes, DECK_R0)[0]) == 2
+    plays, _kids = derive_deck(strikes, DECK_R0, deck_forms={"Zap": VA.FORM_EVO})
+    assert [p["continued"] for p in plays] == [{"41": "linger"}]
+
+
+def test_lightnings_strikes_in_its_circle_are_one_play():
+    # S, linger: Lightning strikes the 3 targets it picks in its 3.5-tile circle (Lightning life 1.5 s), 0.5 s apart,
+    # so two strikes lie up to its diameter (7 tiles) apart, past its radius + the margin (5.5) of each other: one
+    # play (reviewer scenario S3: 6.6, 4.7 and 4.7 tiles apart, two plays with radius + margin, three before rule S)
+    s3 = [gold_part("10", "lightning", 80.0, (5200, 24000), last_t=80.3),
+          gold_part("11", "lightning", 80.5, (11800, 24000), last_t=80.8),
+          gold_part("12", "lightning", 81.0, (8500, 27000), last_t=81.3)]
+    plays, kids = derive_deck(s3, DECK_B)
+    assert [(p["card"], p["continued"]) for p in plays] == [("Lightning", {"11": "linger", "12": "linger"})]
+    assert not [w for w in checks_of(plays, kids) if "Lightning" in w]
+    two = [gold_part("10", "lightning", 80.0, (5000, 24000), last_t=80.3),
+           gold_part("11", "lightning", 80.5, (12000, 24000), last_t=80.8)]
+    assert [p["continued"] for p in derive_deck(two, DECK_B)[0]] == [{"11": "linger"}]
+    # farther than its diameter + the margin (9 tiles), or past its life + spell_linger_s (2.5 s): another play
+    assert len(derive_deck([two[0], gold_part("11", "lightning", 80.5, (14500, 24000), last_t=80.8)], DECK_B)[0]) == 2
+    assert len(derive_deck([two[0], gold_part("11", "lightning", 83.0, (7000, 24000), last_t=83.3)], DECK_B)[0]) == 2
+
+
+def test_a_champion_alive_takes_her_parts():
+    # C: Goblinstein put down at the right bridge (her doctor 4 tiles off joins in the window: room per class, the
+    # spread); 1.2 s later a monster track 4.5 tiles off in Yodle2's half (past reach_margin_tiles and
+    # cycle_seen_tiles, where no play starts): she is alive, so it is her ("champion"), not a play whose deploy
+    # went unseen, and the list asks to look at it (first seen past the river)
+    g = [gold_part("10", "goblinstein", 20.0, (16800, 15100), last_t=34.0, last=(11400, 16000)),
+         gold_part("11", "goblinstein_doctor", 20.3, (16600, 11000), last_t=30.0, last=(15400, 13700)),
+         gold_part("12", "goblinstein", 21.2, (15000, 19500), last_t=30.0, last=(14000, 21500))]
+    plays, kids = derive_deck(g, DECK_B)
+    assert [(p["units"], p["continued"], p["deploy_unseen"]) for p in plays] == [
+        (["10", "11"], {"12": "champion"}, False)]
+    assert VA.flagged_merges(plays[0]) == [("12", "champion first seen past the river", 0.0)]
+    # off (champion_gap_s 0): a play whose deploy went unseen, as before
+    plays, _kids = derive_deck(g, DECK_B, config=VA.PlayConfig(champion_gap_s=0.0))
+    assert [p["deploy_unseen"] for p in plays] == [False, True]
+    # 11 tiles from where she was 1.6 s before: past her walk and her dash (Boss Bandit: 6 tiles at 8.3 tiles a
+    # second, every 0.8 s: 9.7 tiles in 1.6 s): no champion merge
+    bb = [gold_part("30.0", "BossBandit", 40.0, (14000, 8000), last_t=44.0, last=(14000, 14000)),
+          gold_part("31", "BossBandit", 45.6, (3000, 12000), last_t=50.0)]
+    assert len(derive_deck(bb, DECK_R0)[0]) == 2
+    # her dash: lost at (9, 13), found 1 s later 6.5 tiles on: her
+    dash = [gold_part("30", "BossBandit", 30.0, (9000, 8000), last_t=36.0, last=(9000, 13000)),
+            gold_part("31", "BossBandit", 37.0, (9000, 19500), last_t=40.0)]
+    assert [p["continued"] for p in derive_deck(dash, DECK_R0)[0]] == [{"31": "champion"}]
+    # her card back and free (4 other plays since her deploy, 7 s unseen): a new play
+    again = [g[0], *others_of(34.5, 40.0, ["BabyDragon", "MinionGiant", "Ronin", "Berserker"]),
+             gold_part("20", "goblinstein", 41.0, (12000, 16000), last_t=45.0)]
+    assert len(card_plays(derive_deck(again, DECK_B)[0], "Goblinstein")) == 2
+    # dead 10 s, replayed behind the king tower with 3 labelled plays between: not alive (more than champion_gap_s
+    # unseen), so no champion merge; behind where she was, so no reach either: two plays (the list's cycle check
+    # asks for the missed play)
+    died = [gold_part("10", "goblinstein", 20.0, (9000, 3000), last_t=34.0, last=(14000, 18000)),
+            gold_part("11", "goblinstein_doctor", 20.2, (9000, 2000), last_t=34.0, last=(13000, 15000)),
+            *others_of(35.0, 42.0, ["BabyDragon", "Berserker", "Ronin"]),
+            gold_part("20", "goblinstein", 44.0, (9000, 3000), last_t=50.0, last=(9000, 9000)),
+            gold_part("21", "goblinstein_doctor", 44.2, (9000, 2000), last_t=50.0, last=(9000, 7000))]
+    assert [len(p["units"]) for p in card_plays(derive_deck(died, DECK_B)[0], "Goblinstein")] == [2, 2]
+    # a Boss Bandit replayed 8 s after she died (a Zap unlabelled between): two plays
+    bb2 = [gold_part("10", "BossBandit", 20.0, (14000, 8000), last_t=30.0, last=(14000, 20000)),
+           *others_of(30.5, 36.0, ["HogRider", "SkeletonWarrior", "AxeMan"]),
+           gold_part("20", "BossBandit", 38.0, (14000, 9000), last_t=44.0, last=(14000, 16000))]
+    assert len(card_plays(derive_deck(bb2, DECK_R0)[0], "BossBandit")) == 2
+
+
+def test_a_champion_found_past_the_river_counts_from_her_last_sighting():
+    # C with the lock: the Boss Bandit put down at 10 s, 4 other plays, last seen at Yodle2's right tower at 20 s; a
+    # Zap at 22 s; at 25 s a Boss Bandit part 0.6 tiles from where she was lost (her getaway, a tower's box over
+    # her). Past the river no play starts, so her card counts from her last sighting there (one card since: not
+    # back): she is found again by reach, and the list asks about the 5 s gap. (Counted from her deploy, as the lock
+    # does in her own half, alive's 4 s with a play between made it a play whose deploy went unseen: reviewer K1.)
+    bb = [gold_part("10", "BossBandit", 10.0, (14000, 8000), last_t=20.0, last=(14000, 22000)),
+          *others_of(11.0, 19.0, ["HogRider", "AxeMan", "SkeletonWarrior", "AngryBarbarian"]),
+          gold_part("95", "zap", 22.0, (14000, 22000), last_t=22.3),
+          gold_part("20", "BossBandit", 25.0, (14300, 21500), last_t=30.0, last=(14000, 26000))]
+    plays, kids = derive_deck(bb, DECK_R0)
+    assert [(p["units"], p["continued"], p["deploy_unseen"]) for p in card_plays(plays, "BossBandit")] == [
+        (["10"], {"20": "reach"}, False)]
+    assert any(w.startswith("p1 BossBandit: check the parts taken for its units: t20 (reach, 5.0 s unseen)")
+               for w in checks_of(plays, kids))
+    # Goblinstein, both her units lost 5 s past the river, a Snowball between (reviewer K2): her monster found again
+    g = [gold_part("10", "goblinstein", 10.0, (14000, 6000), last_t=22.0, last=(14000, 20000)),
+         gold_part("11", "goblinstein_doctor", 10.2, (14000, 4500), last_t=22.0, last=(13500, 17000)),
+         *others_of(11.0, 19.0, ["BabyDragon", "Berserker", "Ronin", "MinionGiant"]),
+         gold_part("95", "giant-snowball", 23.0, (9000, 3000), last_t=23.5, last=(12000, 15000)),
+         gold_part("20", "goblinstein", 27.0, (14200, 20500), last_t=32.0, last=(14000, 25000))]
+    assert [(p["units"], p["continued"]) for p in card_plays(derive_deck(g, DECK_B)[0], "Goblinstein")] == [
+        (["10", "11"], {"20": "reach"})]
+    # 4 other cards since she was last seen: her card is back there too, so a play whose deploy went unseen
+    back = [bb[0], *others_of(20.5, 30.0, ["HogRider", "AxeMan", "SkeletonWarrior", "zap"]),
+            gold_part("20", "BossBandit", 31.0, (14300, 21500), last_t=35.0)]
+    assert [(p["units"], p["deploy_unseen"], p["new_by"]) for p in card_plays(derive_deck(back, DECK_R0)[0],
+                                                                            "BossBandit")] == [
+        (["10"], False, None), (["20"], True, "cycle")]
+    # never behind (reviewer X1): she dies at her bridge at 30 s, 4 cards since her deploy; a Boss Bandit behind the
+    # king tower 3 s later is a new play, though she was seen within champion_gap_s
+    x1 = [gold_part("10", "BossBandit", 10.0, (14000, 6000), last_t=30.0, last=(14000, 12000)),
+          *others_of(11.0, 25.0, ["HogRider", "AxeMan", "SkeletonWarrior", "AngryBarbarian"]),
+          gold_part("20", "BossBandit", 33.0, (10000, 3000), last_t=38.0, last=(14000, 8000))]
+    assert len(card_plays(derive_deck(x1, DECK_R0)[0], "BossBandit")) == 2
+
+
+def test_a_champion_played_while_her_last_play_is_seen_is_named():
+    # the list: a second Goblinstein play while the first's monster is still seen (12 tiles off: no merge can take
+    # it), which one champion on the field cannot be
+    g = [gold_part("10", "goblinstein", 20.0, (3000, 9000), last_t=30.0, last=(3000, 14000)),
+         gold_part("20", "goblinstein", 25.0, (15000, 8000), last_t=29.0)]
+    plays, kids = derive_deck(g, DECK_B)
+    assert len(plays) == 2 and plays[0]["last_t"] == 30.0
+    assert any(w.startswith("p2 Goblinstein comes while p1's Goblinstein was still seen (until 0:30.0): a champion "
+                            "is on the field once") for w in checks_of(plays, kids))
+
+
+def test_a_plays_room_is_per_class_and_a_deploy_window_holds_one_play():
+    # W, E: Goblinstein deploys a monster and its doctor (spawn_children compositions 1 + 1): a second monster track
+    # in the window is a second track (capacity), and the doctor is still a unit (the card's cap of 2 used to take
+    # both monster tracks, leaving the doctor a second track on one of them)
+    g = [gold_part("10", "goblinstein", 30.0, (14000, 2000), last_t=35.0),
+         gold_part("11", "goblinstein", 30.2, (14500, 2300), last_t=31.0),
+         gold_part("12", "goblinstein_doctor", 30.4, (14000, 4500), last_t=35.0)]
+    plays, _kids = derive_deck(g, DECK_B)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["10", "12"], {"11": "capacity"})]
+    old, _kids = derive_deck(g, DECK_B, config=VA.PlayConfig(class_room=0))
+    assert [(p["units"], p["continued"]) for p in old] == [(["10", "11"], {"12": "capacity"})]
+    # a Skeleton Army of 15 spread 7 x 6 tiles, the far corner boxed first: one play (each part within radius_tiles
+    # of one of its units, or within window_spread_tiles: one card is not played twice in 1 s); a 16th is a second
+    # track
+    army = [gold_part(str(100 + j), "Skeleton", 50.0 + 0.02 * j, (12000 - 500 * j, 11000 - 400 * j), last_t=55.0)
+            for j in range(15)]
+    plays, _kids = derive_deck(army + [gold_part("120", "Skeleton", 50.4, (9000, 8000), last_t=52.0)], DECK_A)
+    assert [(p["card"], len(p["units"]), p["continued"]) for p in plays] == [("SkeletonArmy", 15, {"120": "capacity"})]
+    # a unit 6 tiles from the rest (past radius_tiles + reach_margin_tiles): one play still, and the list names it
+    # (a part of another card's, labelled as this one?)
+    far = army[:5] + [gold_part("130", "Skeleton", 50.5, (18000, 11000), last_t=55.0)]
+    plays, kids = derive_deck(far, DECK_A)
+    assert len(plays) == 1 and plays[0]["far_window"] == {"130": 6.0}
+    assert any(w.startswith("p1 SkeletonArmy: t130 (6.0 tiles off) joined it in its deploy window, farther than 5 tiles "
+                            "from its units") for w in checks_of(plays, kids))
+    # the evolved army: 15 soldiers and its General (RoyaleSim evolutions SkeletonArmy_EV1: count 15 +
+    # evo_army.general), so 16 units and the evo form
+    evo = [gold_part(str(200 + j), "Skeleton_EV1", 60.0 + 0.02 * j, (9000 + 300 * (j % 5), 8000 + 400 * (j // 5)),
+                     last_t=65.0) for j in range(15)]
+    evo.append(gold_part("220", "SkeletonArmy_EV1_General", 60.4, (9600, 9000), last_t=65.0))
+    plays, _kids = derive_deck(evo, DECK_A)
+    assert [(len(p["units"]), p["form"]) for p in plays] == [(16, VA.FORM_EVO)]
+    # its soldiers masked, its General labelled: the General starts the play (E); a Spectral (spawned as a soldier
+    # dies) is its child, of the play whose unit was seen nearest (J)
+    plays, kids = derive_deck([evo[-1], gold_part("230", "SkeletonArmy_EV1_Spectral", 63.0, (9600, 12000))], DECK_A)
+    assert [(p["units"], p["form"]) for p in plays] == [(["220"], VA.FORM_EVO)]
+    assert [(k["derived"], k["how"]) for k in kids] == [(0, "near")]
+    # a Mirror in the deck: a Skeleton Army mirrored 0.8 s later 6 tiles off is a second play (no spread)
+    mirror = ["Witch", "SkeletonArmy", "Fireball", "Log", "Giant", "Musketeer", "Zap", "Mirror"]
+    two = [gold_part(str(300 + j), "Skeleton", 50.0 + 0.02 * j, (3000 + 400 * (j % 5), 9000 + 400 * (j // 5)),
+                     last_t=55.0) for j in range(15)]
+    two += [gold_part(str(400 + j), "Skeleton", 50.8 + 0.02 * j, (9000 + 400 * (j % 5), 9000 + 400 * (j // 5)),
+                      last_t=55.0) for j in range(15)]
+    assert [len(p["units"]) for p in derive_deck(two, mirror)[0]] == [15, 15]
+    no_mirror = [c if c != "Mirror" else "Knight" for c in mirror]
+    assert [len(p["units"]) for p in derive_deck(two[:20], no_mirror)[0]] == [15]
+
+
+def barrel():
+    return [gold_part("10", "SkeletonBalloon", 50.0, (5700, 1000), last_t=53.3, last=(5000, 10500)),
+            gold_part("11", "SkeletonContainerNew", 53.4, (5000, 10700), last_t=53.7, last=(4900, 12200))]
+
+
+def test_a_barrels_drop_is_its_child_not_a_skeleton_army():
+    # B: the Skeleton Barrel dies at (5, 10.5); its container lands and breaks into skeletons (SkeletonContainerNew
+    # death_spawn Skeleton x7, spawn_children.json "drops"): every skeleton is the barrel's child, none a Skeleton
+    # Army play (the container, a part of its card born where the barrel was lost, is the barrel found again: rule 1)
+    drop = [gold_part(str(20 + j), "Skeleton", 53.8 + 0.1 * j, (4900 + 300 * (j % 3), 12400 + 300 * (j // 3)),
+                      last_t=58.0) for j in range(7)]
+    plays, kids = derive_deck(barrel() + drop, DECK_A)
+    assert [(p["card"], p["continued"]) for p in plays] == [("SkeletonBalloon", {"11": "reacquired"})]
+    assert sorted(k["key"] for k in kids if k["how"] == "drop") == [str(20 + j) for j in range(7)]
+    assert all(k["derived"] == 0 for k in kids)
+    # off (drop_gap_s 0): a Skeleton Army play, as before
+    assert [p["card"] for p in derive_deck(barrel() + drop, DECK_A, config=VA.PlayConfig(drop_gap_s=0.0))[0]] == [
+        "SkeletonBalloon", "SkeletonArmy"]
+    # past the river with no container seen: a lone skeleton 20 s later is a Skeleton Army play whose deploy went
+    # unseen, as before
+    plays, _kids = derive_deck(barrel() + [gold_part("40", "Skeleton", 75.0, (9000, 21000))], DECK_A)
+    assert [(p["card"], p["deploy_unseen"]) for p in plays] == [("SkeletonBalloon", False), ("SkeletonArmy", True)]
+    # the evolved barrel popped (7 at 75% HP) and killed (7 more) by one hit: 14 skeletons at once, all its drops
+    # (SkeletonBalloon_EV1 drops 14), no army
+    evo = [gold_part("10", "SkeletonBalloon_EV1", 50.0, (9000, 2000), last_t=55.0, last=(9000, 12000))]
+    evo += [gold_part(str(20 + j), "Skeleton", 55.2 + 0.03 * j, (8000 + 500 * (j % 4), 12000 + 600 * (j // 4)),
+                      last_t=60.0) for j in range(14)]
+    plays, kids = derive_deck(evo, DECK_A)
+    assert [p["card"] for p in plays] == ["SkeletonBalloon"] and sum(k["how"] == "drop" for k in kids) == 14
+
+
+DECK_W = ["Witch", "SkeletonArmy", "Fireball", "Log", "Giant", "Musketeer", "Zap", "Knight"]
+
+
+def skeleton_wave(t, y, k0, n=4):
+    """n skeletons born together around a Witch at x 9, y + 0..0.3 tiles."""
+    return [gold_part(str(k0 + j), "Skeleton", t, (8000 + 700 * j, y + 300 * (j % 2)), last_t=t + 2.0)
+            for j in range(n)]
+
+
+def test_a_live_spawners_waves_are_its_children_not_skeleton_army_plays():
+    # B, live spawners: a Witch walking down the centre puts 4 skeletons down around her every 7 s (Witch spawner
+    # Skeleton x4: spawn_children.json "spawners"). In a deck with Skeleton Army each wave is her play's children
+    # ("spawn"), not a Skeleton Army play (reviewer W2, W3)
+    witch = [gold_part("10", "Witch", 52.0, (9000, 5000), last_t=72.0, last=(9000, 14000))]
+    plays, kids = derive_deck(witch + skeleton_wave(59.0, 9000, 20) + skeleton_wave(66.0, 11500, 30), DECK_W)
+    assert [p["card"] for p in plays] == ["Witch"]
+    assert sorted((k["key"], k["how"], k["derived"]) for k in kids) == [
+        (str(k), "spawn", 0) for k in (20, 21, 22, 23, 30, 31, 32, 33)]
+    # 5 skeletons born together beside her: more than her wave, so a Skeleton Army put down (5 of its 15 labelled)
+    plays, kids = derive_deck(witch + skeleton_wave(60.0, 10000, 40, n=5), DECK_W)
+    assert [(p["card"], len(p["units"])) for p in plays] == [("Witch", 1), ("SkeletonArmy", 5)] and not kids
+    # a whole army beside her: a play
+    army = [gold_part(str(100 + j), "Skeleton", 60.0 + 0.01 * j, (7000 + 500 * (j % 5), 9000 + 500 * (j // 5)),
+                      last_t=66.0) for j in range(15)]
+    assert [(p["card"], len(p["units"])) for p in derive_deck(witch + army, DECK_W)[0]] == [
+        ("Witch", 1), ("SkeletonArmy", 15)]
+    # her wave 4 s after she was last seen (past drop_gap_s: she is dead), or with the rule off: an army play, as before
+    gone = [gold_part("10", "Witch", 52.0, (9000, 5000), last_t=55.0, last=(9000, 7000))]
+    assert [p["card"] for p in derive_deck(gone + skeleton_wave(59.0, 9000, 20), DECK_W)[0]] == [
+        "Witch", "SkeletonArmy"]
+    assert [p["card"] for p in derive_deck(witch + skeleton_wave(59.0, 9000, 20), DECK_W,
+                                           config=VA.PlayConfig(live_spawners=0))[0]] == ["Witch", "SkeletonArmy"]
+
+
+def test_an_army_put_down_by_a_barrel_is_still_a_play():
+    # 15 skeletons at once where a container broke: more than half of (a drop's 7 + an army's 16), so a Skeleton
+    # Army play
+    army = [gold_part(str(20 + j), "Skeleton", 53.8 + 0.02 * j, (3500 + 300 * (j % 5), 11500 + 400 * (j // 5)),
+                      last_t=58.0) for j in range(15)]
+    plays, _kids = derive_deck(barrel() + army, DECK_A)
+    assert [(p["card"], len(p["units"])) for p in plays] == [("SkeletonBalloon", 1), ("SkeletonArmy", 15)]
+    # a barrel still flying overhead drops nothing: skeletons under it are an army's
+    flying = [gold_part("10", "SkeletonBalloon", 50.0, (5700, 1000), last_t=60.0, last=(5000, 20000))]
+    plays, _kids = derive_deck(flying + army[:5], DECK_A)
+    assert [p["card"] for p in plays] == ["SkeletonBalloon", "SkeletonArmy"]
+    # its 7 drops out, an army put down on the drop spot 1.5 s later with only 4 skeletons labelled: the barrel takes
+    # no more than ceil(7 x drop_budget_x) = 10, so the army is a play still
+    drop = [gold_part(str(60 + j), "Skeleton", 53.8 + 0.1 * j, (4900 + 300 * (j % 3), 12400 + 300 * (j // 3)),
+                      last_t=58.0) for j in range(7)]
+    late = [gold_part(str(80 + j), "Skeleton", 55.2 + 0.02 * j, (4000 + 800 * j, 11000 + 300 * j), last_t=60.0)
+            for j in range(4)]
+    plays, kids = derive_deck(barrel() + drop + late, DECK_A)
+    assert [p["card"] for p in plays] == ["SkeletonBalloon", "SkeletonArmy"]
+    assert sum(k["how"] == "drop" for k in kids) == 10
+
+
+def test_a_second_track_on_a_unit_its_card_cannot_have_replayed():
+    # G: a Goblin Demolisher walking up the right lane for 11 s; a track born 2.7 tiles from it 4 s in (past
+    # reach_margin_tiles, the play past window_s): no other card was played, so it cannot be a new one: it continues
+    # it ("cycle"), and with no other card since and a short gap the list does not ask
+    gd = [gold_part("10", "GoblinDemolisher", 17.8, (10700, 1300), last_t=28.8, last=(13800, 9700)),
+          gold_part("11", "GoblinDemolisher", 22.0, (14500, 3800), last_t=25.0, last=(14500, 7000))]
+    plays, kids = derive_deck(gd, DECK_A)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["10"], {"11": "cycle"})]
+    assert plays[0]["guarded"] == {"11": [0, 2.71, 0.0, "10"]}
+    assert not any("card cycle" in w for w in checks_of(plays, kids))
+    # off (cycle_guard 0): a new play, as before
+    assert len(derive_deck(gd, DECK_A, config=VA.PlayConfig(cycle_guard=0))[0]) == 2
+    # with 4 other cards played since, the card is back in the hand: a new play
+    plays, _kids = derive_deck(gd + others_of(18.0, 21.5, ["Skeleton", "SuspiciousBush", "ElectroWizardHero", "rocket"]),
+                               DECK_A)
+    assert len(card_plays(plays, "GoblinDemolisher")) == 2
+    # an Executioner replayed 3.6 tiles from the old one still fighting, two other cards labelled between (the
+    # plays the labels missed, a Zap and a Freeze, would make 4): taken for the old one, and the list asks
+    exe = [gold_part("10", "AxeMan", 20.0, (9000, 5000), last_t=45.0, last=(9000, 5000)),
+           *others_of(22.0, 30.0, ["HogRider", "Minion"]),
+           gold_part("20", "AxeMan", 34.0, (12600, 5000), last_t=40.0)]
+    plays, kids = derive_deck(exe, DECK_R0)
+    assert [p["continued"] for p in card_plays(plays, "AxeMan")] == [{"20": "cycle"}]
+    assert any(w.startswith("p1 AxeMan: t20 (3.6 tiles from t10, 0.0 s unseen) taken for its units by the card cycle: "
+                            "only 2 other card(s) were played since its last play") for w in checks_of(plays, kids))
+    # a Hog Rider replayed at its lane start: the old hog's short deploy part ended there, but the hog was seen at
+    # y 24 since (a part it has outgrown), so the new one is no continuation of it
+    hog = [gold_part("10.0", "HogRider", 20.0, (14000, 5000), last_t=21.0, last=(14000, 9500), h=10, part=0),
+           gold_part("11", "HogRider", 21.3, (14000, 10500), last_t=27.0, last=(14000, 24000)),
+           *others_of(23.0, 30.0, ["Minion", "AxeMan"]),
+           gold_part("20", "HogRider", 33.0, (14000, 8500), last_t=36.0, last=(14000, 14000))]
+    assert len(card_plays(derive_deck(hog, DECK_R0)[0], "HogRider")) == 2
+    # new Guards put down on top of the old ones, still seen at the tower: a group of their card born at once (a
+    # deploy) stays a new play, cycle or not (test_a_new_play_of_the_card_20_s_later_stays_separate)
+
+
+def test_the_card_cycle_counts_distinct_cards():
+    # D: an Executioner lost 6 s (past flag_gap_s) and found 4 tiles on; between, a Zap seen twice 3 s apart (two
+    # derived plays of one card), a Hog Rider and a Horde: 3 other cards, not 4, so it is not back in the hand
+    exe = [gold_part("10", "AxeMan", 0.0, (9000, 5000), last_t=20.0, last=(9000, 9000)),
+           gold_part("20", "AxeMan", 26.0, (9000, 13000), last_t=30.0)]
+    between = [gold_part("90", "zap", 5.0, (9000, 20000), last_t=5.3), gold_part("91", "zap", 8.0, (9000, 20000)),
+               gold_part("92", "HogRider", 11.0, (14000, 9000), last_t=12.0),
+               gold_part("93", "MinionHorde_EV1", 14.0, (4000, 8000), last_t=15.0)]
+    plays, _kids = derive_deck(exe + between, DECK_R0)
+    assert [(p["units"], p["continued"], p["cycled"]) for p in card_plays(plays, "AxeMan")] == [
+        (["10"], {"20": "reach"}, {"20": 3})]
+    # off (cycle_distinct 0): 4 plays, so the card had cycled: a new play
+    plays, _kids = derive_deck(exe + between, DECK_R0, config=VA.PlayConfig(cycle_distinct=0))
+    assert len(card_plays(plays, "AxeMan")) == 2
+    # and the list's cycle check counts cards too
+    final = [{"card": "A", "hk": 1}, {"card": "Z", "hk": 1}, {"card": "Z", "hk": 1}, {"card": "B", "hk": 1},
+             {"card": "A", "hk": 1}]
+    assert VA.cycle_since(final)[-1] == (2, 0) and VA.cycle_since(final, distinct=False)[-1] == (3, 0)
+
+
+def test_the_owners_added_plays_count_in_the_card_cycle():
+    # the same Executioner with 3 labelled other cards between: one play (reach, late in the cycle); the owner
+    # adds the Freeze the labels missed, and the card is back in the hand: a new play
+    exe = [gold_part("10", "AxeMan", 0.0, (9000, 5000), last_t=20.0, last=(9000, 9000)),
+           gold_part("20", "AxeMan", 26.0, (9000, 13000), last_t=30.0)]
+    between = [gold_part("90", "zap", 5.0, (9000, 20000), last_t=5.3),
+               gold_part("92", "HogRider", 11.0, (14000, 9000), last_t=12.0),
+               gold_part("93", "MinionHorde_EV1", 14.0, (4000, 8000), last_t=15.0)]
+    plays, _kids = derive_deck(exe + between, DECK_R0)
+    assert len(card_plays(plays, "AxeMan")) == 1
+    added = [{"card": "Freeze", "t": 18.0, "hk": 1}]
+    plays, _kids = derive_deck(exe + between, DECK_R0, added=added)
+    assert [(p["units"], p["new_by"]) for p in card_plays(plays, "AxeMan")] == [(["10"], None), (["20"], "cycle")]
+    plays, _kids = derive_deck(exe + between, DECK_R0, added=added, config=VA.PlayConfig(count_added=0))
+    assert len(card_plays(plays, "AxeMan")) == 1
+
+
+def test_a_child_joins_the_unit_seen_nearest():
+    # J: a Goblin Demolisher walks 27 s to Yodle2's tower and turns kamikaze there (child_s is 10 s): its form's
+    # track, born 3 tiles from it while its track still runs, joins the play whose unit is seen there, not none
+    gd = [gold_part("10", "GoblinDemolisher", 16.6, (10600, 0), last_t=43.5, last=(14000, 24000)),
+          gold_part("11", "GoblinDemolisher_kamikaze_form", 42.8, (14000, 26500), last_t=44.0)]
+    _plays, kids = derive_deck(gd, DECK_A)
+    assert [(k["key"], k["derived"], k["how"]) for k in kids] == [("11", 0, "near")]
+    # off (child_gap_s 0): the latest play within child_s, none here
+    _plays, kids = derive_deck(gd, DECK_A, config=VA.PlayConfig(child_gap_s=0.0))
+    assert [(k["key"], k["derived"], k["how"]) for k in kids] == [("11", None, "latest")]
+
+
+def test_a_short_part_on_another_cards_unit_is_named_for_relabelling():
+    # a Minion Giant play whose deploy went unseen, begun by a 0.6 s part 1.1 tiles from a Goblinstein seen then:
+    # the list names the part to relabel
+    g = [gold_part("249", "goblinstein", 26.0, (14800, 18200), last_t=33.9, last=(14000, 21500)),
+         gold_part("297", "MinionGiant", 33.4, (15000, 21800), last_t=34.0, last=(15200, 22900))]
+    plays, kids = derive_deck(g, DECK_B)
+    assert ('p2 MinionGiant begins with t297 (0.6 s), 1.1 tiles from t249 of p1 Goblinstein seen then, and p2 is a '
+            'play whose deploy went unseen: if t297 is that unit, relabel it (label --map "t297=goblinstein" --force)'
+            ) in checks_of(plays, kids)
+    # the Goblinstein's track ended 0.3 s before (a hand-over): named as well
+    handed = [dict(g[0], last_t=33.1), g[1]]
+    plays, _kids = derive_deck(handed, DECK_B)
+    assert plays[1]["suspect"]["on"] == "249"
+    # a Berserker deployed beside its Rune Giant, its first track 0.5 s: its card's first play, not impossible, so
+    # nothing to relabel
+    rg = [gold_part("10", "GiantBuffer", 30.0, (15000, 4000), last_t=40.0, last=(15000, 14000)),
+          gold_part("20", "Berserker", 31.0, (15600, 5200), last_t=31.5),
+          gold_part("21", "Berserker", 31.7, (15800, 6000), last_t=40.0, last=(15800, 15000))]
+    plays, kids = derive_deck(rg, DECK_B)
+    assert len(plays) == 2 and not plays[1].get("suspect") and not any("relabel" in w for w in checks_of(plays, kids))
+
+
+def test_a_unit_that_turns_is_followed_along_its_path():
+    # P: a Rune Giant walks to the bridge, (16, 4) -> (16, 14) in 4 s, then is pushed back to (16, 6) by 12 s; a track
+    # born at 24.2 s 0.5 tiles from its box is 9.7 tiles off the straight line from its birth to its last position
+    path = {"10": [(20.0 + 0.5 * i, 16000, 4000 + 1250 * i if i <= 8 else 14000 - 500 * (i - 8)) for i in range(25)]}
+    rg = [gold_part("10", "GiantBuffer", 20.0, (16000, 4000), last_t=32.0, last=(16000, 6000)),
+          gold_part("11", "GiantBuffer", 24.2, (16300, 14400), last_t=33.0)]
+    plays, _kids = derive_deck(rg, DECK_B, paths=path)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["10"], {"11": "capacity"})]
+    assert len(derive_deck(rg, DECK_B)[0]) == 2                                # the straight line
+    assert len(derive_deck(rg, DECK_B, paths=path, config=VA.PlayConfig(paths=0))[0]) == 2
+
+
+def test_gold_paths_follow_the_boxes_and_drop_a_jump_at_the_end():
+    pytest.importorskip("numpy")
+    from scripts.vision.geometry import load_geometry
+    geo = load_geometry(None)
+    size = [int(v) for v in geo.frame_size]
+    rows = [{"n": n, "t": 10.0 + 0.1 * n, "size": size} for n in range(40)]
+
+    def box_at(x, y):
+        px, py = geo.world_to_px(x, y, size)
+        return [float(px) - 20.0, float(py) - 40.0, float(px) + 20.0, float(py)]
+
+    # a Hog Rider walking (14, 10) -> (14, 13) over 3 s, then one box 6 tiles away 0.1 s later (another unit's)
+    pts = [(n, 14000.0, 10000.0 + 100.0 * n) for n in range(31)] + [(31, 8000.0, 13000.0)]
+    part = {"key": "5", "decision": "label", "label": "HogRider",
+            "boxes": [[n, *box_at(x, y), "owner"] for n, x, y in pts]}
+    out, trimmed = VA.gold_paths([part], rows, TABLE)
+    path = out["5"]
+    assert len(path) == 31 and abs(path[-1][0] - 13.0) < 1e-6
+    assert set(trimmed) == {"5"} and abs(trimmed["5"][0] - 13.0) < 1e-6
+    # given the part's birth and last points (the scan's), the path starts and ends there
+    part = dict(part, boxes=part["boxes"][:31], birth=[14200, 10100], last=[14300, 13200])
+    out, trimmed = VA.gold_paths([part], rows, TABLE)
+    assert trimmed == {}
+    assert [round(v) for v in out["5"][0][1:]] == [14200, 10100] and [round(v) for v in out["5"][-1][1:]] == [14300, 13200]
+
+
+def test_a_close_unit_still_seen_beats_a_far_unit_lost():
+    # R: a Minion Giant first seen in Yodle2's half (deploy unseen, lost at 34 s); another put down at the left bridge
+    # 7 s later; at 44.3 s a track 1.2 tiles from the second, which is still seen, and 14.3 tiles from where the
+    # first was lost 10.3 s before (within its walk: 1.0 x 1.25 x 10.3 + 2 = 14.9): a second track on the second
+    mg = [gold_part("297", "MinionGiant", 33.4, (15000, 21800), last_t=34.0, last=(15200, 22900)),
+          gold_part("381", "MinionGiant", 41.3, (1600, 14400), last_t=45.4, last=(3500, 17100)),
+          gold_part("392", "MinionGiant", 44.3, (1900, 16800), last_t=51.7)]
+    plays, _kids = derive_deck(mg, DECK_B)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["297"], {}), (["381"], {"392": "capacity"})]
+    # 2.5 tiles from it (past reach_margin_tiles, within cycle_seen_tiles), its card not back in the hand: the unit
+    # still seen there beats the far one lost
+    mg[2] = gold_part("394", "MinionGiant", 44.3, (5400, 16400), last_t=47.0)
+    plays, _kids = derive_deck(mg, DECK_B)
+    assert [(p["units"], p["continued"]) for p in plays] == [(["297"], {}), (["381"], {"394": "capacity"})]
+    plays, _kids = derive_deck(mg, DECK_B, config=VA.PlayConfig(rank_close=0))
+    assert [(p["units"], p["continued"]) for p in plays] == [(["297"], {"394": "reach"}), (["381"], {})]
+
+
+def test_a_play_dated_at_its_tracks_masked_birth():
+    # a Skeleton Barrel's track began 1.8 s before its first labelled part, as a masked part where it was put down:
+    # the play is dated then, and the list names the part to label
+    sb = [gold_part("15.1", "SkeletonBalloon", 41.8, (17300, 4500), last_t=44.0, last=(17000, 8000), h=15, part=1)]
+    masked = VA.masked_starts([dict(gold_part("15.0", None, 40.0, (17400, 3200), last_t=41.7, h=15, decision="mask")),
+                               sb[0]])
+    assert masked == {"15.1": {"key": "15.0", "t": 40.0, "birth": [17400, 3200], "n": 300}}
+    plays, kids = derive_deck(sb, DECK_A, masked=masked)
+    assert [(p["t"], p["x_mt"], p["y_mt"], p["n"], p["dated_by"]) for p in plays] == [
+        (40.0, 17400.0, 3200.0, 300, {"key": "15.0", "t_part": 41.8, "s": 1.8, "label": "SkeletonBalloon"})]
+    assert ('p1 SkeletonBalloon is dated 0:40.0, when its track began as masked part t15.0 (1.8 s before its first '
+            'labelled part t15.1): if t15.0 is its deploy, label it (label --map "t15.0=SkeletonBalloon" --force)'
+            ) in checks_of(plays, kids)
+    # more than track_birth_s before, or farther than its walk: not its deploy
+    far = {"15.1": dict(masked["15.1"], t=38.0)}
+    assert derive_deck(sb, DECK_A, masked=far)[0][0]["t"] == 41.8
+    off = {"15.1": dict(masked["15.1"], birth=[3000, 3200])}
+    assert derive_deck(sb, DECK_A, masked=off)[0][0]["t"] == 41.8
+    assert derive_deck(sb, DECK_A, masked=masked, config=VA.PlayConfig(track_birth_s=0.0))[0][0]["t"] == 41.8
+    # a play dated before an earlier one moves ahead of it, and its children follow it (reviewer D1): the Bush's
+    # track began masked 1 s before the Goblin Demolisher's play, so the Bush is play 0 and its BushGoblin its child
+    d1 = [gold_part("30", "GoblinDemolisher", 20.0, (14000, 3000), last_t=26.0, last=(14000, 9000)),
+          gold_part("40.0", None, 19.0, (5000, 3000), last_t=20.9, last=(5000, 4000), h=40, decision="mask"),
+          gold_part("40.1", "SuspiciousBush", 21.0, (5000, 4200), last_t=35.0, last=(5000, 20000), h=40, part=1),
+          gold_part("50", "BushGoblin", 36.0, (6000, 23500), last_t=38.0)]
+    plays, kids = derive_deck(d1, DECK_A, masked=VA.masked_starts(d1))
+    assert [(p["card"], p["t"], p["derived"]) for p in plays] == [
+        ("SuspiciousBush", 19.0, 0), ("GoblinDemolisher", 20.0, 1)]
+    assert [(k["key"], k["derived"]) for k in kids] == [("50", 0)] and plays[0]["children"] == ["50"]
+
+
+def test_a_clone_spells_copies_are_its_children():
+    # Clone in the deck: troops born in its circle while it lasts (RoyaleSim Clone 1 s, 3 tiles) are its children,
+    # not a second play of their card
+    deck = ["HogRider", "Clone", "Musketeer", "Cannon", "IceSpirits", "Skeletons", "Fireball", "Log"]
+    parts = [gold_part("10", "HogRider", 20.0, (14000, 12000), last_t=26.0, last=(14000, 20000)),
+             gold_part("20", "clone", 22.0, (14000, 15000), last_t=22.5),
+             gold_part("21", "HogRider", 22.2, (14500, 15200), last_t=24.0)]
+    plays, kids = derive_deck(parts, deck)
+    assert [p["card"] for p in plays] == ["HogRider", "Clone"]
+    assert [(k["key"], k["derived"], k["how"]) for k in kids] == [("21", 1, "clone")]
+    # off (clone_children 0): the copy 0.5 tiles from the hog is a second track on it
+    plays, kids = derive_deck(parts, deck, config=VA.PlayConfig(clone_children=0))
+    assert [p["continued"] for p in plays] == [{"21": "capacity"}, {}] and kids == []
+
+
+def test_play_rules_from_the_cli_and_all_off():
+    assert VA.parse_play_rules(["window_spread_tiles=0", "cycle-guard=0"]) == {"window_spread_tiles": 0.0,
+                                                                              "cycle_guard": 0}
+    for bad in ("nope=1", "reach_gap_s=3", "cycle_guard=x", "cycle_guard"):
+        with pytest.raises(ValueError):
+            VA.parse_play_rules([bad])
+    assert set(VA.V2_RULES_OFF) <= set(VA.PlayConfig.__dataclass_fields__)
+    # every new rule off: the Snowball's three parts are three plays, as before
+    ball = [gold_part("10", "giant-snowball", 10.0, (8800, 2100), last_t=10.3, last=(8200, 5600)),
+            gold_part("11", "giant-snowball", 10.8, (7000, 13000), last_t=11.3, last=(6000, 19000)),
+            gold_part("12", "giant-snowball", 11.5, (5300, 26400), last_t=11.9, last=(6300, 28900))]
+    assert len(derive_deck(ball, DECK_B, config=VA.PlayConfig(**VA.V2_RULES_OFF))[0]) == 3
