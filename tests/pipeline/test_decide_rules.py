@@ -835,3 +835,16 @@ def test_a_league_player_carries_the_rules_to_its_seat(tools, tmp_path):
     # without its rules R is H but for the name: the switches are the whole difference
     bare = dataclasses.replace(by["R"], wait_floor=None, stray_guard=False)
     assert {**bare.to_dict(), "name": "H"} == by["H"].to_dict()
+
+
+def test_the_live_runner_takes_the_rule_switches_off_by_default():
+    """scripts/vision_play.py: --wait-floor P and --stray-guard switch the two rules on for live
+    play (off by default); a bad floor refuses to start before anything else runs."""
+    VP = pytest.importorskip("scripts.vision_play")
+    parse = VP.build_parser().parse_args
+    off = parse([])
+    assert off.wait_floor is None and off.stray_guard is False
+    on = parse(["--wait-floor", "0.95", "--stray-guard"])
+    assert on.wait_floor == 0.95 and on.stray_guard is True
+    assert RD.rules_record(on.wait_floor, on.stray_guard) == {"wait_floor": 0.95, "stray_guard": True}
+    assert VP.main(["--wait-floor", "1.5"]) == 2

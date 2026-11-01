@@ -2327,6 +2327,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-lane-guard", action="store_true", help="turn off the Cannon lane guard")
     ap.add_argument("--no-cap-rule", action="store_true",
                     help="allow waiting at full elixir with a playable card")
+    ap.add_argument("--wait-floor", type=float, default=None, metavar="P",
+                    help="decision rule 6 (tools/rs_decide.py, DECISION RULES; off by default): wait "
+                         "whenever the model's own wait probability is at least P (0.95: it rates "
+                         "playing now under 5%%); the cap rule still plays at full elixir")
+    ap.add_argument("--stray-guard", action="store_true",
+                    help="decision rule 7 (off by default): no Skeletons or Ice Spirits on our half "
+                         "far from every threat's path while an enemy troop is past the lane line")
     ap.add_argument("--unknown-plays", action="store_true",
                     help="an enemy unit no card explains is an UNKNOWN play (row token 1, charged "
                          f"{EV.UNKNOWN_PLAY_COST} elixir; the count is then not exact); its unit stays "
@@ -2408,6 +2415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         event_config(args)                              # refuse a bad --unknown-cost before anything
+        if args.wait_floor is not None:                 # ... and a bad --wait-floor
+            RD.check_wait_floor(args.wait_floor)
     except ValueError as exc:
         print(f"refusing to start: {exc}")
         return 2
@@ -2527,6 +2536,12 @@ def _main(args: argparse.Namespace) -> int:
     dcfg = RD.DecideConfig.for_mode(args.decide, wait_bias, guard_cards=guard)
     if args.no_cap_rule:
         dcfg = dcfg.replace(cap_milli=None)
+    try:                                       # decision rules 6/7: off unless switched on
+        dcfg = RD.apply_rules(dcfg, cat, wait_floor=args.wait_floor, stray_guard=args.stray_guard)
+    except ValueError as exc:
+        print(f"--wait-floor / --stray-guard: {exc}")
+        return 2
+    rules = RD.rules_record(args.wait_floor, args.stray_guard)
     legality = RD.TowersOnlyLegality(eng, royalesim, catalogue=cat)
 
     # --- vision -------------------------------------------------------------------
@@ -2651,7 +2666,8 @@ def _main(args: argparse.Namespace) -> int:
                  f"CPU, {threads} torch threads",
                  f"  decide     {dcfg.name}; wait_keep {wait_keep:g} (wait bias {wait_bias:.3f})"
                  + ("" if has_args_json else f"  WARNING: no args.json next to {ckpt.name}, the default")
-                 + (f"; would-play every {args.would_every} ticks" if args.would_every > 0 else ""),
+                 + (f"; would-play every {args.would_every} ticks" if args.would_every > 0 else "")
+                 + (f"; rules:{RD.rules_label(args.wait_floor, args.stray_guard)}" if rules else ""),
                  f"  deck       {', '.join(args.deck)} (level {args.level})",
                  *detector_lines(detector, det_error, table),
                  f"  hud        clock templates {'ok' if hud_reader.clock_reader.ready else 'MISSING'}"
@@ -2703,7 +2719,7 @@ def _main(args: argparse.Namespace) -> int:
                      start_mode=args.start_mode, decide=dcfg.name, wait_keep=wait_keep,
                      wait_bias=round(wait_bias, 6), args_json=has_args_json,
                      cap_milli=dcfg.cap_milli, lane_guard=sorted(int(c) for c in dcfg.guard_cards),
-                     would_every=args.would_every, torch_threads=threads,
+                     decide_rules=rules, would_every=args.would_every, torch_threads=threads,
                      row_hand="in flight, else pad", engine=eng.to_json(),
                      vocab_drift=list(loaded.drift),
                      clock_templates=bool(hud_reader.clock_reader.ready),
