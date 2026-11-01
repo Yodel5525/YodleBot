@@ -555,8 +555,13 @@ def test_vision_play_event_config_turns_the_guards_on_unless_legacy():
     assert VP.event_config(parse([])) == EV.EventConfig.live()
     assert VP.event_config(parse(["--unknown-plays", "--unknown-cost", "2"])) == EV.EventConfig.live(
         unknown_plays=True, unknown_cost=2)
-    assert VP.event_config(parse(["--legacy-opp-plays"])) is None
-    assert VP.event_config(parse(["--legacy-opp-plays", "--unknown-plays"])) == EV.EventConfig(unknown_plays=True)
+    # --legacy-opp-plays: the opponent guards off; our own side's drop-in rule (LIVE_OWN) stays
+    assert dict(EV.LIVE_OWN) == {"own_drop_in_ticks": 45} and EV.EventConfig().own_drop_in_ticks == 0
+    assert EV.EventConfig.live().own_drop_in_ticks == 45
+    assert VP.event_config(parse(["--legacy-opp-plays"])) == EV.EventConfig(own_drop_in_ticks=45)
+    assert not EV.guard_settings(VP.event_config(parse(["--legacy-opp-plays"])))["on"]
+    assert VP.event_config(parse(["--legacy-opp-plays", "--unknown-plays"])) == EV.EventConfig(
+        unknown_plays=True, own_drop_in_ticks=45)
     with pytest.raises(ValueError, match="applies to --unknown-plays"):
         VP.event_config(parse(["--legacy-opp-plays", "--unknown-cost", "2"]))
     assert VP.opp_guard_line(EV.EventConfig.live()) == (

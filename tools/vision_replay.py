@@ -1200,7 +1200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"detector settings: {exc}")
         return 2
     try:
-        ev_config = VP.event_config(args)         # the live one (None: --legacy-opp-plays alone)
+        ev_config = VP.event_config(args)         # the live one (--legacy-opp-plays: guards off)
     except ValueError as exc:
         print(f"UNKNOWN plays: {exc}")
         return 2

@@ -83,16 +83,22 @@ the slot, prune_pending's rule), the runner keeps an upper bound on our elixir f
 
 (the regen of the law's rate, 1x / 2x / 3x by the tick, counted as if dated 20 ticks later:
 the clock reads whole seconds and the rate only rises), and decide uses min(elixir_milli,
-cap) in place of elixir_milli. "Spendable at the tap" is the decision's own spendable_milli:
-it already holds the earlier taps' caps and their costs while in flight, so plays in a row
-stack. A cap ends after the first frame whose HUD reading is within 200 milli of it (the
-HUD has caught up), or 30 ticks after its play was paid (a timeout: a refused tap, a misread
-base), or when its tap was never paid (60 ticks, as prune_pending). Why 200 and not 500: on
-that friendly the settled HUD read within -50..+40 milli of the cap; at 500 the cap of a Log
-paid at tick 3069 ended on a reading of 3.99 (cap 3.66) and the HUD's 4.01 of 3070-3073 let a
-Fireball in with ~3.5 real elixir; at 200 every cap still ended within 0-8 ticks of its
-payment, none timed out and none held a card the real elixir paid for. rs_eval, rs_match and
-RL never pass elixir_cap: their decisions are exactly as before.
+cap) in place of elixir_milli. "Spendable at the tap" is the decision's own spendable_milli
+with the costs it held for the taps then in flight added back: it already holds the earlier
+taps' caps, and each earlier tap still in flight is linked to the new one, its cost taken off
+the new cap once that tap is paid (a refused one is never paid: decide holds its cost while
+it is pending, so it is not taken twice), so plays in a row stack. A cap ends once the HUD
+has read at most 50 milli above it on two frames in a row (the HUD has caught up), or 30
+ticks after its play was paid (a timeout: a refused tap, a misread base), or when its tap was
+never paid (60 ticks, as prune_pending). Its card read back in its slot within 20 ticks of
+the payment (a one-frame misread of the slot) makes the tap unpaid again, its cap off; a
+played slot reads empty for ~22 ticks and then shows another card. Why +50 on two frames:
+on that friendly the settled HUD read within -50..+40 milli of the cap; at +500 the cap of a
+Log paid at tick 3069 ended on a reading of 3.99 (cap 3.66) and the HUD's 4.01 of 3070-3073
+let a Fireball in with ~3.5 real elixir; one low reading inside a stale window ended a cap
+at once, and +200 still let a stale reading 0.2 above the real bar through. Replayed on that
+friendly, +50 on two frames ends all 33 caps 1-4 ticks later than +200 on one, none times
+out. rs_eval, rs_match and RL never pass elixir_cap: their decisions are exactly as before.
 
 LEGALITY (anything with bind(state, team) -> check(slot, card, x_sub, y_sub) -> bool):
   BattleLegality(battle)   check_deploy on the battle itself (rs_eval: the match battle).
@@ -185,9 +191,12 @@ CAP_ELIXIR = 9500            # milli; never sit at full elixir with a playable c
 PENDING_TICKS = 60           # a tap not landed after 3 s is assumed lost (live_play)
 FULL_ELIXIR = 10_000
 # The live elixir cap after our own plays (ElixirCap; module doc, ELIXIR CAP).
-ELIXIR_CAP_TOL = 200         # milli: a cap ends once the HUD reads within this of it
+ELIXIR_CAP_TOL = 50          # milli: a cap ends once the HUD reads at most this above it ...
+ELIXIR_CAP_FRAMES = 2        # ... on this many frames in a row (the settled HUD's noise)
 ELIXIR_CAP_TICKS = 30        # a cap ends this many ticks after its play was paid at the latest
 ELIXIR_CAP_SLACK = 20        # ticks: regen counted as if dated this much later (1 s clock)
+ELIXIR_CAP_BACK = 20         # ticks: a card read back in its slot this soon after it left was not paid
+BACK_FRAMES = 2              # ... when it reads back on this many frames in a row (one is a misread)
 LEGAL_START_TICK = 100       # the legality battle's tick: past match.DEPLOY_LOCKOUT_TICKS (90)
 
 # Wrong-lane guard (a hand-written rule, live_play.py:65-90). Live logs of 2026-10-09: 24% of
@@ -455,15 +464,21 @@ def prune_pending(pending: Iterable[Pending], hand: Sequence[int], now: int,
     return keep
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class CapPlay:
-    """One of our taps as ElixirCap follows it: the Pending, the decision's spendable elixir
-    when it was tapped (base_milli) and the tick its card was first seen gone (None: not
-    paid yet)."""
+    """One of our taps as ElixirCap follows it: the Pending, the elixir its decision had before
+    the plays then in flight (base_milli: the decision's spendable plus the costs it held for
+    `linked`), the tick its card was first seen gone (None: not paid yet), the ledger's plays
+    that were in flight at the tap (linked: their costs come off the cap once they are paid)
+    and how many frames in a row the HUD has read at most tol_milli above the cap (caught) and
+    its card has read back in its slot (backs: two in a row unpay it, one is a misread)."""
 
     pending: Pending
     base_milli: int
     paid_tick: int | None = None
+    linked: tuple["CapPlay", ...] = ()
+    caught: int = 0
+    backs: int = 0
 
 
 class ElixirCap:
@@ -471,21 +486,32 @@ class ElixirCap:
     doc, ELIXIR CAP). One per battle; never used by rs_eval, rs_match or RL.
 
         cap = RD.ElixirCap()                          # law: rs_elixir.default_law()
-        cap.sent(RD.Pending(card, cost, slot, tick), d.spendable_milli)   # a tap sent
+        cap.sent(RD.Pending(card, cost, slot, tick), d.spendable_milli,     # a tap sent, with
+                 in_flight=pending_before)                                  # decide's pending
         c = cap.observe(now, hud_hand, hud_elixir_milli)   # each decision, after prune_pending
         RD.decide(..., pending=pending, elixir_cap=c)      # None: no cap on
 
+    sent: the base is the decision's spendable plus the costs it held for the plays then in
+    flight (`in_flight`, the pending list decide was given: unpaid taps, their cards still in
+    their slots) that the ledger follows; those plays are linked to the new one, and each one's
+    cost comes off its cap only once that play is paid (a refused one never is: decide holds
+    its cost while it is pending, so it is not taken twice). A play in flight the ledger does
+    not follow stays taken off the base, as before.
     observe: a tap whose card has left its slot (prune_pending's rule; its age aside) is paid
-    on that frame and its cap goes on; one never paid is forgotten at `max_age` ticks. The cap
-    of a paid tap is base_milli - 1000 x cost + regen_milli(tap tick, now), at most
-    FULL_ELIXIR; it is on from the frame its tap is paid for `timeout_ticks` ticks (then it
-    times out), and the first frame whose HUD reading is within `tol_milli` of it (or below)
-    is its last (caught up). The frame's cap is the lowest of the caps on (None: none).
-    Counts for the battle_end record: summary()."""
+    on that frame and its cap goes on; its card read back in its slot within `back_ticks` of
+    that (a one-frame misread of the slot) makes it unpaid again (its cap off; it is paid again
+    when the card leaves again); one never paid is forgotten at `max_age` ticks. The cap of a
+    paid tap is base_milli - 1000 x (cost + the linked plays paid by now) + regen_milli(tap
+    tick, now), at most FULL_ELIXIR; it is on from the frame its tap is paid for
+    `timeout_ticks` ticks (then it times out), and it ends once the HUD has read at most
+    `tol_milli` above it on `release_frames` frames in a row (caught up; the last of them is
+    its last frame; an unread elixir neither counts nor breaks the run). The frame's cap is the
+    lowest of the caps on (None: none). Counts for the battle_end record: summary()."""
 
     def __init__(self, law: Any = None, *, tol_milli: int = ELIXIR_CAP_TOL,
                  timeout_ticks: int = ELIXIR_CAP_TICKS, slack_ticks: int = ELIXIR_CAP_SLACK,
-                 max_age: int = PENDING_TICKS):
+                 max_age: int = PENDING_TICKS, release_frames: int = ELIXIR_CAP_FRAMES,
+                 back_ticks: int = ELIXIR_CAP_BACK):
         if law is None:
             import rs_elixir                       # pure Python; only the live runner gets here
             law = rs_elixir.default_law()
@@ -494,10 +520,12 @@ class ElixirCap:
         self.timeout_ticks = int(timeout_ticks)
         self.slack_ticks = int(slack_ticks)
         self.max_age = int(max_age)
+        self.release_frames = max(1, int(release_frames))
+        self.back_ticks = int(back_ticks)
         self.plays: list[CapPlay] = []
         self.value: int | None = None              # the last frame's cap (None: none on)
         self.counts = {"plays": 0, "paid": 0, "caught_up": 0, "timed_out": 0, "lost": 0,
-                       "frames_on": 0}
+                       "frames_on": 0, "unpaid": 0}
 
     def regen_milli(self, tick_from: int, tick_to: int) -> int:
         """The most elixir (milli, rounded up) the bar can gain from tick_from to tick_to: the
@@ -512,15 +540,27 @@ class ElixirCap:
         """The bound one paid play puts on our elixir at `now`."""
         p = play.pending
         tick = int(p.tick) if p.tick is not None else int(play.paid_tick or now)
-        return min(FULL_ELIXIR, int(play.base_milli) - 1000 * max(0, int(p.cost))
+        held = sum(max(0, int(c.pending.cost)) for c in play.linked if c.paid_tick is not None)
+        return min(FULL_ELIXIR, int(play.base_milli) - 1000 * (max(0, int(p.cost)) + held)
                    + self.regen_milli(tick, now))
 
-    def sent(self, pending: Pending, spendable_milli: int) -> None:
+    def sent(self, pending: Pending, spendable_milli: int, *,
+             in_flight: Iterable[Pending] = ()) -> None:
         """A tap sent (a play; a press is not followed): `spendable_milli` is the decision's,
-        the elixir it had for this play."""
+        the elixir it had for this play, and `in_flight` the pending list it was decided with
+        (its own costs taken off spendable_milli); see the class doc."""
         if getattr(pending, "button", -1) >= 0 or pending.card < 0:
             return
-        self.plays.append(CapPlay(pending, int(spendable_milli)))
+        links: list[CapPlay] = []
+        held = 0
+        for q in in_flight:
+            if getattr(q, "button", -1) >= 0 or q.card < 0:
+                continue
+            c = next((c for c in self.plays if c.pending == q), None)
+            if c is not None and c not in links:
+                links.append(c)
+                held += 1000 * max(0, int(q.cost))
+        self.plays.append(CapPlay(pending, int(spendable_milli) + held, linked=tuple(links)))
         self.counts["plays"] += 1
 
     def observe(self, now: int, hand: Sequence[int], elixir_milli: int | None) -> int | None:
@@ -536,17 +576,31 @@ class ElixirCap:
                     continue
                 if not prune_pending([p], hand, now, max_age=10 ** 9):
                     c.paid_tick = now                 # its card left the slot: paid
+                    c.caught = 0
                     self.counts["paid"] += 1
             elif now - int(c.paid_tick) >= self.timeout_ticks:
                 self.counts["timed_out"] += 1
                 continue
+            elif (now - int(c.paid_tick) <= self.back_ticks
+                  and prune_pending([p], hand, now, max_age=10 ** 9)):
+                c.backs += 1                          # its card reads back in its slot ...
+                if c.backs >= BACK_FRAMES:            # ... on two frames in a row: it was a misread
+                    c.paid_tick = None
+                    c.caught = c.backs = 0
+                    self.counts["unpaid"] += 1
+            else:
+                c.backs = 0                           # one read-back frame keeps the cap on
             keep.append(c)
         on = [(c, self.cap_of(c, now)) for c in keep if c.paid_tick is not None]
         self.value = min(v for _, v in on) if on else None
         if on:
             self.counts["frames_on"] += 1
-        if elixir_milli is not None:                  # caught up: this frame is its last
-            done = {id(c) for c, v in on if int(elixir_milli) <= v + self.tol_milli}
+        if elixir_milli is not None:                  # caught up on release_frames in a row
+            done = set()
+            for c, v in on:
+                c.caught = c.caught + 1 if int(elixir_milli) <= v + self.tol_milli else 0
+                if c.caught >= self.release_frames:
+                    done.add(id(c))
             self.counts["caught_up"] += len(done)
             keep = [c for c in keep if id(c) not in done]
         self.plays = keep
@@ -556,8 +610,9 @@ class ElixirCap:
         return dict(self.counts)
 
     def config(self) -> dict[str, int]:
-        return {"tol_milli": self.tol_milli, "timeout_ticks": self.timeout_ticks,
-                "slack_ticks": self.slack_ticks, "max_age": self.max_age}
+        return {"tol_milli": self.tol_milli, "release_frames": self.release_frames,
+                "timeout_ticks": self.timeout_ticks, "slack_ticks": self.slack_ticks,
+                "max_age": self.max_age, "back_ticks": self.back_ticks}
 
 
 def _spendable(p: Mapping[str, Any], state: Mapping[str, Any], team: int,

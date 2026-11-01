@@ -31,7 +31,9 @@ copies it into its meta; a meta without the key is legacy (of_meta).
                                 "opp_elixir" (the opponent's bar / 10000 as the acting player
                                 counts it from the plays it has seen, tools/rs_elixir.py) and
                                 "opp_exact" (1 while that count is known to be exact). Own
-                                elixir stays the raw bar, as the client shows it (tokens-19).
+                                elixir stays the raw engine bar (tokens-19), unpaid while an
+                                own play is in flight (the live client's HUD pays it from the
+                                tap: the live runner adds those costs back for the row)
                     hand_feats  per hand slot: the card's form in the deck / 2, whether its
                                 next play is evolved, and its evolution charge (players[t]
                                 ["evo"]: plays since its last evolved play / plays it needs)

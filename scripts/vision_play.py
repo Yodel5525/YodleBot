@@ -47,10 +47,26 @@ card leaves its slot 2-4 ticks after a tap, but the HUD's elixir reading can lag
 and reads high while the counter animates (first --tap friendly, 2026-11-01: 3.00 for 5 ticks
 after a Cannon paid from 4.26; the Log tapped on it was refused). Once a tap of ours is paid
 (its card left the slot), the decision spends at most min(HUD, cap), cap = the decision's
-spendable at the tap - the cost + the most regen possible since (1x / 2x / 3x by the tick),
-until the HUD reads within 0.2 elixir of the cap or 30 ticks pass; taps in a row stack. The
-frame and decision records carry "elixir_cap" when it bites (the cap below the HUD reading),
-battle_end its counts. Only real taps open a cap: a dry run decides exactly as before.
+spendable at the tap (with the costs it held for the taps then in flight added back, each
+taken off once that tap is paid) - the cost + the most regen possible since (1x / 2x / 3x by
+the tick), until the HUD reads at most 0.05 elixir above the cap on two frames in a row or 30
+ticks pass; taps in a row stack; the card read back in its slot within 20 ticks of leaving it
+was a misread (the tap is unpaid again). The frame and decision records carry "elixir_cap"
+when it bites (the cap below the HUD reading), battle_end its counts. Only real taps open a
+cap: a dry run decides exactly as before.
+
+OUR TAPS IN FLIGHT, V2 ROWS (tools/public_state.LiveObserver, OwnTaps; the public_state module
+doc, V2 ROWS). The decision-time rows list a play in own_pending from its tap until it runs
+(24 +- 3 ticks), with the card in hand, the elixir unpaid and no unit; live the play runs a
+median 25 ticks after the decided frame, but the client shows a placement preview from the tap
++ 3 that the detector boxes as our unit, and the HUD pays the bar from +3..10. Each battle frame
+the observer reads the HUD hand and next card and the tracks (watch): a tap stays in
+own_pending until it is seen to run (its next-card change, its slot refilled, its real unit
+dropping in, each 20+ ticks after the tap), tap_refused, or the --obs-delay + 3 ticks; the row
+(make_state_fn, row_state) leaves the preview's tracks out until the play runs and dates their
+deploy timer from the run, and shows its own elixir as min(HUD, cap) + the costs the HUD has
+paid for taps not run yet (frame and decision records: "row_elixir"; battle_end: "own_flight").
+The decision itself still spends the HUD's elixir (and the cap). No tap: the rows are as before.
 
 THE TAP GATE (scripts/vision/tap_gate.py and mode.py, skin audit P0-4 and P1-12). Every battle starts
 with no AUTO tap allowed until its gate opens: all four princess labels calibrated (tower skins),
@@ -115,10 +131,10 @@ THE LOOP, per new frame (the newest one; frames that arrived meanwhile are skipp
      decide still masks both) -> tools/rs_rows.obs_row with the checkpoint's
      row schema, picked by its meta "schema" (row_plan): rs_rows/legacy (--live-compat rows for
      live_big_hog) exactly as before; rs_rows/v2 (E14) also gets a public_state.LiveObserver
-     per battle, fed every frame's opponent plays and our landings and each tap sent, whose
-     inputs (the opponent's elixir counted from the plays seen, our taps still in flight
-     until they land, at the checkpoint's --obs-delay) ride in the state to obs_row, and the
-     spell tracks as spells in flight
+     per battle, fed every frame's opponent plays, HUD hand / next card and tracks and each
+     tap sent, whose inputs (the opponent's elixir counted from the plays seen, our taps still
+     in flight until they run, at the checkpoint's --obs-delay) ride in the state to obs_row,
+     and the spell tracks as spells in flight (OUR TAPS IN FLIGHT above)
   -> tools/rs_decide.decide with DecideConfig.live() (pending taps, fallback, cap rule, lane guard;
      a v2 model's ability buttons stay masked: our deck has none and the HUD reads none), or
      with --decide legacy the rule rs_eval measured (dry runs only). Live, legacy is not quite
@@ -158,6 +174,7 @@ if __name__ == "__main__" and not __package__:
         sys.path.insert(0, _root)
 
 import argparse  # noqa: E402
+import dataclasses  # noqa: E402
 import re  # noqa: E402
 import subprocess  # noqa: E402
 import time  # noqa: E402
@@ -911,6 +928,18 @@ class LivePerception:
     def track_cards(self, tracks: Iterable[Any]) -> dict[int, int]:
         return self.deriver.track_cards(tracks)
 
+    def tap_info(self, card: int) -> dict[str, Any]:
+        """What the v2 observer needs to know of a tap's card (public_state.OwnTaps.sent): the
+        track labels a play of it shows, whether it is a spell, and the units one play deploys
+        (the deriver's EventTables); {} without them."""
+        tables = getattr(self.deriver, "tables", None)
+        if tables is None:
+            return {}
+        card = int(card)
+        units = tables.units_per_play(card)
+        return {"labels": tuple(sorted(tables.classes_of(card))),
+                "spell": tables.kind_of(card) == EV.KIND_SPELL, "units": int(units or 1)}
+
     def _track_tick(self, tick: int | None, t: float) -> int | None:
         if tick is not None:
             self._anchor = (int(tick), float(t))
@@ -1165,6 +1194,9 @@ def row_plan(meta: Mapping[str, Any] | None) -> RowPlan:
 #: The own player's key for the hand the ROW shows (LivePerception.row_hand); decide() reads
 #: "hand" and never this one.
 ROW_HAND_KEY = "row_hand"
+#: ... and for the elixir the ROW shows (v2 rows with a tap in flight: LiveObserver.row_elixir);
+#: decide() reads "elixir_milli" (the HUD's) and never this one.
+ROW_ELIXIR_KEY = "row_elixir_milli"
 
 
 def make_state_fn(builder: Any, perception: Any, plan: RowPlan
@@ -1172,34 +1204,60 @@ def make_state_fn(builder: Any, perception: Any, plan: RowPlan
     """Decider's state_fn: builder.state (public_state.PublicStateBuilder) of the frame with
     the opponent cards seen, the creating card of each track and the elixir of our taps in
     flight; for v2 rows also the battle's observer (ctx.observer). With a perception that has
-    row_hand, the own player also gets ROW_HAND_KEY: the hand the row shows (row_state)."""
+    row_hand, the own player also gets ROW_HAND_KEY: the hand the row shows (row_state).
+    v2 rows with our taps in flight (public_state module doc, V2 ROWS): the board is the
+    observer's (LiveObserver.board: a tap's placement preview left out until the play runs,
+    then dated from the run), and the own player gets ROW_ELIXIR_KEY, the row's own bar
+    (LiveObserver.row_elixir: min(HUD, ctx.elixir_cap's value) + the costs the HUD has paid
+    for plays not run yet), when it differs from the HUD's. Without a tap: as before."""
     row_hand = getattr(perception, "row_hand", None)
 
     def state_fn(vf: VisionFrame, ctx: BattleContext) -> dict:
-        kw = {"observer": ctx.observer} if plan.v2 else {}
-        state = builder.state(vf, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
+        obs = ctx.observer if plan.v2 else None
+        kw = {"observer": obs} if plan.v2 else {}
+        view = vf
+        board = getattr(obs, "board", None)
+        if callable(board) and vf.tick is not None:
+            tracks = board(vf.tracks, int(vf.tick))
+            if tracks is not vf.tracks:
+                view = dataclasses.replace(vf, tracks=list(tracks))
+        state = builder.state(view, opp_deck=ctx.opp_cards, track_cards=perception.track_cards(vf.tracks),
                               pending_cost=sum(max(0, int(p.cost)) for p in ctx.pending), **kw)
         if callable(row_hand):
             me = state["players"][OWN_TEAM]
             me[ROW_HAND_KEY] = row_hand(me.get("hand") or ())
+        row_elixir = getattr(obs, "row_elixir", None)
+        if callable(row_elixir) and vf.tick is not None:
+            v = row_elixir(vf.hud.elixir_milli, getattr(ctx.elixir_cap, "value", None), int(vf.tick))
+            if v is not None:
+                state["players"][OWN_TEAM][ROW_ELIXIR_KEY] = int(v)
         return state
     return state_fn
 
 
 def row_state(state: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The state obs_row reads: `state` itself, or, when the own player has ROW_HAND_KEY, a
-    shallow copy whose own hand is that one (the players list and the own player are copied;
-    nothing else is). Engine hands are never negative, so the rows of training and of the
-    evaluation never held hand token 1; live, an empty or unread slot would."""
+    """The state obs_row reads: `state` itself, or, when the own player has ROW_HAND_KEY or
+    ROW_ELIXIR_KEY, a shallow copy whose own hand / elixir_milli are those (the players list
+    and the own player are copied; nothing else is). Engine hands are never negative, so the
+    rows of training and of the evaluation never held hand token 1; live, an empty or unread
+    slot would. The rows' own bar is the engine's, unpaid while a play is in flight; the HUD's
+    is paid from the tap."""
     players = state.get("players") if isinstance(state, Mapping) else None
     if not players or len(players) <= OWN_TEAM:
         return state
     me = players[OWN_TEAM]
-    hand = me.get(ROW_HAND_KEY) if isinstance(me, Mapping) else None
-    if hand is None:
+    if not isinstance(me, Mapping):
+        return state
+    hand, elixir = me.get(ROW_HAND_KEY), me.get(ROW_ELIXIR_KEY)
+    if hand is None and elixir is None:
         return state
     players = list(players)
-    players[OWN_TEAM] = {**me, "hand": [int(c) for c in hand]}
+    mine = dict(me)
+    if hand is not None:
+        mine["hand"] = [int(c) for c in hand]
+    if elixir is not None:
+        mine["elixir_milli"] = int(elixir)
+    players[OWN_TEAM] = mine
     return {**state, "players": players}
 
 
@@ -1501,6 +1559,9 @@ class VisionPlay:
             ctx.own_plays += sum(1 for x in vf.events.own_landings if x.land_tick is not None)
         if ctx.observer is not None:                   # v2 rows: the count and our taps in flight
             ctx.observer.events(vf.events)
+            watch = getattr(ctx.observer, "watch", None)
+            if callable(watch) and vf.screen == SCREEN_BATTLE and vf.tick is not None:
+                watch(int(vf.tick), list(vf.hud.hand), vf.hud.next, vf.tracks)
         if vf.tick is not None or vf.events.own_landings:
             self.control.attribute(vf.events.own_landings, tick=vf.tick)
         if self.refusals is not None and vf.screen == SCREEN_BATTLE and vf.tick is not None:
@@ -1647,8 +1708,15 @@ class VisionPlay:
                 continue
             self._log(kind, battle=ctx.number, name=self.name(rec.get("card")), **rec)
             if kind == "tap_refused" and not rec.get("dry"):
+                refused = getattr(ctx.observer, "refused", None)
+                if callable(refused):                  # v2 rows: no longer in own_pending
+                    refused(int(rec["card"]), int(rec["tap_tick"]), int(rec.get("slot", -1)))
                 self.out(self._refused_line(rec))
             elif kind == "tap_refusal_retracted" and not rec.get("dry"):
+                retracted = getattr(ctx.observer, "retracted", None)
+                if callable(retracted):                # v2 rows: it ran after all
+                    retracted(int(rec["card"]), int(rec["tap_tick"]), int(rec.get("slot", -1)),
+                              rec.get("tick"))
                 self.out(f"tap of {self.name(rec.get('card'))} at tick {rec['tap_tick']} landed after all "
                          f"({rec['evidence']}, {rec['lag']} ticks): refusal withdrawn")
 
@@ -1787,8 +1855,8 @@ class VisionPlay:
             ctx.taps += 1
             ctx.pending.append(RD.Pending(d.card, d.cost, d.slot, int(vf.tick)))
             if ctx.elixir_cap is not None:             # its cap goes on once it is paid
-                try:
-                    ctx.elixir_cap.sent(ctx.pending[-1], d.spendable_milli)
+                try:                                   # (the plays it was decided with in flight)
+                    ctx.elixir_cap.sent(ctx.pending[-1], d.spendable_milli, in_flight=ctx.pending[:-1])
                 except Exception as exc:
                     self._error("elixir_cap_error", exc, tick=vf.tick)
             self._watch_tap(d, vf, virtual=False)
@@ -1801,9 +1869,13 @@ class VisionPlay:
                                              t=self.clock())
             except Exception as exc:
                 self._error("note_tap_error", exc, tick=vf.tick)
-            if ctx.observer is not None:               # v2 rows: in own_pending until it lands
+            if ctx.observer is not None:               # v2 rows: in own_pending until it runs
                 try:
-                    ctx.observer.sent(d.card, int(vf.tick), slot=d.slot, cost=d.cost)
+                    info = getattr(self.perception, "tap_info", None)
+                    flight = dict(info(d.card)) if callable(info) else {}
+                    if d.world_mt is not None:
+                        flight["aim"] = tuple(d.world_mt)
+                    ctx.observer.sent(d.card, int(vf.tick), slot=d.slot, cost=d.cost, **flight)
                 except Exception as exc:
                     self._error("observer_error", exc, tick=vf.tick)
         elixir = state["players"][OWN_TEAM].get("elixir_milli")
@@ -1816,6 +1888,9 @@ class VisionPlay:
         if seen is not None:                           # v2 rows: what the row was given
             extra["opp_elixir"] = list(seen.get("opp_elixir") or ())
             extra["own_pending"] = [list(p) for p in seen.get("own_pending") or ()]
+            row_elixir = state["players"][OWN_TEAM].get(ROW_ELIXIR_KEY)
+            if row_elixir is not None:                 # the row's own bar (a tap in flight)
+                extra["row_elixir"] = int(row_elixir)
         if why:
             extra["why"] = why
         rec = self.control.note_decision(s, tapped=tapped, **extra)
@@ -1826,6 +1901,8 @@ class VisionPlay:
         out = {"decision": d.to_record(), "action": rec.get("action"), "px": px}
         if bites:
             out["elixir_cap"] = int(cap)
+        if "row_elixir" in extra:                      # v2 rows: the row's own bar (a tap in flight)
+            out["row_elixir"] = extra["row_elixir"]
         if self._would_due(d, int(vf.tick)):
             w = self._would_play(vf, ms)
             if w is not None:
@@ -1941,6 +2018,10 @@ class VisionPlay:
         cap_summary = getattr(getattr(ctx, "elixir_cap", None), "summary", None)
         cap_info = cap_summary() if callable(cap_summary) else {}
         cap_info = {"elixir_cap": cap_info} if cap_info.get("plays") else {}   # taps were sent
+        own_summary = getattr(getattr(getattr(ctx, "observer", None), "own", None), "summary", None)
+        own_info = own_summary() if callable(own_summary) else {}
+        if own_info.get("sent"):                       # v2 rows: how our taps in flight ended
+            cap_info["own_flight"] = own_info
         self.results.open(n, self.battle.ended_reason, float(vf.t_capture), hud.crowns,
                           last_tick=self.battle.last_tick, towers=towers, could_fall=self._could_fall(hud),
                           **stats)
@@ -2276,11 +2357,11 @@ def add_opp_guard_args(ap: argparse.ArgumentParser) -> None:
 
 
 def event_config(args: argparse.Namespace) -> "EV.EventConfig | None":
-    """The deriver's EventConfig: EventConfig.live() (events.LIVE_GUARDS on), with rule 6 on and
-    each UNKNOWN play charged --unknown-cost (default events.UNKNOWN_PLAY_COST) under
-    --unknown-plays. --legacy-opp-plays: the guards off, so None (the defaults, the call as
-    before the guards) without --unknown-plays. ValueError for --unknown-cost without
-    --unknown-plays or below 0. tools/vision_replay.py uses it too."""
+    """The deriver's EventConfig: EventConfig.live() (events.LIVE_GUARDS and LIVE_OWN on), with
+    rule 6 on and each UNKNOWN play charged --unknown-cost (default events.UNKNOWN_PLAY_COST)
+    under --unknown-plays. --legacy-opp-plays: the opponent guards off, the defaults but for our
+    own side's LIVE_OWN (rule 4b, the drop-in of our own taps: not an opponent rule). ValueError
+    for --unknown-cost without --unknown-plays or below 0. tools/vision_replay.py uses it too."""
     cost = getattr(args, "unknown_cost", None)
     over: dict[str, Any] = {}
     if args.unknown_plays:
@@ -2290,7 +2371,7 @@ def event_config(args: argparse.Namespace) -> "EV.EventConfig | None":
     elif cost is not None:
         raise ValueError("--unknown-cost applies to --unknown-plays")
     if getattr(args, "legacy_opp_plays", False):
-        return EV.EventConfig(**over) if over else None
+        return EV.EventConfig(**{**EV.LIVE_OWN, **over})
     return EV.EventConfig.live(**over)
 
 

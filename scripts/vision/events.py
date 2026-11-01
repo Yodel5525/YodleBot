@@ -67,6 +67,14 @@ team is decided (or after ``team_wait_ticks``, by a fallback). In order:
    first sighting and (units) landed within ``landing_radius_mt`` of the aim;
    failing that, any pending tap aimed within ``aim_near_mt`` (perception
    misread the card). That is a landing; taps never seen are reported as misses.
+4b. Own drop-in (EventConfig.own_drop_in_ticks, OFF by default; LIVE_OWN turns it on live).
+   A further own track first seen up to that long after one of our taps that already
+   landed, of a class its card shows within ``landing_radius_mt`` of its aim (a spell:
+   anywhere), else of any unit class within ``aim_near_mt``, joins that tap's play: no
+   OwnLanding, no unmatched play. The client shows a placement preview where we tapped
+   (boxed from +2..+4: the landing) and drops the real unit in when the play runs, ~25
+   ticks after the tap and up to 3 tiles above the aim. Cost: a human's own play there in
+   that window (AUTO, the same card or within aim_near_mt) is taken for the bot's.
 5. Otherwise a NEW PLAY of the card whose deploy-time units include the class
    (a card's "primary unit"), or the spell a spell class shows. When several
    cards share the class (Skeleton: Skeletons or Skeleton Army; Goblin: Goblins
@@ -218,7 +226,7 @@ from .types import (ENEMY_TEAM, OWN_TEAM, UNKNOWN_CARD, UNKNOWN_TEAM, Events, Op
 
 __all__ = ["PLAY_WINDOW", "SPELL_WINDOW", "TOKEN_OFFSET", "KIND_UNIT", "KIND_SPELL", "WILDCARD",
            "SPAWN_CHILDREN", "KATACR_SPELL_CLASSES", "SPELL_LOOKALIKES", "UNKNOWN_CARD", "UNKNOWN_PLAY_COST",
-           "LIVE_GUARDS",
+           "LIVE_GUARDS", "LIVE_OWN",
            "DEPLOY_ANYWHERE_CLASSES", "EventTables", "EventConfig", "EventDeriver", "OwnTap",
            "LandingStats", "OppStats", "StateTracks", "load_spawn_children", "unit_class_map",
            "cardless_classes", "record_plays", "guard_settings", "strip_form", "now"]
@@ -248,6 +256,12 @@ DEPLOY_ANYWHERE_CLASSES = frozenset({"Miner", "GoblinDrill", "GoblinDrillDig"})
 #: owner's 2026-10-29 friendly, 103 opponent plays of 27 cards -> 46 of 18 (375 elixir -> 155).
 LIVE_GUARDS: Mapping[str, Any] = {"min_play_age_ticks": 10, "reid_any_label": True,
                                   "deploy_zone_mt": 1000.0}
+#: Our own side's live rule (EventConfig.live(); scripts/vision_play.event_config keeps it under
+#: --legacy-opp-plays too): rule 4b, the drop-in. On the owner's first --tap friendly
+#: (2026-11-01) the client's placement preview of our tap was boxed from +2..+4 and landed the
+#: tap; the real unit dropping in at the run (+23..+33, up to 3 tiles above the aim) became a
+#: second own play no tap explained, a false human play on 16 of 33 taps.
+LIVE_OWN: Mapping[str, Any] = {"own_drop_in_ticks": 45}
 #: The princess towers whose fall opens a pocket (scripts/vision/types.TOWER_KEYS).
 _POCKET_TOWERS = ("own_left", "own_right", "enemy_left", "enemy_right")
 
@@ -766,6 +780,8 @@ class EventConfig:
     tap_max_lag_ticks: int = 60              # control.MAX_LAG_TICKS (live_play.PENDING_TICKS)
     landing_radius_mt: float | None = 4000.0  # a unit landing this far from the aim is not that tap's
     aim_near_mt: float | None = 2000.0       # any tap aimed this close explains an own unit
+    own_drop_in_ticks: int = 0               # rule 4b: a further own unit up to this long after a landed
+    #                                          tap joins its play (its drop-in); 0: off (LIVE_OWN: 45)
     forget_ticks: int = 600                  # forget tracks and plays unseen this long
     prime: bool = True                       # tracks present at the first update are not plays
     unknown_plays: bool = False              # rule 6: an unexplained enemy track is an UNKNOWN play
@@ -787,14 +803,15 @@ class EventConfig:
 
     @classmethod
     def live(cls, **over: Any) -> "EventConfig":
-        """The config the live runners use: LIVE_GUARDS on top of the defaults, then `over`."""
-        return cls(**{**LIVE_GUARDS, **over})
+        """The config the live runners use: LIVE_GUARDS and LIVE_OWN on top of the defaults,
+        then `over`."""
+        return cls(**{**LIVE_GUARDS, **LIVE_OWN, **over})
 
     def __post_init__(self):
         for name in ("play_window_ticks", "spell_window_ticks", "just_dead_ticks", "reid_ticks",
                      "team_wait_ticks", "ambiguity_wait_ticks", "unit_sight_lag_ticks", "spell_sight_lag_ticks",
                      "tap_max_lag_ticks", "forget_ticks", "min_play_age_ticks", "young_drop_ticks",
-                     "own_recent_ticks", "late_reach_ticks"):
+                     "own_recent_ticks", "late_reach_ticks", "own_drop_in_ticks"):
             if getattr(self, name) < 0:
                 raise ValueError(f"EventConfig.{name} must be >= 0")
         if not -1.0 <= self.reid_motion_cos <= 1.0:
@@ -877,6 +894,7 @@ class LandingStats:
     missed: int = 0
     unmatched: int = 0
     late: int = 0
+    drop_ins: int = 0
     lag_ticks: list[int] = field(default_factory=list)
     lag_s: list[float] = field(default_factory=list)
     offsets_mt: list[tuple[float, float]] = field(default_factory=list)
@@ -899,7 +917,8 @@ class LandingStats:
         dy = [o[1] for o in self.offsets_mt]
         dist = [math.hypot(a, b) for a, b in self.offsets_mt]
         return {"taps": self.taps, "landed": self.landed, "missed": self.missed,
-                "unmatched": self.unmatched, "late": self.late, "miss_rate": self.miss_rate,
+                "unmatched": self.unmatched, "late": self.late, "drop_ins": self.drop_ins,
+                "miss_rate": self.miss_rate,
                 "lag_ticks": _describe(self.lag_ticks), "lag_s": _describe(self.lag_s),
                 "offset_mt": {"dx": _describe(dx), "dy": _describe(dy), "dist": _describe(dist)}}
 
@@ -970,8 +989,8 @@ class _Rec:
     seen_team: int = UNKNOWN_TEAM     # the tracker's latest team
     team: int = UNKNOWN_TEAM          # the team it was classified under
     state: str = PENDING
-    how: str = ""                     # play | merged | child | reacquired | landing | unknown |
-    #                                   unknown_play | ignored | primed | dropped | fragment | late
+    how: str = ""                     # play | merged | child | reacquired | landing | drop_in |
+    #                                   unknown | unknown_play | ignored | primed | dropped | fragment | late
     card: int | None = None
     play: _Play | None = None
     succeeded: bool = False           # a newer track was taken as this one re-acquired
@@ -1158,6 +1177,7 @@ class EventDeriver:
     def how_of(self, uid: int) -> str | None:
         """Which rule explained track `uid` (module doc, THE RULES): "reacquired" (1), "merged"
         (2, or a further unit of an UNKNOWN play), "child" (3), "landing" (4, one of our taps),
+        "drop_in" (4b, a further unit of a landed tap of ours),
         "play" (5: a new play's first track, ours without a tap too), "unknown_play" (6: the
         first track of an UNKNOWN play), "unknown" (no rule; an enemy one is counted in
         OppStats.unknown), "ignored" (EventTables.ignore), "primed" (on the board at the first
@@ -1277,6 +1297,13 @@ class EventDeriver:
             if tap is not None:
                 self._taps.remove(tap)
                 self._land(rec, tap, spell)
+                return
+            play = self._drop_in(rec, spell)
+            if play is not None:                         # rule 4b: the same tap's unit again
+                card = play.card if rec.cls in self.tables.classes_of(play.card) else \
+                    self.tables.card_guess(rec.cls, self.own_deck)
+                self._attach(rec, play, card, "drop_in")
+                self.landing_stats.drop_ins += 1
                 return
         elif not spell:
             mine = self._own_recent(rec)
@@ -1655,6 +1682,40 @@ class EventDeriver:
             if d <= best_d:
                 best, best_d = tp, d
         return best
+
+    def _drop_in(self, rec: _Rec, spell: bool) -> _Play | None:
+        """Rule 4b (own_drop_in_ticks): the play of one of our taps that already landed that our
+        new track `rec` is a further unit of: first seen 1..own_drop_in_ticks after that tap, of a
+        class the tap's card shows within landing_radius_mt of its aim (a spell: anywhere), else
+        of any unit class within aim_near_mt (perception misread the card); the oldest such tap,
+        else the nearest. The client shows a placement preview from the tap (the tap's landing)
+        and drops the real unit in when the play runs, ~25 ticks later and up to 3 tiles above
+        the aim: without this rule that is a second own play no tap explains (a human's)."""
+        cfg = self.config
+        horizon = cfg.own_drop_in_ticks
+        if not horizon:
+            return None
+        near, near_d = None, cfg.aim_near_mt
+        for play in self._plays:                                  # oldest first
+            land = play.record
+            if (play.team != rec.team or not isinstance(land, OwnLanding) or land.slot < 0
+                    or play.card is None):
+                continue
+            if not 0 < rec.first_tick - land.tap_tick <= horizon:
+                continue
+            if land.aim_x_mt is not None and land.aim_y_mt is not None:
+                ax, ay = land.aim_x_mt, land.aim_y_mt
+            else:
+                ax, ay = play.x, play.y
+            d = _dist(ax, ay, rec.bx, rec.by)
+            if rec.cls in self.tables.classes_of(play.card):
+                if (play.kind == KIND_SPELL) != spell:
+                    continue
+                if spell or cfg.landing_radius_mt is None or d <= cfg.landing_radius_mt:
+                    return play
+            elif (not spell and play.kind != KIND_SPELL and near_d is not None and d <= near_d):
+                near, near_d = play, d
+        return near
 
     def _land(self, rec: _Rec, tap: OwnTap, spell: bool) -> None:
         kind = KIND_SPELL if spell else KIND_UNIT

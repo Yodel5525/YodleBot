@@ -2,8 +2,8 @@
 
 No device, detector, engine or emulator. The probe reads a vision_play-style session written with
 the real VisionRecorder: two battles at 10 frames a second (2 ticks a frame), 8 taps whose units
-are first seen 20, 26, 22, 40, 24 and 25 ticks later (D = the median 24.5, rounded half up: 25),
-a spell seen 10 ticks after its tap, a tap never seen, and decoys (an enemy unit of the tapped
+are first seen 20, 26, 22, 40, 24 and 25 ticks later (each the play running: D = the median 24.5,
+rounded half up: 25), a spell seen 10 ticks after its tap, a tap never seen, and decoys (an enemy unit of the tapped
 card, an own one far from the aim, tracks outside a battle). The replay runs the real tracker
 and event deriver behind a scripted HUD reader and detector on a recorded npy session, with a
 tap replayed from the recording and a labels folder, then the probe reads the replay's output.
@@ -163,12 +163,21 @@ def test_latency_probe_finds_d_and_the_pipeline_latency(tmp_path):
     assert sorted(log.battles) == [1, 2] and len(log.taps) == 8 and not log.unassigned
     rep = LP.analyse([log], CLASSES)
     d = rep["D"]
-    assert (d["ticks"], d["source"], d["n"], d["enough"]) == (25, "tracks", 6, True)
+    # D: the decided frame -> the play running; this session's HUD reads no hand or next card, so
+    # each run is the real unit's sighting, 20+ ticks on (the spell's at 10 is not one)
+    assert (d["ticks"], d["source"], d["n"], d["enough"]) == (25, "run", 6, True)
     assert (d["median"], d["p10"], d["p90"], d["legacy_lead_ticks"]) == (24.5, 20.0, 40.0, 26)
 
     plays = {(p["battle"], p["tick"]): p for p in rep["plays"]}
     assert [plays[(1, k)]["lag_ticks"] for k in (110, 120, 130, 140, 150, 160, 190)] == [20, 26, 22, 40, 24, 10, None]
     assert plays[(2, 300)]["lag_ticks"] == 25
+    assert [plays[(1, k)]["run_lag_ticks"] for k in (110, 120, 130, 140, 150, 160, 190)] == [20, 26, 22, 40, 24, None, None]
+    assert [plays[(1, k)]["unit_lag_ticks"] for k in (110, 120, 130, 140, 150)] == [20, 26, 22, 40, 24]
+    assert all(p["next_lag_ticks"] is None and p["refill_lag_ticks"] is None and p["accepted"]
+               for p in rep["plays"])
+    # the spell seen at its aim 10 ticks on is reported as a preview sighting, not a run
+    assert (plays[(1, 160)]["ghost_lag_ticks"], rep["run_ticks"]["ghost_taps"]) == (10, 1)
+    assert rep["run_ticks"]["not_accepted"] == 0
     assert [plays[(1, k)]["uid"] for k in (110, 120, 150)] == [1, 2, 5]      # not the enemy's or the far one
     assert plays[(1, 120)]["label"] == "Musketeer" and plays[(1, 160)]["kind"] == "spell"
     assert [plays[(1, k)]["deriver"] for k in (110, 150, 160)] == ["landed", "missed", None]
@@ -483,7 +492,9 @@ def test_vision_replay_reruns_perception_and_feeds_the_latency_probe(tmp_path):
     assert (tap[0]["data"]["card"], tap[0]["data"]["tick"], tap[0]["data"]["battle"], tap[0]["data"]["replayed"]) == (
         2, 130, 1, True)
     rep = LP.analyse([LP.load_session(out)], LP.CardClasses.load())
-    assert (rep["D"]["ticks"], rep["D"]["n"], rep["D"]["enough"], rep["D"]["source"]) == (10, 1, False, "tracks")
+    # its one unit is first seen 10 ticks after the tap: a first sighting, not a run (D needs 20+)
+    assert (rep["D"]["ticks"], rep["D"]["n"], rep["D"]["enough"], rep["D"]["source"]) == (None, 0, False, None)
+    assert rep["lag_ticks"]["tracks"]["median"] == 10 and rep["plays"][0]["lag_ticks"] == 10
     assert rep["counts"]["deriver_landed"] == 1
     assert rep["wall_ms"]["tap_to_sight"]["median"] == pytest.approx(440.0, abs=1e-6)   # frame 20 at 4.0 s
 

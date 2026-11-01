@@ -94,7 +94,8 @@ THE CLOCK: tick, tick_ms, overtime, and elixir_rate by tools/rs_elixir.py's law 
 tick 2400, 3x from 4800); game_over on the end screen.
 
 NOT ON SCREEN: the opponent's hand, next card and elixir (empty / -1 / 0), and our own
-pending plays (pass pending_cost; RSAgent.act subtracts it from our elixir).
+pending plays (pass pending_cost; RSAgent.act subtracts it from our elixir; v2 rows: the
+observer's own_pending, below).
 
 V2 ROWS (E14 live; tools/rs_rows.py --schema v2, tools/rs_schema.py). A v2 row also reads what
 the bot knows besides the board: the opponent's elixir as it counts it, and its own plays sent
@@ -112,12 +113,31 @@ always was) and row_inputs(state) gives obs_row's v2 keywords from it:
                LATE_MARGIN_TICKS), or a play of a card the catalogue does not price. An UNKNOWN
                play (card -1, N02) is paid its OppPlay.cost (the expected cost) and makes the
                count not exact too.
-  own_pending  OwnTaps: the runner's own sent taps (card, slot, tap tick), each until the event
-               deriver reports its OwnLanding (landed, or missed after its wait) or it is
-               TAP_MAX_AGE ticks old; shown as rs_decide.pending_inputs(taps, now, delay), the
-               decision-time rows' (card + 2, ticks to land) with delay = the checkpoint's
-               --obs-delay (rs_decide.obs_delay_ticks; 0: landing-time rows show none). A
-               human's own play (MANUAL) is never a sent tap: it shows once it is on the board.
+  own_pending  OwnTaps: the runner's own sent taps (card, slot, tap tick, aim), each from the
+               tick after its tap until the play is seen to RUN (the HUD's next card changes
+               for it, its slot refills, or its real unit is first seen, each at least
+               RUN_MIN_TICKS after the tap), tap_refused, or delay + RUN_GRACE_TICKS after the
+               tap (and from ACCEPT_TICKS on only while its card is out of its slot); shown as
+               rs_decide.pending_inputs(taps, now, delay), the decision-time rows' (card + 2,
+               ticks to land, max(0, tap + delay - now)) with delay = the checkpoint's
+               --obs-delay (rs_decide.obs_delay_ticks; 0: landing-time rows show none). The
+               rows list a play while tap < t <= exec, and live the play runs a median 25
+               ticks after the decided frame; the deriver's first own sighting (from +3, the
+               client's placement preview) does not end it. A human's own play (MANUAL) is
+               never a sent tap: it shows once it is on the board.
+  the board and own elixir while a tap is in flight (LiveObserver.board / row_elixir; the
+               runner's state_fn applies them to the row only): the client's placement
+               preview of a listed tap (an own track of its card's labels first seen within
+               GHOST_RADIUS_MT of the aim before it can have run) is left out until the play
+               runs, then its deploy timer (and a spell's ticks flown) dates from the run; for
+               DUP_TICKS after the run, a tap shows at most its card's unit count of tracks (the
+               ghost track lives on as the real unit, the drop-in is the same unit again). A
+               track counts as a tap's only while it reads as that card (its labels, not the
+               enemy's): one the tracker relabels is judged again. The rows' own bar is
+               the engine's, unpaid until the play runs, while the HUD pays it from the tap +
+               3..10: the row's own elixir is min(HUD, the elixir cap) + the cost of each
+               listed tap whose card has left its slot, at most 10 elixir. The decision's
+               spendable elixir stays the HUD's (and the cap's).
   spells       the spell tracks as "spells" rows (spell_fields, as above): the detector's spell
                classes, x / y / aim at the track, ticks_flown its age.
 Hand evolution, ability buttons and the burrow bit read zero live: the bot's deck has no
@@ -147,6 +167,7 @@ rs_decide (numpy; torch and royalesim only inside its policy and legality classe
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 import sys
 from collections import Counter
@@ -175,7 +196,7 @@ __all__ = ["OWN_TEAM", "ENEMY_TEAM", "SUBTILE_PER_MILLITILE", "REQUIRED_FIELDS",
            "PublicStateBuilder", "rs_state_from_vision", "sanitize_for_rebuild", "rebuild_card",
            "card_hitpoints", "off_water", "into_arena", "team_levels", "load_classes",
            "load_spawn_table", "default_fields", "OpponentElixir", "OwnTaps", "LiveObserver",
-           "row_inputs", "DEPLOY_LOCKOUT_TICKS", "LATE_MARGIN_TICKS", "TAP_MAX_AGE"]
+           "row_inputs", "DEPLOY_LOCKOUT_TICKS", "LATE_MARGIN_TICKS", "TAP_MAX_AGE", "OwnFlight"]
 
 #: royalesim.SUBTILE_PER_MILLITILE (18 sub-tiles per millitile); pass the engine's as `sub`.
 SUBTILE_PER_MILLITILE = 18
@@ -216,9 +237,34 @@ DEPLOY_LOCKOUT_TICKS = 90
 #: second can be gone before the detector starts and the count still reads exact. That is rare
 #: right at battle start, so it is accepted. tools/rs_public_view.OppElixir keeps the same rule.
 LATE_MARGIN_TICKS = 20
-#: A sent tap not seen landing after this many ticks is assumed lost (rs_decide.PENDING_TICKS,
-#: live_play's 3 s).
+#: A sent tap is never listed past this many ticks (rs_decide.PENDING_TICKS, live_play's 3 s);
+#: with a delay D it ends at D + RUN_GRACE_TICKS (OwnTaps).
 TAP_MAX_AGE = rs_decide.PENDING_TICKS
+#: OwnTaps (module doc, V2 ROWS, own_pending), from the owner's first --tap friendly
+#: (2026-11-01): the decided frame -> the play running (the hand's next card changes, the unit
+#: is created) is a median 25 ticks (single taps 23-27; the rows' 24 +- 3); the slot refills
+#: at +27; the client's placement preview (the ghost) is boxed from +2..+4 (+15 at most for a
+#: fragment of it) and the real unit drops in at +23..+33, up to 3 tiles above the aim.
+RUN_GRACE_TICKS = 3          # a tap not seen to run is listed until delay + this
+RUN_MIN_TICKS = 20           # a run sign this soon after the tap is another play's, or the ghost
+RUN_FRAMES = 2               # a next-card change or a slot refill counts once read on 2 frames in a row
+ACCEPT_TICKS = 8             # a card still in its slot this long after its tap: not taken (yet)
+BACK_TICKS = rs_decide.ELIXIR_CAP_BACK   # a card read back in its slot this soon: a misread
+NEXT_WAIT_TICKS = 45         # a tap's next-card change may come this late (a quick pair's +40)
+DROP_IN_TICKS = 45           # the real unit first seen at most this long after the tap
+GHOST_RADIUS_MT = 2000.0     # a ghost: first seen this close to the aim (Skeletons spread 1.7)
+DROP_IN_RADIUS_MT = 4000.0   # the real unit: this close (events.EventConfig.landing_radius_mt)
+BOARD_TICKS = 200            # a tap's ghost and drop-in tracks are followed this long
+DUP_TICKS = 35               # once run, a tap's tracks past its unit count are hidden this long
+#                              (every ghost / drop-in duplicate on the friendly was gone by the
+#                              run + 31: the 3064 Hog's preview; later, an extra track is
+#                              another unit the tracker handed the track to)
+FALL_TICKS = 10              # the drop-in falls onto the aim this long (from 2-3 tiles above)
+COAST_TICKS = 2              # a track unseen longer than this ranks after the ones seen
+RELABEL_TICKS = 15           # an own track no tap claimed is looked at again this long (the
+#                              tracker relabels a ghost within ~12 ticks: a Cannon's first read
+#                              HogRider, a Hog's IceGolemite); a claimed track that stops reading
+#                              as its tap's card is looked at again this long from then
 
 #: The entity fields this module fills and the pipeline reads (obs_row, RSAgent.rebuilt).
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -855,55 +901,416 @@ class OpponentElixir:
         return int(self.counter.elixir_milli(tick)), self.exact
 
 
-class OwnTaps:
-    """Our plays sent and not on the board yet, what a v2 row's own_pending shows live.
+@dataclasses.dataclass(eq=False)
+class OwnFlight:
+    """One tap the runner sent, as OwnTaps follows it (module doc, V2 ROWS, own_pending).
 
-    sent(card, tick, slot=, cost=) logs a tap the runner sent (rs_decide.Pending); landed(
-    landings) drops the tap each scripts/vision OwnLanding of a tap (slot >= 0: landed, or
-    missed: land_tick None) names by (card, slot, tap_tick); a tap at least `max_age` ticks old
-    is dropped too (rs_decide.prune_pending's age rule). inputs(now, delay) is
-    rs_decide.pending_inputs of what is left: (card + 2, max(0, tap + delay - now)) soonest
-    first, nothing for a tap at `now` (the decision's own) or for delay 0.
+    pending   the rs_decide.Pending (card, cost, slot, tap tick)
+    aim       the world point aimed at (millitiles), None unknown
+    labels    the track labels a play of the card shows (events.EventTables.classes_of)
+    spell     the card is a spell (its unit sighting may be anywhere: a Fireball leaves the king)
+    units     the units one play deploys (Skeletons 3; 1 for a spell or an unknown card)
+    left_tick the frame its card was first seen gone from its slot (the client took it and the
+              HUD paid it), None while it reads in its slot
+    stayed    its card was read still in its slot ACCEPT_TICKS or more after the tap (and not
+              gone since): the client did not take it (a refusal on its way)
+    run_tick  when the play was seen to run (the hand's next card changed, its slot refilled,
+              or its real unit was first seen), None not yet; a play never seen to run gets
+              tap + delay when it times out
+    run_how   "next", "refill", "unit", "landing", "timeout" (accepted, never seen to run),
+              "unaccepted" (its card never left its slot), "refused" (tap_refused), "retracted"
+              (refused, then taken after all: tap_refusal_retracted); None
+    next_seen its next-card change was counted (the HUD shows those in tap order)
+    refill_since the first of the frames in a row its slot has read another card (RUN_FRAMES
+              of them: refilled, dated that first frame), None while it does not
+    ghosts    uid -> first sighting of its placement preview's tracks (first seen near the aim
+              before it can have run): left out of the row until it runs, then dated from the run
+    drops     uid -> first sighting of its real unit's tracks (the drop-in, first seen near the
+              aim at least RUN_MIN_TICKS after the tap)
+              A track keeps its place in ghosts / drops only while it reads as the card's unit
+              (one of `labels`, not the enemy's): OwnTaps.see takes it out once it does not.
     """
 
-    def __init__(self, *, max_age: int = TAP_MAX_AGE):
-        self.max_age = int(max_age)
-        self.taps: list[Any] = []
-        self.landed_count = 0
-        self.expired = 0
+    pending: rs_decide.Pending
+    aim: tuple[float, float] | None = None
+    labels: frozenset = frozenset()
+    spell: bool = False
+    units: int = 1
+    left_tick: int | None = None
+    stayed: bool = False
+    run_tick: int | None = None
+    run_how: str | None = None
+    next_seen: bool = False
+    refill_since: int | None = None
+    refill_n: int = 0
+    ghosts: dict = dataclasses.field(default_factory=dict)
+    drops: dict = dataclasses.field(default_factory=dict)
 
-    def sent(self, card: int, tick: int, *, slot: int = -1, cost: int = 0) -> None:
-        self.taps.append(rs_decide.Pending(int(card), max(0, int(cost)), int(slot), int(tick)))
+    @property
+    def tick(self) -> int:
+        return int(self.pending.tick) if self.pending.tick is not None else 0
+
+    @property
+    def ended(self) -> bool:
+        """Seen to run, timed out, refused or never accepted: no longer in own_pending."""
+        return self.run_how is not None
+
+
+class OwnTaps:
+    """Our plays sent and not run yet: what a v2 row's own_pending shows live, and the board's
+    view of them (module doc, V2 ROWS).
+
+    The decision-time rows list a play while tap < t <= exec, the play running a median 25 ticks
+    after the decided frame live (owner's first --tap friendly, 2026-11-01); the card stays in
+    hand, the elixir bar unpaid and no unit exists until it runs. Live, the client shows a
+    translucent placement preview (a ghost) from the tap + 3 that the detector boxes as our
+    unit, pays the HUD bar from the tap + 3..10 and drops the real unit in at the run. So:
+
+    sent(card, tick, slot=, cost=, aim=, labels=, spell=, units=) logs a tap the runner sent.
+    observe(now, hand, next_card) each battle frame: the HUD hand and next card. A tap's card
+      gone from its slot is "left" (paid); read back within BACK_TICKS it was a misread. The
+      play is seen to RUN when, at least RUN_MIN_TICKS after its tap, its slot refills with
+      another card, or the next card changes: the HUD cycles the plays in tap order, so a
+      change goes to the oldest accepted tap whose change was not counted yet (it may be one
+      already ended: the second play of a quick pair shows its change 30-40 ticks after its
+      tap); a change while that tap is younger than RUN_MIN_TICKS is no play of ours.
+    see(tracks, now) each frame: an own track (or an undecided one in our half) of the tap's
+      labels first seen before RUN_MIN_TICKS within GHOST_RADIUS_MT of the aim is the tap's
+      ghost; one first seen RUN_MIN_TICKS..DROP_IN_TICKS after the tap within DROP_IN_RADIUS_MT
+      (a spell: anywhere) is its real unit, and its first sighting is the run. A track no tap
+      claims is looked at again until RELABEL_TICKS after its first sighting (the tracker may
+      still fix its label). A claimed track that no longer reads as its tap's card (the tracker
+      relabelled it, or gave it to an enemy unit) loses that claim and is looked at again, as
+      first seen then and there, for RELABEL_TICKS: on a quick pair at one tile the Ice Golem's
+      preview track relabelled HogRider 10 ticks after the Hog's tap is the Hog's preview, and
+      a golem track that carries our Hog once it runs (relabelled 43 ticks after the Hog's tap)
+      is the Hog's drop-in.
+    landed(landings): an OwnLanding of a tap (slot >= 0) first seen RUN_MIN_TICKS or more after
+      it is the run too (Hog Rider shows no ghost; a Fireball is seen as it leaves the king); one
+      sooner is the ghost and changes nothing.
+    refused(card, tap_tick, slot) on tap_refused: the tap ends.
+    inputs(now) / listed(now): own_pending: each tap neither run nor refused while 0 < now -
+      tap <= delay + RUN_GRACE_TICKS (at most max_age), but not while its card was read still in
+      its slot ACCEPT_TICKS or more after the tap (not taken by the client: a refusal on its way;
+      no HUD reading is no such evidence); ticks to land max(0, tap + delay - now)
+      (rs_decide.pending_inputs). A tap not seen to run by then ends ("timeout", run dated tap +
+      delay; "unaccepted" when its card stayed in its slot).
+    paid_milli(now): 1000 x the cost of the listed taps whose card has left its slot (the HUD
+      paid them, the rows' engine bar has not).
+    board(tracks, now): the tracks the row shows: a tap's ghosts left out until it runs, then
+      dated from the run (Track.first_seen_tick: the deploy timer, a spell's ticks flown); for
+      DUP_TICKS after its run, at most `units` of its ghost and drop-in tracks: the drop-in and
+      the ghost are the same unit (the tracker often carries the real unit on the ghost's track,
+      sometimes on both), so the drop-in once it has landed (FALL_TICKS after its first
+      sighting) comes first, then the ghost (at the aim, where the unit lands), then a drop-in
+      still falling, a track the detector still sees before one the tracker coasts; after that
+      window all of them show (an extra track then is another unit). Only a track that reads as
+      the tap's card now counts (one of its labels, not the enemy's); any other shows as it is.
+      Tracks are followed for BOARD_TICKS after the tap.
+    With delay 0 (landing-time rows: no pending play is ever shown) nothing is listed and the
+    board is the tracks as they are. No tap, no change: a dry run's rows are as before.
+    """
+
+    def __init__(self, *, delay: int = 0, max_age: int = TAP_MAX_AGE):
+        self.delay = max(0, int(delay or 0))
+        self.max_age = int(max_age)
+        self.flights: list[OwnFlight] = []
+        self._next: int | None = None
+        self._next_new: tuple[int, int] | None = None   # (card, first tick) of a next card not yet read twice
+        self._seen: set[int] = set()
+        self._reborn: dict[int, int] = {}      # uid -> when its claim ended (see: judged from then)
+        self.counts: Counter = Counter()
+
+    # -- inputs ---------------------------------------------------------------
+    def sent(self, card: int, tick: int, *, slot: int = -1, cost: int = 0,
+             aim: Sequence[float] | None = None, labels: Iterable[str] = (), spell: bool = False,
+             units: int | None = 1) -> OwnFlight:
+        f = OwnFlight(rs_decide.Pending(int(card), max(0, int(cost)), int(slot), int(tick)),
+                      None if aim is None else (float(aim[0]), float(aim[1])),
+                      frozenset(str(c) for c in labels or ()), bool(spell), max(1, int(units or 1)))
+        self.flights.append(f)
+        self.counts["sent"] += 1
+        return f
+
+    def _find(self, card: int, slot: int, tap_tick: int) -> OwnFlight | None:
+        for f in self.flights:
+            p = f.pending
+            if p.card == int(card) and p.tick == int(tap_tick) and (int(slot) < 0 or p.slot == int(slot)):
+                return f
+        return None
+
+    def _end(self, f: OwnFlight, how: str, tick: int | None) -> None:
+        if f.run_how is None:
+            f.run_how, f.run_tick = how, None if tick is None else int(tick)
+            self.counts[how] += 1
+
+    def refused(self, card: int, tap_tick: int, slot: int = -1) -> bool:
+        """tap_refused: the tap ends (it never ran); True when it was one of ours."""
+        f = self._find(card, slot, tap_tick)
+        if f is None:
+            return False
+        if f.run_how not in (None, "refused"):          # it timed out before the verdict (+30)
+            self.counts[f.run_how] -= 1
+            f.run_how = None
+        self._end(f, "refused", None)
+        f.run_tick = None
+        return True
+
+    def retracted(self, card: int, tap_tick: int, slot: int = -1, run_tick: int | None = None) -> bool:
+        """tap_refusal_retracted: a tap refused earlier was taken after all; it ran at run_tick
+        (the guard's evidence tick, None unknown). True when it was one of ours, refused."""
+        f = self._find(card, slot, tap_tick)
+        if f is None or f.run_how != "refused":
+            return False
+        self.counts["refused"] -= 1
+        f.run_how = None
+        self._end(f, "retracted", run_tick)
+        return True
 
     def landed(self, landings: Iterable[Any]) -> int:
-        """Drop the taps `landings` report; returns how many were dropped. An OwnLanding of
-        slot -1 is a play no tap explains (a human's): no tap of ours."""
+        """The deriver's OwnLandings: a tap's first sighting RUN_MIN_TICKS or more after it is its
+        run; returns how many runs that marked. A human's play (slot -1), a sooner sighting (the
+        ghost) and a miss (no land tick) change nothing."""
         n = 0
         for x in () if landings is None else landings:
-            if int(x.slot) < 0:
+            if int(x.slot) < 0 or x.land_tick is None:
                 continue
-            key = (int(x.card), int(x.slot), int(x.tap_tick))
-            for k, p in enumerate(self.taps):
-                if (p.card, p.slot, p.tick) == key:
-                    del self.taps[k]
-                    n += 1
-                    break
-        self.landed_count += n
+            f = self._find(x.card, x.slot, x.tap_tick)
+            if f is None or f.ended or int(x.land_tick) - f.tick < RUN_MIN_TICKS:
+                continue
+            self._end(f, "landing", int(x.land_tick))
+            n += 1
         return n
 
-    def prune(self, now: int) -> int:
-        """Drop the taps at least max_age ticks old at `now`; returns how many."""
+    def observe(self, now: int, hand: Sequence[int], next_card: int | None = None) -> None:
+        """One battle frame's HUD: the hand (EMPTY_CARD for an empty or unread slot) and the next
+        card (negative: unread)."""
         now = int(now)
-        keep = [p for p in self.taps if p.tick is None or now - p.tick < self.max_age]
-        dropped = len(self.taps) - len(keep)
-        self.taps = keep
-        self.expired += dropped
-        return dropped
+        hand = [int(c) for c in list(hand)[:HAND_SIZE]]
+        for f in self.flights:
+            p = f.pending
+            age = now - f.tick
+            if age <= 0:
+                continue
+            here = (hand[p.slot] == p.card) if 0 <= p.slot < len(hand) else (p.card in hand)
+            if f.left_tick is None:
+                if not here:
+                    f.left_tick, f.stayed = now, False
+                elif age >= ACCEPT_TICKS:
+                    f.stayed = True
+            elif here and now - f.left_tick <= BACK_TICKS:
+                f.left_tick = None                     # read back in its slot: a misread
+                f.stayed = age >= ACCEPT_TICKS
+                self.counts["back"] += 1
+            if (not f.ended and f.left_tick is not None and age >= RUN_MIN_TICKS
+                    and 0 <= p.slot < len(hand) and hand[p.slot] >= 0 and hand[p.slot] != p.card):
+                if f.refill_since is None:             # one frame can be a misread: RUN_FRAMES
+                    f.refill_since, f.refill_n = now, 0
+                f.refill_n += 1
+                if f.refill_n >= RUN_FRAMES:
+                    self._end(f, "refill", f.refill_since)
+            else:
+                f.refill_since = None
+        if next_card is not None and int(next_card) >= 0:
+            n = int(next_card)
+            if self._next is None:
+                self._next = n
+            elif n == self._next:
+                self._next_new = None                  # a one-frame flicker: no change
+            elif self._next_new is not None and self._next_new[0] == n:
+                self._next_changed(self._next_new[1])  # read twice: a change, dated its first frame
+                self._next, self._next_new = n, None
+            else:
+                self._next_new = (n, now)
+        self._expire(now)
 
-    def inputs(self, now: int, delay: int) -> list[tuple[int, int]]:
-        """obs_row's `pending` at `now` (prune first)."""
-        self.prune(now)
-        return rs_decide.pending_inputs(self.taps, int(now), int(delay))
+    def _next_changed(self, now: int) -> None:
+        queue = [f for f in self.flights if not f.next_seen and f.left_tick is not None
+                 and f.run_how not in ("refused", "unaccepted") and now - f.tick <= NEXT_WAIT_TICKS]
+        if not queue:
+            self.counts["next_other"] += 1
+            return
+        head = min(queue, key=lambda f: f.tick)
+        if now - head.tick < RUN_MIN_TICKS:
+            self.counts["next_other"] += 1             # no play of ours can have run yet
+            return
+        head.next_seen = True
+        if not head.ended:
+            self._end(head, "next", now)
+
+    def _own(self, tr: Any) -> bool:
+        team = int(tr.team)
+        if team in (0, 1):
+            return team == OWN_TEAM
+        return float(tr.y_mt) > MID_Y_MT
+
+    @staticmethod
+    def _fits(f: OwnFlight, tr: Any) -> bool:
+        """`tr` reads as a unit of tap `f`'s card now: one of its labels, not the enemy's."""
+        return str(tr.cls) in f.labels and int(tr.team) != ENEMY_TEAM
+
+    def _release(self, tracks: Sequence[Any], now: int) -> None:
+        """A claimed track that no longer reads as its tap's card loses the claim (class doc)."""
+        owner = {uid: f for f in self.flights for uid in (*f.ghosts, *f.drops)}
+        if not owner:
+            return
+        for tr in tracks:
+            uid = int(tr.uid)
+            f = owner.get(uid)
+            if f is None or self._fits(f, tr):
+                continue
+            f.ghosts.pop(uid, None)
+            f.drops.pop(uid, None)
+            self._seen.discard(uid)
+            self._reborn[uid] = now
+            self.counts["released"] += 1
+
+    def see(self, tracks: Iterable[Any], now: int) -> None:
+        """Classify the frame's new own tracks: a tap's ghost, a tap's real unit, or neither."""
+        if not self.delay or not self.flights:
+            return
+        now = int(now)
+        tracks = list(tracks)
+        self._release(tracks, now)
+        for tr in tracks:
+            uid = int(tr.uid)
+            if uid in self._seen or not self._own(tr):
+                continue
+            first = self._reborn.get(uid, int(tr.first_seen_tick))
+            if now - first > RELABEL_TICKS:
+                self._seen.add(uid)                    # looked at long enough: no tap's
+            x, y = float(tr.x_mt), float(tr.y_mt)
+            ghost, unit, ghost_d = None, None, GHOST_RADIUS_MT
+            for f in self.flights:
+                if f.run_how in ("refused", "unaccepted") or str(tr.cls) not in f.labels:
+                    continue
+                age = first - f.tick
+                if age <= 0:
+                    continue
+                d = 0.0 if f.aim is None else math.hypot(x - f.aim[0], y - f.aim[1])
+                if age < RUN_MIN_TICKS and (f.run_tick is None or first < f.run_tick):
+                    if d <= ghost_d:
+                        ghost, ghost_d = f, d
+                elif RUN_MIN_TICKS <= age <= DROP_IN_TICKS and (f.spell or d <= DROP_IN_RADIUS_MT):
+                    if unit is None or (unit.ended and not f.ended):
+                        unit = f                        # oldest first, one not run yet first
+            if ghost is not None:
+                ghost.ghosts[uid] = first
+                self._seen.add(uid)
+                self.counts["ghost_tracks"] += 1
+            elif unit is not None:
+                unit.drops[uid] = first
+                self._seen.add(uid)
+                self.counts["unit_tracks"] += 1
+                if not unit.ended:
+                    self._end(unit, "unit", first)
+
+    def _expire(self, now: int) -> None:
+        keep = []
+        for f in self.flights:
+            age = now - f.tick
+            if not f.ended and age > self._window():
+                if f.stayed and not f.ghosts:
+                    self._end(f, "unaccepted", None)
+                else:
+                    self._end(f, "timeout", f.tick + self.delay)
+            if age > BOARD_TICKS:
+                for uid in (*f.ghosts, *f.drops):
+                    self._seen.discard(uid)
+                continue
+            keep.append(f)
+        self.flights = keep
+
+    def _window(self) -> int:
+        """How long after its tap a play not seen to run stays listed."""
+        return min(self.max_age, self.delay + RUN_GRACE_TICKS) if self.delay else self.max_age
+
+    # -- outputs --------------------------------------------------------------
+    def listed(self, now: int) -> list[OwnFlight]:
+        """The taps own_pending shows at `now` (class doc)."""
+        now = int(now)
+        out = []
+        for f in self.flights:
+            age = now - f.tick
+            if f.ended or age <= 0 or age > self._window():
+                continue
+            if f.stayed and not f.ghosts:
+                continue                               # the client did not take it (yet)
+            out.append(f)
+        return out
+
+    @property
+    def taps(self) -> list[rs_decide.Pending]:
+        """The taps not ended yet (in flight or waiting for their card to leave)."""
+        return [f.pending for f in self.flights if not f.ended]
+
+    def inputs(self, now: int, delay: int | None = None) -> list[tuple[int, int]]:
+        """obs_row's `pending` at `now`: rs_decide.pending_inputs of the listed taps."""
+        self._expire(int(now))
+        return rs_decide.pending_inputs([f.pending for f in self.listed(now)], int(now),
+                                        self.delay if delay is None else int(delay))
+
+    def paid_milli(self, now: int) -> int:
+        """1000 x the cost of the listed taps the HUD has paid (card out of its slot)."""
+        if not self.delay:
+            return 0
+        return 1000 * sum(max(0, int(f.pending.cost)) for f in self.listed(now) if f.left_tick is not None)
+
+    def board(self, tracks: Sequence[Any], now: int) -> Sequence[Any]:
+        """The tracks the row shows (class doc); `tracks` itself when none is changed."""
+        if not self.delay or not self.flights:
+            return tracks
+        role: dict[int, tuple[OwnFlight, bool]] = {}
+        for f in self.flights:
+            if f.ended and f.run_tick is None:          # refused / not taken: tracks as they are
+                continue
+            for uid in f.ghosts:
+                role[uid] = (f, True)
+            for uid in f.drops:
+                role.setdefault(uid, (f, False))
+        # a claimed track counts only while it reads as its tap's card (see() also takes the
+        # claim away; this keeps a frame see() has not looked at right too)
+        claimed = {int(tr.uid): role[int(tr.uid)] for tr in tracks
+                   if int(tr.uid) in role and self._fits(role[int(tr.uid)][0], tr)}
+        if not claimed:
+            return tracks
+        now = int(now)
+        shown: dict[int, list] = {}                    # flight id -> the uids it may show
+
+        def rank(f: OwnFlight, tr: Any) -> tuple:
+            uid = int(tr.uid)
+            if uid in f.ghosts:
+                r = 1                                  # the preview, become the real unit
+            else:                                      # the real unit: once it has landed
+                r = 0 if now - int(tr.first_seen_tick) > FALL_TICKS else 2
+            coasting = now - int(tr.last_seen_tick) > COAST_TICKS    # unseen: the tracker's guess
+            return coasting, r, -int(tr.last_seen_tick), int(tr.first_seen_tick), uid
+
+        for f in self.flights:
+            if f.run_tick is None or now - f.run_tick > DUP_TICKS:
+                continue                               # in flight (all hidden), or long run (all shown)
+            here = [tr for tr in tracks if claimed.get(int(tr.uid), (None,))[0] is f]
+            here.sort(key=lambda tr: rank(f, tr))
+            shown[id(f)] = [int(tr.uid) for tr in here[:f.units]]
+        out, changed = [], False
+        for tr in tracks:
+            hit = claimed.get(int(tr.uid))
+            if hit is None:
+                out.append(tr)
+                continue
+            f, is_ghost = hit
+            if f.run_tick is None or (id(f) in shown and int(tr.uid) not in shown[id(f)]):
+                changed = True                         # a ghost in flight, or the same unit again
+                continue
+            if is_ghost and int(tr.first_seen_tick) < f.run_tick:
+                tr = dataclasses.replace(tr, first_seen_tick=int(f.run_tick))
+                changed = True
+            out.append(tr)
+        return out if changed else tracks
+
+    def summary(self) -> dict[str, Any]:
+        """The battle's counts: taps sent, how each ended, ghost and unit tracks, misreads."""
+        return {k: int(v) for k, v in sorted(self.counts.items()) if v}
 
 
 class LiveObserver:
@@ -915,9 +1322,13 @@ class LiveObserver:
     max_age    OwnTaps'
 
     events(vf.events) once per frame of the battle (the opponent plays and our landings it
-    reports); sent(card, tick, slot=, cost=) for each tap sent; inputs(tick) -> {"opp_elixir":
-    [milli, exact], "own_pending": [[card token, ticks to land], ...], "delay": delay}, what
-    PublicStateBuilder.state(..., observer=) stores and row_inputs reads.
+    reports); watch(tick, hand, next_card, tracks) once per battle-screen frame (the HUD and the
+    tracks: OwnTaps.observe / see); sent(card, tick, slot=, cost=, aim=, labels=, spell=,
+    units=) for each tap sent; refused(card, tap_tick, slot) on tap_refused; inputs(tick) ->
+    {"opp_elixir": [milli, exact], "own_pending": [[card token, ticks to land], ...], "delay":
+    delay}, what PublicStateBuilder.state(..., observer=) stores and row_inputs reads;
+    board(tracks, tick) the tracks for the row and row_elixir(elixir_milli, cap, tick) its own
+    elixir (OwnTaps.board / paid_milli).
     """
 
     def __init__(self, catalogue: Sequence[Sequence[Any]], *, delay: int = 0,
@@ -926,7 +1337,7 @@ class LiveObserver:
         self.delay = max(0, int(delay or 0))
         self.opp = OpponentElixir(catalogue, fields=fields, law=law, start_tick=start_tick,
                                   blind=blind)
-        self.own = OwnTaps(max_age=max_age)
+        self.own = OwnTaps(delay=self.delay, max_age=max_age)
 
     def events(self, events: Any) -> None:
         """Feed one frame's scripts/vision Events: opp_plays and own_landings."""
@@ -935,8 +1346,36 @@ class LiveObserver:
         self.opp.record(getattr(events, "opp_plays", None) or ())
         self.own.landed(getattr(events, "own_landings", None) or ())
 
-    def sent(self, card: int, tick: int, *, slot: int, cost: int = 0) -> None:
-        self.own.sent(card, tick, slot=slot, cost=cost)
+    def watch(self, tick: int, hand: Sequence[int], next_card: int | None = None,
+              tracks: Iterable[Any] = ()) -> None:
+        """One battle-screen frame's HUD hand, next card and tracks (our taps in flight)."""
+        self.own.observe(tick, hand, next_card)
+        self.own.see(tracks, tick)
+
+    def sent(self, card: int, tick: int, *, slot: int, cost: int = 0, **flight: Any) -> None:
+        self.own.sent(card, tick, slot=slot, cost=cost, **flight)
+
+    def refused(self, card: int, tap_tick: int, slot: int = -1) -> bool:
+        return self.own.refused(card, tap_tick, slot)
+
+    def retracted(self, card: int, tap_tick: int, slot: int = -1, run_tick: int | None = None) -> bool:
+        return self.own.retracted(card, tap_tick, slot, run_tick)
+
+    def board(self, tracks: Sequence[Any], tick: int) -> Sequence[Any]:
+        return self.own.board(tracks, tick)
+
+    def row_elixir(self, elixir_milli: int | None, cap: int | None, tick: int) -> int | None:
+        """The row's own elixir (module doc, V2 ROWS): min(HUD, the elixir cap) plus the cost of
+        the listed taps the HUD has paid, at most ELIXIR_MAX_MILLI; None (the HUD, as before)
+        when the HUD is unread, or with nothing to add and no cap below the HUD."""
+        if elixir_milli is None:
+            return None
+        hud = int(elixir_milli)
+        base = hud if cap is None else min(hud, int(cap))
+        add = self.own.paid_milli(tick)
+        if not add and base == hud:
+            return None
+        return min(ELIXIR_MAX_MILLI, max(0, base + add))
 
     def inputs(self, tick: int) -> dict:
         milli, exact = self.opp.view(tick)

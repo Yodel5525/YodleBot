@@ -202,30 +202,37 @@ def test_the_count_is_exact_only_when_every_play_can_have_been_seen():
 # our own taps in flight
 # ---------------------------------------------------------------------------
 
-def test_own_taps_are_pending_until_they_land():
-    taps = PS.OwnTaps()
+def test_own_taps_are_pending_until_they_run():
+    """OwnTaps (delay 24): a sent tap is in own_pending from the tick after it until it is seen
+    to RUN, refused, or 24 + 3 ticks old (the rows list a play while tap < t <= exec, exec 24 +- 3
+    ticks after the tap). The deriver's first sighting soon after the tap is the client's
+    placement preview and ends nothing; a sighting 20 or more ticks on is the play running."""
+    taps = PS.OwnTaps(delay=24)
     taps.sent(2, 100, slot=1, cost=4)                     # Hog Rider
     taps.sent(7, 104, slot=0, cost=2)                     # Log
     assert taps.taps == [RD.Pending(2, 4, 1, 100), RD.Pending(7, 2, 0, 104)]
     # a tap at the asked tick is that decision's own; one after it is not sent yet
-    assert taps.inputs(100, 24) == [] and taps.inputs(104, 24) == [(4, 20)]
+    assert taps.inputs(100) == [] and taps.inputs(104) == [(4, 20)]
     # (card + 2, tap + delay - now), soonest first; landing-time rows (delay 0) show none
-    assert taps.inputs(106, 24) == [(4, 18), (9, 22)]
-    assert taps.inputs(106, 0) == []
-    assert taps.inputs(130, 24) == [(4, 0), (9, 0)]       # due, not seen yet: 0 ticks to land
-    # the deriver's landing of the Hog tap (card, slot, tap tick) ends it
-    assert taps.landed([OwnLanding(card=2, slot=1, tap_tick=100, land_tick=110)]) == 1
-    assert taps.inputs(112, 24) == [(9, 16)]
-    # a human's play (slot -1) and another tap's landing leave it
-    assert taps.landed([OwnLanding(card=7, slot=-1, tap_tick=104, land_tick=112),
-                        OwnLanding(card=7, slot=0, tap_tick=99, land_tick=112)]) == 0
-    # a tap reported missed (no land tick) ends too
-    assert taps.landed([OwnLanding(card=7, slot=0, tap_tick=104, land_tick=None)]) == 1
-    assert taps.taps == [] and taps.landed_count == 2
-    # one never seen goes after TAP_MAX_AGE (60) ticks, as rs_decide.prune_pending's
-    taps.sent(0, 200, slot=2, cost=3)
-    assert taps.inputs(259, 24) == [(2, 0)]
-    assert taps.inputs(260, 24) == [] and taps.expired == 1
+    assert taps.inputs(106) == [(4, 18), (9, 22)]
+    assert taps.inputs(106, 0) == [] and PS.OwnTaps().inputs(106) == []
+    # the Hog's first sighting 10 ticks on (the preview) ends nothing ...
+    assert taps.landed([OwnLanding(card=2, slot=1, tap_tick=100, land_tick=110)]) == 0
+    assert taps.inputs(112) == [(4, 12), (9, 16)]
+    # ... nor a human's play (slot -1), another tap's landing or a miss; the Hog's unit 25 on does
+    assert taps.landed([OwnLanding(card=7, slot=-1, tap_tick=104, land_tick=125),
+                        OwnLanding(card=7, slot=0, tap_tick=99, land_tick=125),
+                        OwnLanding(card=7, slot=0, tap_tick=104, land_tick=None)]) == 0
+    assert taps.landed([OwnLanding(card=2, slot=1, tap_tick=100, land_tick=125)]) == 1
+    assert taps.inputs(126) == [(9, 2)] and taps.taps == [RD.Pending(7, 2, 0, 104)]
+    # one never seen to run: due (0 ticks to land) until its tap + 24 + 3, then gone
+    assert taps.inputs(128) == [(9, 0)] and taps.inputs(131) == [(9, 0)]
+    assert taps.inputs(132) == [] and taps.taps == []
+    assert taps.summary() == {"landing": 1, "sent": 2, "timeout": 1}
+    # the rows' delay caps the window, and TAP_MAX_AGE (60) still bounds it
+    long = PS.OwnTaps(delay=58)
+    long.sent(0, 200, slot=2, cost=3)
+    assert long.inputs(260) == [(2, 0)] and long.inputs(261) == []
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +423,11 @@ def v2_decider(rr, policy, *, observer=None, made=None):
 def test_the_loop_feeds_the_observer_and_the_rows_show_it(tmp_path, rr):
     """The opponent's Giant is reported at 104; our Hog, tapped at 100, is seen landing at 110.
     The opponent's bar: 168000 + 500 t before 104; at 104 220000 less the Giant, 80000, then
-    500 a tick. Our tap shows as pending (100 + 24 - t ticks to land) from 102 to 108."""
+    500 a tick. Our tap shows as pending (100 + 24 - t ticks to land) from 102 to 106: this
+    script's HUD hand never changes, so the Hog still reads in its slot 8 ticks after the tap
+    (the client did not take it: a refusal on its way) and from 108 it is not listed; the
+    landing 10 ticks on (the client's preview) ends nothing (tests/pipeline/test_own_flight.py
+    has the real sequence)."""
     giant = OppPlay(card=GIANT, tick=104, exec_tick=104, x_mt=4000.0, y_mt=8000.0)
     landing = OwnLanding(card=2, slot=TVP.PLAY_SLOT, tap_tick=100, land_tick=110)
     policy, made = RowPolicy(), []
@@ -433,17 +444,19 @@ def test_the_loop_feeds_the_observer_and_the_rows_show_it(tmp_path, rr):
         assert m == milli(bar), t
         assert rows[t]["scalars"][5] == np.float32(m / 10_000) and rows[t]["scalars"][6] == 1.0
     for t in rows:
-        due = 102 <= t <= 108
+        due = 102 <= t <= 106
         assert rows[t]["own_pending"].tolist() == ([4, 0, 0, 0] if due else [0, 0, 0, 0]), t
         land = [(100 + 24 - t) / 40, 0, 0, 0] if due else [0, 0, 0, 0]
         assert rows[t]["own_pending_land"].tolist() == f16(land), t
         assert rs_schema.V2.check_row(rows[t], buttons=2) == []
     assert rows[102]["own_pending_land"][0] == np.float16(0.55)
     # one observer for the battle, watching from the battle's first clock reading (tick 70; it
-    # started at 90): the Giant counted, the Hog's landing ended its tap
+    # started at 90): the Giant counted; the Hog not taken (its card stayed), not ended yet
     [obs] = made
     assert obs.opp.start_tick == 70 and not obs.opp.late and obs.opp.recorded == 1
-    assert obs.own.landed_count == 1 and obs.own.taps == []
+    [hog] = obs.own.flights
+    assert hog.stayed and hog.left_tick is None and hog.run_how is None
+    assert hog.aim == tuple(RD.to_world(TVP.PLAY_TILE[0] * 1000 + 500, TVP.PLAY_TILE[1] * 1000 + 500, VT.OWN_TEAM))
     # the tap's decision record says what the row was given
     [d] = TVP.decisions(res.records, CT.ACTION_TAP)
     assert d["tick"] == 100 and d["opp_elixir"] == [7785, True] and d["own_pending"] == []

@@ -7,9 +7,13 @@ the game refused. Once a tap of ours is paid, the runner now spends at most
 
     min(HUD, spendable at the tap - cost + the most regen possible since the tap)
 
-until the HUD reads within 0.2 elixir of that cap or 30 ticks pass. Everything here is
-synthetic: the HUD readings below copy the shape of that sequence, no owner record is used.
-The loop tests run scripts/vision_play.VisionPlay on test_vision_play's scripted frames.
+until the HUD reads at most 0.05 elixir above that cap on two frames in a row or 30 ticks
+pass (review P2 iii: one low reading inside a stale window no longer ends it). The base holds
+the costs of the taps in flight at the tap, each taken off once that tap is paid (P2 i: a
+refused tap in flight was taken twice), and a card read back in its slot within 20 ticks of
+leaving it was a misread: the tap is unpaid again (P2 ii). Everything here is synthetic: the
+HUD readings below copy the shape of that sequence, no owner record is used. The loop tests
+run scripts/vision_play.VisionPlay on test_vision_play's scripted frames.
 """
 from __future__ import annotations
 
@@ -166,13 +170,15 @@ def test_regen_is_the_most_the_bar_can_gain_1x_2x_and_overtime_2x_3x():
     assert cap.regen_milli(700, 700) == 0 and cap.regen_milli(700, 690) == 0
     for t0, n in ((0, 30), (2350, 30), (2399, 5), (3590, 30), (4790, 30), (5500, 30)):
         assert cap.regen_milli(t0, t0 + n) * LAW.scale >= LAW.regen(t0, t0 + n) * 1000
-    assert cap.config() == {"tol_milli": 200, "timeout_ticks": 30, "slack_ticks": 20, "max_age": 60}
+    assert cap.config() == {"tol_milli": 50, "release_frames": 2, "timeout_ticks": 30, "slack_ticks": 20,
+                            "max_age": 60, "back_ticks": 20}
 
 
 def test_the_610_619_sequence_in_the_ledger_and_in_decide():
     """The Cannon's cap goes on at 614 (its card gone), 1.264 + the regen since 610; it bites
-    while the HUD reads 3.99 / 3.00; it ends at 621, the HUD within 0.2 of it. decide spends
-    min(HUD, cap): the Log (2) is masked at 619, where the HUD alone let it in."""
+    while the HUD reads 3.99 / 3.00; it ends at 622, the second frame in a row the HUD reads at
+    most 0.05 above it (621, 622). decide spends min(HUD, cap): the Log (2) is masked at 619,
+    where the HUD alone let it in."""
     cap = RD.ElixirCap(LAW)
     cannon = RD.Pending(CANNON, 3, 0, 610)
     cap.sent(cannon, 4264)
@@ -181,10 +187,11 @@ def test_the_610_619_sequence_in_the_ledger_and_in_decide():
     assert want[614] == 1336 and want[619] == 1425 and want[621] == 1461
     for t in (614, 615, 616, 617, 618, 619):
         assert cap.observe(t, hand_610(t), elixir_610(t)) == want[t] == cap.value
-    assert cap.observe(621, hand_610(621), 1434) == 1461                # its last frame
-    assert cap.observe(622, hand_610(622), elixir_610(622)) is None and cap.plays == []
+    assert cap.observe(621, hand_610(621), 1434) == 1461 and cap.plays[0].caught == 1
+    assert cap.observe(622, hand_610(622), elixir_610(622)) == 1264 + up(12) == 1479   # its last frame
+    assert cap.observe(623, hand_610(623), elixir_610(623)) is None and cap.plays == []
     assert cap.summary() == {"plays": 1, "paid": 1, "caught_up": 1, "timed_out": 0, "lost": 0,
-                             "frames_on": 7}
+                             "frames_on": 8, "unpaid": 0}
 
     policy = PlanPolicy(lambda t: 3)
     state = {"tick": 619, "entities": [], "players": [
@@ -213,10 +220,18 @@ def test_plays_in_a_row_stack():
     assert cap.observe(303, [LOG, EMPTY, SKELETONS, FIREBALL], 7053) == 3000 + up(3)   # the Hog's
     assert cap.observe(305, [LOG, EMPTY, EMPTY, FIREBALL], 7089) == 2035 + up(3)       # both
     assert [c.paid_tick for c in cap.plays] == [303, 305]
-    # the HUD drops to the true bar: both caps end on that frame (within 0.2 of each)
-    true = 2000 + up(10)
-    assert cap.observe(310, [LOG, EMPTY, EMPTY, FIREBALL], true) == 2035 + up(8)
+    # the HUD drops to the true bar: both caps end on the second frame of it (each within +0.05)
+    assert cap.observe(310, [LOG, EMPTY, EMPTY, FIREBALL], 2000 + up(10)) == 2035 + up(8)
+    assert [c.caught for c in cap.plays] == [1, 1]
+    assert cap.observe(311, [LOG, EMPTY, EMPTY, FIREBALL], 2000 + up(11)) == 2035 + up(9)
     assert cap.plays == [] and cap.summary()["caught_up"] == 2
+    # the Skeletons were decided with the Hog in flight (still in its slot): linked to it
+    cap = RD.ElixirCap(LAW)
+    cap.sent(hog, 7000)
+    cap.sent(skel, 7035 - 4000, in_flight=[hog])
+    assert [c.base_milli for c in cap.plays] == [7000, 7035] and cap.plays[1].linked == (cap.plays[0],)
+    assert cap.observe(303, [LOG, EMPTY, SKELETONS, FIREBALL], 7053) == 3000 + up(3)
+    assert cap.observe(305, [LOG, EMPTY, EMPTY, FIREBALL], 7089) == 7035 - 1000 - 4000 + up(3) == 2035 + up(3)
 
 
 def test_a_cap_times_out_30_ticks_after_payment_and_an_unpaid_tap_is_forgotten():
@@ -237,7 +252,7 @@ def test_a_cap_times_out_30_ticks_after_payment_and_an_unpaid_tap_is_forgotten()
     held = [LOG, HOG, SKELETONS, SPIRITS]
     assert all(cap.observe(t, held, 7000) is None for t in range(101, 165))
     assert cap.plays == [] and cap.summary() == {"plays": 1, "paid": 0, "caught_up": 0,
-                                                 "timed_out": 0, "lost": 1, "frames_on": 0}
+                                                 "timed_out": 0, "lost": 1, "frames_on": 0, "unpaid": 0}
 
 
 def test_overtime_caps_regen_at_2x_and_3x():
@@ -259,7 +274,7 @@ def test_loop_holds_the_log_until_the_real_elixir_pays_for_it(tmp_path):
     not ours; the Log at 653, the first frame the bar reads 2.0. Without the cap the Log goes
     at 614 on the 3.99 (on the friendly the bot drew waits until 619 and tapped it on the
     3.00; the game refused it). The frame and decision records carry elixir_cap while it
-    bites; battle_end counts it."""
+    bites; battle_end counts it (its last frame 622: 621 and 622 read within +0.05 of it)."""
     res = run_610(tmp_path / "cap")
     assert tap_ticks(res) == [(610, CANNON), (653, LOG)]
     assert elixir_610(652) < 2000 <= elixir_610(653)
@@ -275,7 +290,7 @@ def test_loop_holds_the_log_until_the_real_elixir_pays_for_it(tmp_path):
     assert "elixir_cap" not in log_tap and log_tap["elixir"] == 2005
     [end] = res.records["battle_end"]
     assert end["elixir_cap"] == {"plays": 2, "paid": 1, "caught_up": 1, "timed_out": 0, "lost": 0,
-                                 "frames_on": 7}
+                                 "frames_on": 8, "unpaid": 0}
 
     without = run_610(tmp_path / "off", cap=False)
     assert tap_ticks(without) == [(610, CANNON), (614, LOG)]
@@ -419,3 +434,143 @@ def test_only_the_live_runner_uses_the_cap():
             if re.search(r"elixir_cap|ElixirCap", path.read_text(encoding="utf-8", errors="replace")):
                 users.add(path.relative_to(ROOT).as_posix())
     assert users == {"tools/rs_decide.py", "scripts/vision_play.py"}
+
+
+# ---------------------------------------------------------------------------
+# the review's P2s (synthetic): a tap in flight taken twice, a one-frame slot misread, the release
+# ---------------------------------------------------------------------------
+
+def test_p2i_a_refused_tap_in_flight_is_not_taken_twice():
+    """A Log (2) tapped at 100 on 9.0 never leaves its slot (refused): decide holds its cost while
+    it is pending. A Cannon (3) at 110, decided with the Log in flight (spendable 9.178 - 2), is
+    paid at 113. Its base adds the Log back and links it; the Log is never paid, so the cap is
+    9.178 - 3 + regen = the real bar, and decide takes the Log's 2 off once: 4.25 at 114, a Hog
+    (4) fits. Before, the cap's base already lacked the Log and decide took it again: 2.25."""
+    log, cannon = RD.Pending(LOG, 2, 3, 100), RD.Pending(CANNON, 3, 0, 110)
+    hand = [CANNON, HOG, FIREBALL, LOG]
+    gone = [EMPTY, HOG, FIREBALL, LOG]
+    hud = {t: 9000 + up(t - 100) for t in range(100, 120)}
+
+    def ledger(linked):
+        cap = RD.ElixirCap(LAW)
+        cap.sent(log, 9000)
+        for t in range(101, 110):
+            cap.observe(t, hand, hud[t])
+        spendable = hud[110] - 2000                       # decide at 110: the Log pending
+        cap.sent(cannon, spendable, **({"in_flight": [log]} if linked else {}))
+        cap.observe(112, hand, hud[112])
+        return cap, cap.observe(114, gone, hud[114])      # paid at 114 (its first gone frame)
+    new, c_new = ledger(True)
+    old, c_old = ledger(False)
+    assert new.plays[1].base_milli == hud[110] == 9179 and new.plays[1].linked == (new.plays[0],)
+    assert new.plays[0].paid_tick is None                                    # the Log: never paid
+    assert c_new == hud[110] - 3000 + up(4) == 6251 and c_old == c_new - 2000
+    state = {"tick": 114, "entities": [], "players": [
+        {"hand": [], "hand_costs": [], "elixir_milli": 0},
+        {"hand": gone, "hand_costs": [COST.get(c, 0) for c in gone], "elixir_milli": hud[114]}]}
+
+    def decide(cap):
+        return RD.decide(PlanPolicy(lambda t: 1), {"tick": 114}, state, 1, lambda *a: True,
+                         RD.DecideConfig.live(0.0), rng=np.random.default_rng(0), pending=[log], tick=114,
+                         elixir_cap=cap)
+    d_new, d_old = decide(c_new), decide(c_old)
+    assert d_new.spendable_milli == 4251 and d_new.is_play and d_new.card == HOG
+    assert d_old.spendable_milli == 2251 and d_old.kind == RD.WAIT
+
+
+def test_p2i_a_tap_paid_after_the_one_decided_with_it_in_flight():
+    """A Hog (4) at 300 still in its slot when Skeletons (1) are tapped at 302: the Skeletons are
+    paid first (303), the Hog at 304. At 303 the Skeletons' cap holds only their own cost (the Hog
+    is unpaid and decide still holds its 4); from 304 it holds the Hog's too."""
+    hog, skel = RD.Pending(HOG, 4, 1, 300), RD.Pending(SKELETONS, 1, 2, 302)
+    cap = RD.ElixirCap(LAW)
+    cap.sent(hog, 7000)
+    assert cap.observe(301, [LOG, HOG, SKELETONS, FIREBALL], 7018) is None
+    cap.sent(skel, 7035 - 4000, in_flight=[hog])
+    assert cap.observe(303, [LOG, HOG, EMPTY, FIREBALL], 7053) == 7035 - 1000 + up(1)
+    assert cap.observe(304, [LOG, EMPTY, EMPTY, FIREBALL], 7071) == min(3000 + up(4), 7035 - 5000 + up(2))
+
+
+def test_p2ii_a_one_frame_slot_misread_does_not_open_a_cap():
+    """A Hog refused from 8.0 whose slot reads empty on one frame (105): paid there, read back in
+    its slot at 106 and 107, so unpaid again from 107, the second read-back frame (before: 4.054
+    for 30 ticks while the HUD read 8.05). One read-back frame keeps the cap on (the next test). A
+    card leaving for real later is paid again; a read-back past 20 ticks (the slot's refill misread
+    34 ticks on) changes nothing."""
+    hand = [LOG, HOG, SKELETONS, SPIRITS]
+    blip = [LOG, EMPTY, SKELETONS, SPIRITS]
+    cap = RD.ElixirCap(LAW)
+    cap.sent(RD.Pending(HOG, 4, 1, 100), 8000)
+    assert cap.observe(104, hand, 8071) is None
+    assert cap.observe(105, blip, 8089) == 4000 + up(5)
+    assert cap.observe(106, hand, 8107) == 4000 + up(6)                   # one read-back frame: still on
+    assert cap.observe(107, hand, 8125) is None and cap.plays[0].paid_tick is None
+    assert all(cap.observe(t, hand, 8000 + up(t - 100)) is None for t in range(108, 130))
+    assert cap.observe(130, blip, 8536) == 4000 + up(30)                  # it left for real: paid again
+    assert cap.summary()["unpaid"] == 1 and cap.summary()["paid"] == 2
+
+    cap = RD.ElixirCap(LAW)
+    cap.sent(RD.Pending(HOG, 4, 1, 100), 8000)
+    assert cap.observe(103, blip, 8054) == 4000 + up(3)
+    assert cap.observe(124, blip, 8500) == 4000 + up(24)
+    assert cap.observe(125, hand, 8500) == 4000 + up(25)                  # 22 ticks on: not a misread
+    assert cap.summary()["unpaid"] == 0
+
+
+def test_one_read_back_frame_of_a_paid_card_keeps_its_cap_on():
+    """A Musketeer (4) paid from 6.0 at 1003 while the HUD still reads a stale 6.0; its slot
+    misreads the card back on one frame (1006). The cap stays on there (6.0 would let a card the
+    real ~2.1 cannot pay past the mask), and a second read-back frame in a row is needed to unpay."""
+    hand = [MUSKETEER, LOG, SKELETONS, SPIRITS]
+    gone = [EMPTY, LOG, SKELETONS, SPIRITS]
+    cap = RD.ElixirCap(LAW)
+    cap.sent(RD.Pending(MUSKETEER, 4, 0, 1000), 6000)
+    assert cap.observe(1003, gone, 6000) == 2000 + up(3)
+    assert cap.observe(1004, gone, 6000) == 2000 + up(4)
+    assert cap.observe(1005, gone, 6000) == 2000 + up(5)
+    assert cap.observe(1006, hand, 6000) == 2000 + up(6)                  # the read-back blip
+    assert cap.observe(1007, gone, 6000) == 2000 + up(7)
+    assert cap.plays[0].paid_tick == 1003 and cap.summary()["unpaid"] == 0
+
+
+def test_p2iii_one_low_reading_does_not_end_a_cap_and_plus_200_does_not_either():
+    """A Hog paid from 7.0 at 503 (cap 3.0 + regen) while the HUD animates: 7.0, then one garbled
+    2.6 at 506, then the stale 4.01 again. One reading at or below the cap + 0.05 is not two in a
+    row: the cap stays on and bites at 507-509 (before, it ended at 506 and 4.01 was spent again).
+    A settled HUD 0.1 above the cap does not end it either (before: anything within 0.2)."""
+    cap = RD.ElixirCap(LAW)
+    cap.sent(RD.Pending(HOG, 4, 1, 500), 7000)
+    gone = [LOG, EMPTY, SKELETONS, SPIRITS]
+    reads = {503: 7000, 504: 7000, 505: 7000, 506: 2600, 507: 4012, 508: 4012, 509: 3992}
+    vals = {t: cap.observe(t, gone, e) for t, e in reads.items()}
+    assert all(vals[t] == 3000 + up(t - 500) for t in reads) and len(cap.plays) == 1
+    assert vals[507] < reads[507]                                         # it bites
+    above = {t: 3000 + up(t - 500) + 100 for t in range(510, 520)}
+    assert all(cap.observe(t, gone, e) is not None for t, e in above.items())
+    assert cap.observe(520, gone, 3000 + up(20) + 40) == 3000 + up(20)    # within +0.05: one ...
+    assert cap.observe(521, gone, 3000 + up(21) + 10) == 3000 + up(21)    # ... two: its last frame
+    assert cap.observe(522, gone, 3000 + up(22)) is None
+    assert cap.summary()["caught_up"] == 1 and cap.summary()["timed_out"] == 0
+
+
+def test_p2i_in_the_loop_the_hog_goes_once_the_real_elixir_pays_for_it(tmp_path):
+    """The P2 i sequence through VisionPlay: the Log at 100 never leaves its slot, the Cannon at
+    110 leaves at 113, the policy wants the Hog from 114. The real bar (the Log unpaid) pays for
+    the Hog and the Log's hold at 114: it is tapped there, as without the cap (before: held until
+    the Cannon's cap timed out at 143)."""
+    def hand(t):
+        return [CANNON if t < 113 else EMPTY, HOG, FIREBALL, LOG]       # the Log stays: refused
+
+    def elixir(t):
+        return 9000 if t < 100 else min(10000, 9000 + (t - 100) * 1000 // 56 - (3000 if t >= 113 else 0))
+
+    def plan(t):
+        return {100: 3, 110: 0}.get(t, 1 if t >= 114 else None)       # Log, Cannon, then the Hog
+
+    ticks = list(range(70, 99, 2)) + list(range(100, 175))
+    on = TVP.run_script(tmp_path / "on", script(ticks, hand, elixir), decider=make_decider(PlanPolicy(plan)))
+    off = TVP.run_script(tmp_path / "off", script(ticks, hand, elixir),
+                         decider=make_decider(PlanPolicy(plan), cap=False))
+    assert tap_ticks(on)[:3] == tap_ticks(off)[:3] == [(100, LOG), (110, CANNON), (114, HOG)]
+    f = frames_by_tick(on)[114]
+    assert f["decision"]["spendable_milli"] >= 4000 and f["decision"]["card"] == HOG

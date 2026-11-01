@@ -179,7 +179,11 @@ float32). Against legacy:
                 --mem-lag: the plays the memory view holds), and whether that count is still
                 known to be exact. A recorded play the engine refused never reached the board,
                 so it is not counted (the memory still lists it, as before). Own elixir stays
-                the raw bar, what the client shows (tokens-19).
+                the raw engine bar (tokens-19): unpaid while a play of the side is in flight
+                (tap < t <= exec) and paid when it runs. The live client pays its HUD bar
+                from the tap + ~3, so the live runner shows the row min(HUD, its elixir cap)
+                plus the cost of its taps in flight (scripts/vision_play.py, tools/
+                public_state.LiveObserver.row_elixir); the decision still spends the HUD's.
   hand_feats    per hand slot: the card's form in players[t]["deck"] / ["forms"] / 2, 1 when
                 its next play is evolved, and its evolution charge (players[t]["evo"]: plays
                 since its last evolved play / the plays it needs, at most 1); hand_features.

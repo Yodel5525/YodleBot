@@ -1,4 +1,4 @@
-r"""Latency probe: from the bot's decision to its unit on the board, measured on this rig (V11).
+r"""Latency probe: from the bot's decision to its play running in the game, measured on this rig (V11).
 
     .venvs\buildabot\Scripts\python.exe tools\latency_probe.py                 every session under reports\vision_play
     .venvs\buildabot\Scripts\python.exe tools\latency_probe.py --last 1        the newest session only
@@ -10,30 +10,36 @@ the format of scripts/vision/record.py), or a perception replay tools/vision_rep
 the emulator. Only sessions with taps (vision_play --tap, while you watch) measure D; a dry run
 still gives the pipeline latencies.
 
-D, THE DECISION-TO-BOARD DELAY. A "tap" record holds the tick of the frame the bot decided on
-(the HUD clock's tick for those pixels) and the card. Its first own sighting is the
-first_seen_tick of the earliest track that
-  * is ours (team 1 in more of the frames it was reported in than team 0),
-  * carries a label the card puts down (data/vision/classes.json through
-    vision_classes.ClassTable.deck_labels([card]): HogRider, Skeleton, "Fireball", ...),
-  * was first seen min_lag..max_lag ticks after the decision tick (-2..60, the window
-    scripts/vision/control.py and events.py use), and, for troops and buildings, within
-    radius_mt (4000) of the aimed tile,
-  * and no earlier tap claimed. The other units of the same play (Skeletons' three) are
-    claimed with it: same label, first seen within play_window_ticks (20), merge_radius_mt
-    (5000) of it.
-D = sighting tick - decision tick, in battle ticks (20 a second): the whole chain capture ->
-perception -> decision -> adb tap -> the client running the play -> the unit drawn -> the
-detector seeing it. The median over the troop and building plays is the D for training rows
-and RL: the command delay tools/rs_eval.py --delay models, in place of live_play.py's
-LEAD = 26 (tap to board, measured with the memory reader on 2026-10-10). p10 / p90 give the
-spread. Spells are summarised apart: a Fireball is seen as its projectile flies.
+D, THE DECISION-TO-RUN DELAY. A "tap" record holds the tick of the frame the bot decided on
+(the HUD clock's tick for those pixels) and the card. D is how long after that the play RUNS in
+the game: the card cycles (the HUD's next card changes) and the unit is created. That is what
+tools/rs_eval.py --delay and tools/rs_rows.py --obs-delay model (the engine runs a play D ticks
+after its tap, and adds the unit's deploy time itself). Per tap, the run is the earlier of
+  * its next-card change: the HUD shows the plays' changes in tap order, so each change goes
+    to the oldest tap whose card left its slot (the client took it) and whose change was not
+    counted yet, at least run_min_ticks (20) after that tap and at most next_wait_ticks (45)
+    (the second play of a quick pair shows its change 30-40 ticks after its tap); a change
+    with no such tap is no play of ours (a human's in MANUAL);
+  * its real unit's first sighting: the earliest own track (team 1 in more of the frames it
+    was reported in than team 0) of a label the card puts down (data/vision/classes.json
+    through vision_classes.ClassTable.deck_labels([card])) first seen run_min_ticks..
+    min(max_lag_ticks, 45) after the decision tick, within radius_mt (4000) of the aimed
+    tile for troops and buildings (it drops in from 2-3 tiles above the aim), anywhere for a
+    spell (a Fireball is seen as it leaves the king).
+D = the median over every tap with a run, rounded half up; p10 / p90 give the spread. On the
+owner's first --tap friendly (2026-11-01) D is 25 (single taps 23-27).
 
-The event deriver's own matches (scripts/vision/events.py: an OwnLanding with a hand slot in
-a frame's events) are summarised next to it as a cross-check, with the taps it reported
-missed; own plays it matched to no tap (a human's, in MANUAL) are counted and left out. When
-no track sighting matched at all (no detector in that run, say), D falls back to the
-deriver's landings.
+THE FIRST SIGHTING IS NOT D. Six of the eight Hog 2.6 cards show a translucent placement
+preview where they were tapped from about 3 ticks after the tap (the "ghost"), which the
+detector boxes as our unit: the first own sighting (match_sighting: the earliest such track
+min_lag..max_lag ticks after the decision, -2..60, the window scripts/vision/control.py and
+events.py use, no earlier tap claiming it; the other units of the same play claimed with it)
+is reported apart ("lag_ticks", "by_card", and "ghost_lag_ticks" for a sighting before
+run_min_ticks within ghost_radius_mt of the aim), and so is the event deriver's own match
+(scripts/vision/events.py OwnLanding: the same first sighting), with the taps it reported
+missed; own plays it matched to no tap are counted and left out. Neither is the --delay.
+The slot refilling (another card in the tapped slot, run_min_ticks or more after the tap,
+about 2 ticks after the next-card change) is reported too.
 
 LATENCY, from the "ms" vision_play records with every battle frame: stale (capture -> the
 runner read the frame), perceive, decide, tap (the adb write), capture_to_decision
@@ -69,7 +75,7 @@ if str(ROOT) not in sys.path:                    # scripts.vision
     sys.path.append(str(ROOT))
 
 from scripts.vision.record import FRAMES_FILE, VisionLogReader, list_sessions  # noqa: E402
-from scripts.vision.types import ENEMY_TEAM, OWN_TEAM  # noqa: E402
+from scripts.vision.types import ENEMY_TEAM, OWN_TEAM, SCREEN_BATTLE  # noqa: E402
 
 SCHEMA = "hastycr.latency_probe/1"
 REPORT_ROOT = ROOT / "reports" / "vision_play"
@@ -117,7 +123,12 @@ class ProbeConfig:
     radius_mt: float | None = 4000.0   # events.EventConfig.landing_radius_mt (troops, buildings)
     play_window_ticks: int = 20        # events.PLAY_WINDOW: the other units of one play ...
     merge_radius_mt: float = 5000.0    # ... this close (events.EventConfig.merge_radius_mt)
-    min_samples: int = 5               # troop / building plays before D counts as measured
+    min_samples: int = 5               # plays with a run before D counts as measured
+    run_min_ticks: int = 20            # a run sign sooner than this after the tap is not its run
+    next_wait_ticks: int = 45          # a tap's next-card change may come this late
+    drop_in_ticks: int = 45            # its real unit first seen at most this late (and max_lag)
+    ghost_radius_mt: float = 2000.0    # a sighting before run_min_ticks this close: the ghost
+    accept_ticks: int = 8              # a card still in its slot this long after: not taken
 
     def __post_init__(self):
         if self.min_lag_ticks > self.max_lag_ticks:
@@ -227,6 +238,7 @@ class BattleLog:
     decision_ticks: list[int] = field(default_factory=list)
     landings: list[Any] = field(default_factory=list)                     # OwnLanding
     taps: list[TapRec] = field(default_factory=list)
+    huds: list[tuple[int, tuple[int, ...], int]] = field(default_factory=list)   # (tick, hand, next) a frame
 
     @property
     def t_range(self) -> tuple[float, float] | None:
@@ -345,6 +357,8 @@ def load_session(path: str | Path) -> SessionLog:
             for tr in vf.tracks:
                 b.see(tr, vf.t_capture)
             b.landings.extend(vf.events.own_landings)
+            if vf.tick is not None and vf.screen == SCREEN_BATTLE:
+                b.huds.append((int(vf.tick), tuple(int(c) for c in vf.hud.hand), int(vf.hud.next)))
         elif e.kind == "tap":
             tap = _tap_record(log.name, e.data.get("data") or {})
             if tap is not None:
@@ -422,6 +436,66 @@ def match_sighting(b: BattleLog, tap: TapRec, labels: frozenset[str], kind: str 
     return best
 
 
+def unit_sighting(b: BattleLog, tap: TapRec, labels: frozenset[str], kind: str | None,
+                  cfg: ProbeConfig) -> Sighting | None:
+    """`tap`'s real unit (module doc, D): the earliest own sighting of its labels first seen
+    run_min_ticks..min(max_lag_ticks, drop_in_ticks) after it, within radius_mt of the aim (a
+    spell: anywhere). Claims nothing (it is often the first sighting itself: a Hog Rider)."""
+    if not labels:
+        return None
+    aim = tap.aim_mt
+    radius = None if kind == KIND_SPELL else cfg.radius_mt
+    hi = min(cfg.max_lag_ticks, cfg.drop_in_ticks)
+    best = None
+    for s in b.sightings.values():
+        if not s.own or s.label not in labels or not cfg.run_min_ticks <= s.first_tick - tap.tick <= hi:
+            continue
+        if radius is not None and aim is not None and _dist(aim, (s.x_mt, s.y_mt)) > radius:
+            continue
+        if best is None or (s.first_tick, s.uid) < (best.first_tick, best.uid):
+            best = s
+    return best
+
+
+def hud_marks(b: BattleLog, taps: Sequence[TapRec], cfg: ProbeConfig) -> dict[int, dict[str, Any]]:
+    """Per tap (by its index in `taps`, oldest first): "accepted" (its card left its slot within
+    accept_ticks, or no HUD reading says it stayed), "next" (the tick of its next-card change:
+    module doc, D) and "refill" (the first tick run_min_ticks or more after it whose slot shows
+    another card), None when not seen. Without HUD readings: accepted, no marks."""
+    out: dict[int, dict[str, Any]] = {i: {"accepted": True, "next": None, "refill": None}
+                                      for i in range(len(taps))}
+    huds = sorted(b.huds, key=lambda h: h[0])           # stable: frames of a tick in their order
+    if not huds:
+        return out
+    for i, tap in enumerate(taps):
+        if not 0 <= tap.slot < len(huds[0][1]):
+            continue
+        early = [hand[tap.slot] for tick, hand, _ in huds if 0 < tick - tap.tick <= cfg.accept_ticks + 2]
+        late = [tick for tick, _, _ in huds if cfg.accept_ticks <= tick - tap.tick <= cfg.accept_ticks + 2]
+        if late and early and all(c == tap.card for c in early):
+            out[i]["accepted"] = False                 # still in its slot: the client did not take it
+            continue
+        for tick, hand, _ in huds:
+            if tick - tap.tick >= cfg.run_min_ticks and hand[tap.slot] >= 0 and hand[tap.slot] != tap.card:
+                out[i]["refill"] = tick
+                break
+    taken: set[int] = set()
+    last = None
+    for tick, _, nxt in huds:
+        if nxt < 0:
+            continue
+        if last is not None and nxt != last:
+            queue = [i for i, tap in enumerate(taps) if out[i]["accepted"] and i not in taken
+                     and 0 < tick - tap.tick <= cfg.next_wait_ticks]
+            if queue:
+                head = min(queue, key=lambda i: (taps[i].tick, i))
+                if tick - taps[head].tick >= cfg.run_min_ticks:
+                    taken.add(head)
+                    out[head]["next"] = tick
+        last = nxt
+    return out
+
+
 def battle_plays(b: BattleLog, classes: CardClasses, cfg: ProbeConfig) -> tuple[list[dict], Counter]:
     """One record per tap of battle `b`, oldest first, and the deriver's counts."""
     for s in b.sightings.values():                    # analyse() may run twice on one log
@@ -439,9 +513,23 @@ def battle_plays(b: BattleLog, classes: CardClasses, cfg: ProbeConfig) -> tuple[
         else:
             landed.setdefault(key, ol)
     out = []
-    for tap in sorted(b.taps, key=lambda tp: (tp.tick, tp.t if tp.t is not None else 0.0)):
+    order = sorted(b.taps, key=lambda tp: (tp.tick, tp.t if tp.t is not None else 0.0))
+    marks = hud_marks(b, order, cfg)
+    for k, tap in enumerate(order):
         kind = classes.kind(tap.name)
-        s = match_sighting(b, tap, classes.labels(tap.name), kind, cfg)
+        labels = classes.labels(tap.name)
+        s = match_sighting(b, tap, labels, kind, cfg)
+        u = unit_sighting(b, tap, labels, kind, cfg)
+        m = marks[k]
+        lags = {"next": None if m["next"] is None else m["next"] - tap.tick,
+                "unit": None if u is None else u.first_tick - tap.tick,
+                "refill": None if m["refill"] is None else m["refill"] - tap.tick}
+        runs = [v for v in (lags["next"], lags["unit"]) if v is not None]
+        ghost = None
+        if s is not None and s.first_tick - tap.tick < cfg.run_min_ticks:
+            aim = tap.aim_mt
+            if aim is None or _dist(aim, (s.x_mt, s.y_mt)) <= cfg.ghost_radius_mt:
+                ghost = s.first_tick - tap.tick
         key = (tap.card, tap.tick)
         ol = landed.pop(key, None)
         state = "landed" if ol is not None else "missed" if key in missed else None
@@ -457,6 +545,9 @@ def battle_plays(b: BattleLog, classes: CardClasses, cfg: ProbeConfig) -> tuple[
             "name": tap.name, "slot": tap.slot, "kind": kind or "unknown",
             "lag_ticks": None if s is None else s.first_tick - tap.tick,
             "uid": None if s is None else s.uid, "label": None if s is None else s.label,
+            "accepted": bool(m["accepted"]), "run_lag_ticks": min(runs) if runs else None,
+            "next_lag_ticks": lags["next"], "unit_lag_ticks": lags["unit"],
+            "refill_lag_ticks": lags["refill"], "ghost_lag_ticks": ghost,
             "deriver": state,
             "deriver_lag_ticks": None if ol is None or ol.land_tick is None else int(ol.land_tick) - tap.tick,
             "capture_to_tap_ms": c2t,
@@ -496,15 +587,17 @@ def analyse(sessions: Sequence[SessionLog], classes: CardClasses | None = None,
         for tap in log.unassigned:
             plays.append({"session": tap.session, "battle": None, "tick": tap.tick, "card": tap.card,
                           "name": tap.name, "slot": tap.slot, "kind": classes.kind(tap.name) or "unknown",
-                          "lag_ticks": None, "uid": None, "label": None, "deriver": None,
+                          "lag_ticks": None, "uid": None, "label": None, "accepted": True,
+                          "run_lag_ticks": None, "next_lag_ticks": None, "unit_lag_ticks": None,
+                          "refill_lag_ticks": None, "ghost_lag_ticks": None, "deriver": None,
                           "deriver_lag_ticks": None, "capture_to_tap_ms": tap.ms.get("capture_to_tap"),
                           "tap_to_sight_ms": None, "capture_to_sight_ms": None})
     units = [p for p in plays if p["kind"] != KIND_SPELL]
     spells = [p for p in plays if p["kind"] == KIND_SPELL]
     track_lags = [p["lag_ticks"] for p in units if p["lag_ticks"] is not None]
     deriver_lags = [p["deriver_lag_ticks"] for p in units if p["deriver_lag_ticks"] is not None]
-    source, values = ("tracks", track_lags) if track_lags else (("deriver", deriver_lags) if deriver_lags
-                                                                else (None, []))
+    values = [p["run_lag_ticks"] for p in plays if p["run_lag_ticks"] is not None]
+    source = "run" if values else None
     stats = describe(values)
     by_card: dict[str, list[int]] = {}
     for p in plays:
@@ -528,6 +621,12 @@ def analyse(sessions: Sequence[SessionLog], classes: CardClasses | None = None,
                    "human_plays": counts["human"], "human_play_records": counts["human_play_records"],
                    "control_unseen": counts["control_unseen"],
                    "unassigned_taps": counts["unassigned_taps"]},
+        "run_ticks": {"run": describe(values), "next": describe(p["next_lag_ticks"] for p in plays),
+                      "unit": describe(p["unit_lag_ticks"] for p in plays),
+                      "refill": describe(p["refill_lag_ticks"] for p in plays),
+                      "ghost": describe(p["ghost_lag_ticks"] for p in plays),
+                      "ghost_taps": sum(1 for p in plays if p["ghost_lag_ticks"] is not None),
+                      "not_accepted": sum(1 for p in plays if not p["accepted"])},
         "lag_ticks": {"tracks": describe(track_lags), "deriver": describe(deriver_lags),
                       "spells_tracks": describe(p["lag_ticks"] for p in spells),
                       "spells_deriver": describe(p["deriver_lag_ticks"] for p in spells),
@@ -553,23 +652,29 @@ def format_report(rep: Mapping[str, Any]) -> list[str]:
     c, d, lag = rep["counts"], rep["D"], rep["lag_ticks"]
     lines = [f"latency probe: {len(rep['sessions'])} session(s), {rep['battles']} battle(s), "
              f"{rep['frames']} frames; {c['taps']} taps ({c['seen']} seen on the board, {c['unseen']} not)"]
+    run = rep["run_ticks"]
     if d["ticks"] is None:
-        lines.append("D: not measured (no tap's unit was seen; a dry run taps nothing: run vision_play "
-                     "with --tap while you watch, with the detector)")
+        lines.append("D: not measured (no tap was seen to run: no next-card change and no real unit; a "
+                     "dry run taps nothing: run vision_play with --tap while you watch, with the detector)")
     else:
-        how = "track sightings" if d["source"] == "tracks" else "the event deriver's landings"
-        lines.append(f"D = {d['ticks']} ticks: median {d['median']:g} of {d['n']} troop/building plays "
-                     f"({how}); p10 {d['p10']:g}, p90 {d['p90']:g}; live_play.LEAD was {d['legacy_lead_ticks']}")
-        lines.append(f"  -> use it as the command delay: tools/rs_eval.py --delay {d['ticks']} "
-                     "(and for training rows / RL)")
+        lines.append(f"D = {d['ticks']} ticks: median {d['median']:g} of {d['n']} plays, the decided frame -> "
+                     f"the play running (its next-card change or its real unit's first sighting); p10 "
+                     f"{d['p10']:g}, p90 {d['p90']:g}; live_play.LEAD was {d['legacy_lead_ticks']}")
+        lines.append(f"  -> the tap-to-run delay tools/rs_eval.py --delay {d['ticks']} and tools/rs_rows.py "
+                     f"--obs-delay model (the deploy time comes after it)")
+        lines.append(f"  run marks: next-card change median {_md(run['next'], fmt='{:g}')}, real unit "
+                     f"{_md(run['unit'], fmt='{:g}')}, slot refilled {_md(run['refill'], fmt='{:g}')}")
         if not d["enough"]:
             lines.append(f"  (only {d['n']} plays: at least {d['min_samples']} before D counts as measured)")
+    lines.append(f"  first sighting (not D: most cards show a placement preview first): median "
+                 f"{_md(lag['tracks'], fmt='{:g}')}; the preview seen on {run['ghost_taps']} taps, median "
+                 f"{_md(run['ghost'], fmt='{:g}')}")
     lines.append(f"  deriver: median {_md(lag['deriver'], fmt='{:g}')} (n {lag['deriver']['n'] if lag['deriver'] else 0}), "
                  f"{c['deriver_landed']} landed, {c['deriver_missed']} missed; human plays {c['human_plays']}; "
                  f"spells median {_md(lag['spells_tracks'], fmt='{:g}')}")
     if lag["by_card"]:
-        lines.append("  per card: " + ", ".join(f"{k} {v['median']:g} (n {v['n']})"
-                                                for k, v in lag["by_card"].items() if v))
+        lines.append("  first sighting per card: " + ", ".join(f"{k} {v['median']:g} (n {v['n']})"
+                                                             for k, v in lag["by_card"].items() if v))
     pm = rep["pipeline_ms"]
     parts = [f"{k} {_md(pm[k])}/{_md(pm[k], 'p90')}" for k in STAGES if pm.get(k)]
     if parts:
@@ -591,7 +696,7 @@ def format_report(rep: Mapping[str, Any]) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="tools/latency_probe.py",
-        description="Decision-to-board delay D and pipeline latency from vision_play sessions.")
+        description="Decision-to-run delay D and pipeline latency from vision_play sessions.")
     ap.add_argument("paths", nargs="*", default=[str(REPORT_ROOT)],
                     help=f"sessions or roots of sessions (default {REPORT_ROOT})")
     ap.add_argument("--last", type=int, default=None, help="only the newest N sessions of each root")
