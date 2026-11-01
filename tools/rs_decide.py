@@ -71,6 +71,29 @@ from, the client's hand changing when the play runs, or after 60 ticks). A press
 Pending(-1, cost, tick=, button=k): it blocks button k and holds its cost until it is 60 ticks
 old or (prune_pending's abilities=) the button no longer reads available.
 
+ELIXIR CAP (live only: ElixirCap, decide's elixir_cap=). The card leaves its slot 2-4 ticks
+after the tap, but the HUD's elixir reading can lag the payment by up to 20+ ticks, and while
+the counter animates it reads high (owner's first --tap friendly, 2026-11-01: Cannon at tick
+610 with 4.26 elixir, slot empty from 614, the HUD read 3.99 then 3.00 until 619 and the true
+1.43 from 621; prune_pending had dropped the Cannon at 614, so at 619 the bot tapped a Log
+with 1.4 elixir and the game refused it). So once a tap of ours has been paid (its card left
+the slot, prune_pending's rule), the runner keeps an upper bound on our elixir for a while:
+
+    cap = spendable at the tap - 1000 x cost + the most regen possible since the tap
+
+(the regen of the law's rate, 1x / 2x / 3x by the tick, counted as if dated 20 ticks later:
+the clock reads whole seconds and the rate only rises), and decide uses min(elixir_milli,
+cap) in place of elixir_milli. "Spendable at the tap" is the decision's own spendable_milli:
+it already holds the earlier taps' caps and their costs while in flight, so plays in a row
+stack. A cap ends after the first frame whose HUD reading is within 200 milli of it (the
+HUD has caught up), or 30 ticks after its play was paid (a timeout: a refused tap, a misread
+base), or when its tap was never paid (60 ticks, as prune_pending). Why 200 and not 500: on
+that friendly the settled HUD read within -50..+40 milli of the cap; at 500 the cap of a Log
+paid at tick 3069 ended on a reading of 3.99 (cap 3.66) and the HUD's 4.01 of 3070-3073 let a
+Fireball in with ~3.5 real elixir; at 200 every cap still ended within 0-8 ticks of its
+payment, none timed out and none held a card the real elixir paid for. rs_eval, rs_match and
+RL never pass elixir_cap: their decisions are exactly as before.
+
 LEGALITY (anything with bind(state, team) -> check(slot, card, x_sub, y_sub) -> bool):
   BattleLegality(battle)   check_deploy on the battle itself (rs_eval: the match battle).
   TowersOnlyLegality(cfg)  the live case: a RoyaleSim battle (rs_engine.make_battle, no command
@@ -118,7 +141,8 @@ decided on exactly as before, call for call and draw for draw (tests/pipeline/te
            forward pass as the gate (TokenPolicyAdapter.heads); () without a critic.
 
 Pure Python and numpy; royalesim only inside TowersOnlyLegality, torch only inside
-TokenPolicyAdapter. Never imports scripts/gamestate.
+TokenPolicyAdapter, rs_elixir (pure Python, the law) only inside ElixirCap. Never imports
+scripts/gamestate.
 """
 from __future__ import annotations
 
@@ -160,6 +184,10 @@ NO_COST = 99                 # the price of a slot hand_costs does not cover (as
 CAP_ELIXIR = 9500            # milli; never sit at full elixir with a playable card (live_play)
 PENDING_TICKS = 60           # a tap not landed after 3 s is assumed lost (live_play)
 FULL_ELIXIR = 10_000
+# The live elixir cap after our own plays (ElixirCap; module doc, ELIXIR CAP).
+ELIXIR_CAP_TOL = 200         # milli: a cap ends once the HUD reads within this of it
+ELIXIR_CAP_TICKS = 30        # a cap ends this many ticks after its play was paid at the latest
+ELIXIR_CAP_SLACK = 20        # ticks: regen counted as if dated this much later (1 s clock)
 LEGAL_START_TICK = 100       # the legality battle's tick: past match.DEPLOY_LOCKOUT_TICKS (90)
 
 # Wrong-lane guard (a hand-written rule, live_play.py:65-90). Live logs of 2026-10-09: 24% of
@@ -427,16 +455,126 @@ def prune_pending(pending: Iterable[Pending], hand: Sequence[int], now: int,
     return keep
 
 
+@dataclasses.dataclass
+class CapPlay:
+    """One of our taps as ElixirCap follows it: the Pending, the decision's spendable elixir
+    when it was tapped (base_milli) and the tick its card was first seen gone (None: not
+    paid yet)."""
+
+    pending: Pending
+    base_milli: int
+    paid_tick: int | None = None
+
+
+class ElixirCap:
+    """The live runner's upper bound on our elixir in the ticks after its own plays (module
+    doc, ELIXIR CAP). One per battle; never used by rs_eval, rs_match or RL.
+
+        cap = RD.ElixirCap()                          # law: rs_elixir.default_law()
+        cap.sent(RD.Pending(card, cost, slot, tick), d.spendable_milli)   # a tap sent
+        c = cap.observe(now, hud_hand, hud_elixir_milli)   # each decision, after prune_pending
+        RD.decide(..., pending=pending, elixir_cap=c)      # None: no cap on
+
+    observe: a tap whose card has left its slot (prune_pending's rule; its age aside) is paid
+    on that frame and its cap goes on; one never paid is forgotten at `max_age` ticks. The cap
+    of a paid tap is base_milli - 1000 x cost + regen_milli(tap tick, now), at most
+    FULL_ELIXIR; it is on from the frame its tap is paid for `timeout_ticks` ticks (then it
+    times out), and the first frame whose HUD reading is within `tol_milli` of it (or below)
+    is its last (caught up). The frame's cap is the lowest of the caps on (None: none).
+    Counts for the battle_end record: summary()."""
+
+    def __init__(self, law: Any = None, *, tol_milli: int = ELIXIR_CAP_TOL,
+                 timeout_ticks: int = ELIXIR_CAP_TICKS, slack_ticks: int = ELIXIR_CAP_SLACK,
+                 max_age: int = PENDING_TICKS):
+        if law is None:
+            import rs_elixir                       # pure Python; only the live runner gets here
+            law = rs_elixir.default_law()
+        self.law = law
+        self.tol_milli = int(tol_milli)
+        self.timeout_ticks = int(timeout_ticks)
+        self.slack_ticks = int(slack_ticks)
+        self.max_age = int(max_age)
+        self.plays: list[CapPlay] = []
+        self.value: int | None = None              # the last frame's cap (None: none on)
+        self.counts = {"plays": 0, "paid": 0, "caught_up": 0, "timed_out": 0, "lost": 0,
+                       "frames_on": 0}
+
+    def regen_milli(self, tick_from: int, tick_to: int) -> int:
+        """The most elixir (milli, rounded up) the bar can gain from tick_from to tick_to: the
+        law's regen over those ticks dated slack_ticks later (the rate only ever rises)."""
+        if tick_to <= tick_from:
+            return 0
+        s = self.slack_ticks
+        fine = int(self.law.regen(int(tick_from) + s, int(tick_to) + s))
+        return -(-fine * 1000 // int(self.law.scale))
+
+    def cap_of(self, play: CapPlay, now: int) -> int:
+        """The bound one paid play puts on our elixir at `now`."""
+        p = play.pending
+        tick = int(p.tick) if p.tick is not None else int(play.paid_tick or now)
+        return min(FULL_ELIXIR, int(play.base_milli) - 1000 * max(0, int(p.cost))
+                   + self.regen_milli(tick, now))
+
+    def sent(self, pending: Pending, spendable_milli: int) -> None:
+        """A tap sent (a play; a press is not followed): `spendable_milli` is the decision's,
+        the elixir it had for this play."""
+        if getattr(pending, "button", -1) >= 0 or pending.card < 0:
+            return
+        self.plays.append(CapPlay(pending, int(spendable_milli)))
+        self.counts["plays"] += 1
+
+    def observe(self, now: int, hand: Sequence[int], elixir_milli: int | None) -> int | None:
+        """This frame's cap (None: no cap on); see the class doc."""
+        now = int(now)
+        hand = list(hand)
+        keep: list[CapPlay] = []
+        for c in self.plays:
+            p = c.pending
+            if c.paid_tick is None:
+                if p.tick is not None and now - int(p.tick) >= self.max_age:
+                    self.counts["lost"] += 1          # never paid: refused or lost
+                    continue
+                if not prune_pending([p], hand, now, max_age=10 ** 9):
+                    c.paid_tick = now                 # its card left the slot: paid
+                    self.counts["paid"] += 1
+            elif now - int(c.paid_tick) >= self.timeout_ticks:
+                self.counts["timed_out"] += 1
+                continue
+            keep.append(c)
+        on = [(c, self.cap_of(c, now)) for c in keep if c.paid_tick is not None]
+        self.value = min(v for _, v in on) if on else None
+        if on:
+            self.counts["frames_on"] += 1
+        if elixir_milli is not None:                  # caught up: this frame is its last
+            done = {id(c) for c, v in on if int(elixir_milli) <= v + self.tol_milli}
+            self.counts["caught_up"] += len(done)
+            keep = [c for c in keep if id(c) not in done]
+        self.plays = keep
+        return self.value
+
+    def summary(self) -> dict[str, int]:
+        return dict(self.counts)
+
+    def config(self) -> dict[str, int]:
+        return {"tol_milli": self.tol_milli, "timeout_ticks": self.timeout_ticks,
+                "slack_ticks": self.slack_ticks, "max_age": self.max_age}
+
+
 def _spendable(p: Mapping[str, Any], state: Mapping[str, Any], team: int,
-               pending: Iterable[Pending] | None, cfg: DecideConfig) -> tuple[int, list[Pending]]:
-    """(elixir_milli minus our plays in flight, the plays whose slots are blocked)."""
+               pending: Iterable[Pending] | None, cfg: DecideConfig,
+               elixir_cap: int | None = None) -> tuple[int, list[Pending]]:
+    """(elixir_milli, at most elixir_cap, minus our plays in flight; the plays whose slots
+    are blocked)."""
     if pending is None:
         cost = int(p.get("pending_cost", 0) or 0)
         held = engine_pending(state, team) if cfg.mask_pending else []
     else:
         held = list(pending)
         cost = sum(max(0, int(x.cost)) for x in held)
-    return p["elixir_milli"] - cost * 1000, held
+    elixir = p["elixir_milli"]
+    if elixir_cap is not None and int(elixir_cap) < elixir:
+        elixir = int(elixir_cap)
+    return elixir - cost * 1000, held
 
 
 def _pending_slots(held: Iterable[Pending], hand: Sequence[int]) -> set[int]:
@@ -1162,7 +1300,7 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
            pending: Iterable[Pending] | None = None, tick: int | None = None,
            dt: int | None = None, sub: int = SUBTILE_PER_MILLITILE,
            aim: Callable[[np.ndarray, int, int], np.ndarray] | None = None,
-           blocked_tiles: np.ndarray | None = None) -> Decision:
+           blocked_tiles: np.ndarray | None = None, elixir_cap: int | None = None) -> Decision:
     """Wait, play or (cfg.presses, a v2 gate) press for `team` (module doc, THE DECISION).
 
     policy    a TokenPolicyAdapter (or a TokenPolicy, wrapped), or anything with batch(row),
@@ -1180,6 +1318,9 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
     dt        ticks this decision stands for (None: cfg.dt)
     aim       aim(order, slot, card) -> order: re-ranks a slot's tiles (rs_eval --spell-aim)
     blocked_tiles  bool[576], True = never tap there (ability buttons on screen)
+    elixir_cap     the live runner's upper bound on our elixir after its own plays
+                   (ElixirCap.observe; module doc, ELIXIR CAP): spendable is min(elixir_milli,
+                   elixir_cap) minus the plays in flight. None (rs_eval, rs_match, RL): as before
     """
     cfg = DecideConfig() if cfg is None else cfg
     policy = as_policy(policy)
@@ -1204,7 +1345,7 @@ def decide(policy: Any, row: Mapping[str, Any], state: Mapping[str, Any], team: 
     else:
         g = raw.copy() if raw.dtype == np.float32 else raw.astype(np.float32)
     g[0] += cfg.wait_bias
-    spendable, held = _spendable(p, state, team, pending, cfg)
+    spendable, held = _spendable(p, state, team, pending, cfg, elixir_cap)
     blocked = _pending_slots(held, hand) if cfg.mask_pending else set()
     mask = np.zeros(len(g), dtype=bool)
     mask[0] = True

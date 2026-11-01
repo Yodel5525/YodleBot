@@ -42,6 +42,16 @@ rearms it, also when the owner was in MANUAL already as the 3rd one came. The gu
 taps and never sets AUTO. In a dry run it only logs: the AUTO(dry) plays are watched as if
 tapped, the legality and the decisions stay exactly as without it.
 
+OUR ELIXIR AFTER OUR TAPS (tools/rs_decide.ElixirCap, one per battle in BattleContext). The
+card leaves its slot 2-4 ticks after a tap, but the HUD's elixir reading can lag the payment
+and reads high while the counter animates (first --tap friendly, 2026-11-01: 3.00 for 5 ticks
+after a Cannon paid from 4.26; the Log tapped on it was refused). Once a tap of ours is paid
+(its card left the slot), the decision spends at most min(HUD, cap), cap = the decision's
+spendable at the tap - the cost + the most regen possible since (1x / 2x / 3x by the tick),
+until the HUD reads within 0.2 elixir of the cap or 30 ticks pass; taps in a row stack. The
+frame and decision records carry "elixir_cap" when it bites (the cap below the HUD reading),
+battle_end its counts. Only real taps open a cap: a dry run decides exactly as before.
+
 THE TAP GATE (scripts/vision/tap_gate.py and mode.py, skin audit P0-4 and P1-12). Every battle starts
 with no AUTO tap allowed until its gate opens: all four princess labels calibrated (tower skins),
 with a detector, a tower body boxed at each of the six towers (its box centred there, so a skin
@@ -425,6 +435,7 @@ class BattleContext:
     own_plays: int = 0
     last_hud: Hud | None = None
     observer: Any = None              # v2 rows: the battle's public_state.LiveObserver
+    elixir_cap: Any = None            # rs_decide.ElixirCap (Decider.elixir_cap_for), None: off
 
 
 class ResultBook:
@@ -1009,7 +1020,10 @@ class Decider:
 
     state_fn(vf, ctx) -> the state dict (tools/public_state); row_fn(state, mem_view, tick)
     -> the obs_row (tools/rs_rows); policy / legality / config / rng as rs_decide.decide
-    takes them. Our pending taps are pruned against the HUD's hand first (rs_decide).
+    takes them. Our pending taps are pruned against the HUD's hand first (rs_decide), then
+    ctx.elixir_cap (rs_decide.ElixirCap, from elixir_cap() per battle: elixir_cap_for; None
+    turns it off) gives the frame's cap on our elixir after our own taps: decide spends at
+    most min(HUD, cap); no cap while no tap of ours is being paid.
     observer(ctx) -> a new battle's public_state.LiveObserver (v2 rows; make_observer), None
     for legacy rows: the runner keeps it in ctx.observer (observer_for).
 
@@ -1025,7 +1039,8 @@ class Decider:
                  state_fn: Callable[[VisionFrame, BattleContext], dict],
                  row_fn: Callable[[dict, dict, int], Mapping[str, Any]], rng: Any = None,
                  team: int = OWN_TEAM, sub: int = RD.SUBTILE_PER_MILLITILE,
-                 observer: Callable[[BattleContext], Any] | None = None):
+                 observer: Callable[[BattleContext], Any] | None = None,
+                 elixir_cap: Callable[[], Any] | None = RD.ElixirCap):
         self.policy = RD.as_policy(policy)
         self.legality = legality
         self.config = config
@@ -1035,38 +1050,48 @@ class Decider:
         self.team = int(team)
         self.sub = int(sub)
         self.observer = observer
+        self.elixir_cap = elixir_cap
         try:
             base = config if config is not None else RD.DecideConfig()
             self.would_config = base.replace(cap_milli=WOULD_CAP_MILLI)
         except Exception:                            # a config that cannot be copied: no would()
             self.would_config = None
         self.would_rng = np.random.default_rng(0)
-        self._last: tuple[Mapping[str, Any], dict, int, list] | None = None
+        self._last: tuple[Mapping[str, Any], dict, int, list, int | None] | None = None
 
     def observer_for(self, ctx: BattleContext) -> Any:
         """The battle's LiveObserver (v2 rows), None for legacy rows."""
         return None if self.observer is None else self.observer(ctx)
 
+    def elixir_cap_for(self, ctx: BattleContext) -> Any:
+        """The battle's rs_decide.ElixirCap, None when the cap is off (elixir_cap=None)."""
+        return None if self.elixir_cap is None else self.elixir_cap()
+
     def decide(self, vf: VisionFrame, ctx: BattleContext) -> tuple[Any, dict]:
         now_tick = int(vf.tick)
-        ctx.pending = RD.prune_pending(ctx.pending, list(vf.hud.hand), now_tick)
+        hand = list(vf.hud.hand)
+        ctx.pending = RD.prune_pending(ctx.pending, hand, now_tick)
+        ledger = ctx.elixir_cap
+        cap = None if ledger is None else ledger.observe(now_tick, hand, vf.hud.elixir_milli)
         state = self.state_fn(vf, ctx)
         row = self.row_fn(state, ctx.memory.view(now_tick, 0), now_tick)
         d = RD.decide(self.policy, row, state, self.team, self.legality, self.config, rng=self.rng,
                       pending=ctx.pending, tick=now_tick,
-                      dt=RD.cadence_dt(now_tick, ctx.last_decision_tick), sub=self.sub)
+                      dt=RD.cadence_dt(now_tick, ctx.last_decision_tick), sub=self.sub,
+                      **({} if cap is None else {"elixir_cap": cap}))
         ctx.last_decision_tick = now_tick
         ctx.decisions += 1
-        self._last = (row, state, now_tick, list(ctx.pending))
+        self._last = (row, state, now_tick, list(ctx.pending), cap)
         return d, state
 
     def would(self) -> Any:
         """The would-play Decision for the last decision's row and state (class doc), None."""
         if self._last is None or self.would_config is None:
             return None
-        row, state, tick, pending = self._last
+        row, state, tick, pending, cap = self._last
         d = RD.decide(self.policy, row, state, self.team, self.legality, self.would_config,
-                      rng=self.would_rng, pending=pending, tick=tick, dt=1, sub=self.sub)
+                      rng=self.would_rng, pending=pending, tick=tick, dt=1, sub=self.sub,
+                      **({} if cap is None else {"elixir_cap": cap}))
         return d if d.is_play else None
 
 
@@ -1761,6 +1786,11 @@ class VisionPlay:
             self.taps += 1
             ctx.taps += 1
             ctx.pending.append(RD.Pending(d.card, d.cost, d.slot, int(vf.tick)))
+            if ctx.elixir_cap is not None:             # its cap goes on once it is paid
+                try:
+                    ctx.elixir_cap.sent(ctx.pending[-1], d.spendable_milli)
+                except Exception as exc:
+                    self._error("elixir_cap_error", exc, tick=vf.tick)
             self._watch_tap(d, vf, virtual=False)
             ms["capture_to_tap"] = round((self.clock() - float(frame.t)) * 1000.0, 2)
             self._log("tap", battle=ctx.number, tick=int(vf.tick), card=d.card, name=self.name(d.card),
@@ -1776,8 +1806,12 @@ class VisionPlay:
                     ctx.observer.sent(d.card, int(vf.tick), slot=d.slot, cost=d.cost)
                 except Exception as exc:
                     self._error("observer_error", exc, tick=vf.tick)
-        extra: dict[str, Any] = {"battle": ctx.number, "px": px, "ms": dict(ms),
-                                 "elixir": state["players"][OWN_TEAM].get("elixir_milli")}
+        elixir = state["players"][OWN_TEAM].get("elixir_milli")
+        extra: dict[str, Any] = {"battle": ctx.number, "px": px, "ms": dict(ms), "elixir": elixir}
+        cap = getattr(ctx.elixir_cap, "value", None)
+        bites = cap is not None and elixir is not None and cap < elixir
+        if bites:                                      # the decision spent min(HUD, cap)
+            extra["elixir_cap"] = int(cap)
         seen = state.get("observer")
         if seen is not None:                           # v2 rows: what the row was given
             extra["opp_elixir"] = list(seen.get("opp_elixir") or ())
@@ -1790,6 +1824,8 @@ class VisionPlay:
         if d.is_play or self.last_decision is None:   # the status line keeps the last play
             self.last_decision = rec
         out = {"decision": d.to_record(), "action": rec.get("action"), "px": px}
+        if bites:
+            out["elixir_cap"] = int(cap)
         if self._would_due(d, int(vf.tick)):
             w = self._would_play(vf, ms)
             if w is not None:
@@ -1885,6 +1921,12 @@ class VisionPlay:
                 self.ctx.observer = make(self.ctx)
             except Exception as exc:                   # v2 rows then fail: no decision, no tap
                 self._error("observer_error", exc, tick=vf.tick)
+        make = getattr(self.decider, "elixir_cap_for", None)
+        if make is not None:
+            try:
+                self.ctx.elixir_cap = make(self.ctx)
+            except Exception as exc:                   # no cap: the HUD's elixir as before
+                self._error("elixir_cap_error", exc, tick=vf.tick)
 
     def _end_battle(self, vf: VisionFrame) -> None:
         ctx = self.ctx
@@ -1896,6 +1938,9 @@ class VisionPlay:
                                         "opp_cards": [self.name(c) for c in ctx.opp_cards]}
         if ctx is not None and self.unknown_plays:
             stats["opp_unknown"] = ctx.opp_unknown
+        cap_summary = getattr(getattr(ctx, "elixir_cap", None), "summary", None)
+        cap_info = cap_summary() if callable(cap_summary) else {}
+        cap_info = {"elixir_cap": cap_info} if cap_info.get("plays") else {}   # taps were sent
         self.results.open(n, self.battle.ended_reason, float(vf.t_capture), hud.crowns,
                           last_tick=self.battle.last_tick, towers=towers, could_fall=self._could_fall(hud),
                           **stats)
@@ -1904,7 +1949,8 @@ class VisionPlay:
             self.control.set_notice(None)
         self._log("battle_end", battle=n, reason=self.battle.ended_reason, tick=self.battle.last_tick,
                   hud_crowns=list(hud.crowns), towers=towers, **stats, **self._opp_diagnostics(ctx),
-                  **({"towers_info": info} if info else {}), **self._refusal_summary(), **self._gate_summary())
+                  **({"towers_info": info} if info else {}), **self._refusal_summary(), **self._gate_summary(),
+                  **cap_info)
         self.out(f"battle {n} over ({self.battle.ended_reason}) at tick {self.battle.last_tick}")
         try:
             if keeps_towers(self.battle.ended_reason):   # perhaps the same battle coming back
@@ -2423,8 +2469,9 @@ def _main(args: argparse.Namespace) -> int:
         spell_kw["unknown_units"] = True
     builder = PS.PublicStateBuilder(table, spawn, deck=deck_ids, levels=args.level, catalogue=cat,
                                     fields=RR.F, sub=sub, **spell_kw)
+    law = RR.elixir_law(eng)
     observer = make_observer(cat, plan, fields=list(getattr(royalesim, "CATALOGUE_FIELDS", ()) or ())
-                             or None, law=RR.elixir_law(eng) if plan.v2 else None,
+                             or None, law=law if plan.v2 else None,
                              blind=detector is None, observer_cls=PS.LiveObserver)
     # The refused-tap guard (FIX E): its masks reach every decision and would-play through the
     # legality; enforced (masks, MANUAL after k) only once a tapper exists (below).
@@ -2433,7 +2480,8 @@ def _main(args: argparse.Namespace) -> int:
                       state_fn=make_state_fn(builder, perception, plan),
                       row_fn=make_row_fn(RR.obs_row, sub, plan, live_compat=live_compat, units=units,
                                          row_inputs=PS.row_inputs),
-                      rng=np.random.default_rng(args.seed), sub=sub, observer=observer)
+                      rng=np.random.default_rng(args.seed), sub=sub, observer=observer,
+                      elixir_cap=lambda: RD.ElixirCap(law))
 
     # --- taps: only with --tap, a live source, a detector, and a verified emulator -------------
     taps = bool(args.tap)
@@ -2525,6 +2573,10 @@ def _main(args: argparse.Namespace) -> int:
         lines.append("  refusals   refused taps: " + (
             f"logged, masked, MANUAL after {tap_refusals.k} in a battle" if tap_refusals.enforce
             else "(dry run: logs only)"))
+        cap_cfg = RD.ElixirCap(law).config()
+        lines.append(f"  elixir     after each tap of ours is paid: spend at most min(HUD, cap), until the HUD "
+                     f"is within {cap_cfg['tol_milli'] / 1000:g} elixir of it or {cap_cfg['timeout_ticks']} "
+                     f"ticks pass")
         lines.append("  tap gate   no AUTO tap until the towers are calibrated (and boxed by the detector) "
                      "and the mode is classic; else MANUAL" + ("" if tapper is not None
                                                                 else " (dry run: a line only)"))
@@ -2563,6 +2615,7 @@ def _main(args: argparse.Namespace) -> int:
                      clock_templates=bool(hud_reader.clock_reader.ready),
                      **({"rows": plan.to_json()} if plan.v2 else {}),
                      opp_guards=EV.guard_settings(deriver.config), tap_guard=tap_refusals.config(),
+                     elixir_cap=cap_cfg,
                      **({"unknown_plays": {"cost": deriver.config.unknown_cost}} if unknown else {}))
         if detector is None:
             recorder.log("no_detector", error=det_error)
